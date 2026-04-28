@@ -73,6 +73,10 @@ LOGIND_PATH = "/org/freedesktop/login1"
 LOGIND_IFACE = "org.freedesktop.login1.Manager"
 SESSION_IFACE = "org.freedesktop.login1.Session"
 
+UPOWER_BUS = "org.freedesktop.UPower"
+UPOWER_PATH = "/org/freedesktop/UPower"
+UPOWER_IFACE = "org.freedesktop.UPower"
+
 # /sys/.../power/wakeup paths covered by the sleep hook. Keeping this list in
 # one place lets the daemon's startup diagnostic and the hook walk the same
 # devices.
@@ -110,6 +114,8 @@ class EventKind(Enum):
     INHIBITOR_OFF = "InhibitorOff"
     LOCK_ENGAGED = "LockEngaged"
     LOCK_RELEASED = "LockReleased"
+    AC_PLUGGED = "AcPlugged"
+    AC_UNPLUGGED = "AcUnplugged"
     TIMER_EXPIRED = "TimerExpired"
     SCREEN_TIMER_EXPIRED = "ScreenTimerExpired"
     RESUMED = "Resumed"
@@ -129,6 +135,7 @@ class Context:
     logind_inhibitor: bool = False
     wayland_inhibitor: bool = False
     locked: bool = False
+    on_ac: bool = True  # observed but not currently consumed by transitions
     timer_task: asyncio.Task | None = None
     screen_timer_task: asyncio.Task | None = None
     state: State | None = None
@@ -433,6 +440,20 @@ def _hyprlock_running() -> bool:
     )
 
 
+def _read_on_ac_sysfs() -> bool | None:
+    """Read on_ac from /sys/class/power_supply/AC*/online as a fallback for the
+    UPower D-Bus subscription. Returns None on a desktop / no AC supply."""
+    try:
+        for ac in Path("/sys/class/power_supply").glob("A*/online"):
+            try:
+                return ac.read_text().strip() == "1"
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 async def _logind_real_inhibitor_active(manager_iface) -> bool:
     try:
         rows = await manager_iface.call_list_inhibitors()
@@ -569,6 +590,7 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
             real_logind_inh = await _logind_real_inhibitor_active(manager_iface)
             real_wayland_inh = _wayland_inhibitor_active()
             real_locked = _hyprlock_running()
+            real_on_ac = _read_on_ac_sysfs()
         except Exception as e:
             LOG.warning("reconciler snapshot failed: %s", e)
             continue
@@ -589,6 +611,9 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         if real_locked != ctx.locked:
             drift.append(f"locked {ctx.locked}->{real_locked} (pgrep fallback)")
             ctx.locked = real_locked
+        if real_on_ac is not None and real_on_ac != ctx.on_ac:
+            drift.append(f"on_ac {ctx.on_ac}->{real_on_ac} (sysfs fallback)")
+            ctx.on_ac = real_on_ac
 
         if drift:
             LOG.warning("reconciler ctx drift: %s", "; ".join(drift))
@@ -611,6 +636,42 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         # doesn't expose per-monitor dpms status cleanly, so we just re-apply.
         if ctx.screen_state is ScreenState.DIMMED:
             fx.dpms(False)
+
+
+async def setup_upower_watcher(bus, queue: asyncio.Queue, ctx: Context) -> None:
+    """Subscribe to UPower's OnBattery property. Currently observed only —
+    no transition consumes ctx.on_ac. Wired in so future power-aware behaviour
+    has a clean signal to attach to.
+    """
+    try:
+        introspect = await bus.introspect(UPOWER_BUS, UPOWER_PATH)
+        obj = bus.get_proxy_object(UPOWER_BUS, UPOWER_PATH, introspect)
+        props = obj.get_interface("org.freedesktop.DBus.Properties")
+        upower = obj.get_interface(UPOWER_IFACE)
+    except Exception as e:
+        LOG.warning("UPower interface unavailable: %s — on_ac left at default", e)
+        return
+
+    try:
+        ctx.on_ac = not bool(await upower.get_on_battery())
+    except Exception as e:
+        LOG.warning("initial OnBattery read failed: %s", e)
+
+    def on_props_changed(iface: str, changed: dict, _invalidated: list):
+        if iface != UPOWER_IFACE:
+            return
+        if "OnBattery" not in changed:
+            return
+        new_on_ac = not bool(changed["OnBattery"].value)
+        if new_on_ac == ctx.on_ac:
+            return
+        ctx.on_ac = new_on_ac
+        asyncio.create_task(queue.put(
+            Event(EventKind.AC_PLUGGED if new_on_ac else EventKind.AC_UNPLUGGED)
+        ))
+
+    props.on_properties_changed(on_props_changed)
+    LOG.info("subscribed to UPower OnBattery (on_ac=%s)", ctx.on_ac)
 
 
 async def setup_logind_watchers(
@@ -723,8 +784,8 @@ async def dispatcher(
     state = initial
     ctx.state = state
     LOG.info(
-        "initial state: %s (ext_mon=%d, inhibitor=%s, locked=%s)",
-        state.value, ctx.ext_mon_count, ctx.inhibitor, ctx.locked,
+        "initial state: %s (ext_mon=%d, inhibitor=%s, locked=%s, on_ac=%s)",
+        state.value, ctx.ext_mon_count, ctx.inhibitor, ctx.locked, ctx.on_ac,
     )
     await on_enter(state, ctx, fx)
 
@@ -767,22 +828,28 @@ async def dispatcher(
         # LOCK_ENGAGED/RELEASED already update ctx.locked in the
         # PropertiesChanged callback (eager).
 
+        # AC_PLUGGED/AC_UNPLUGGED: ctx.on_ac was already set in the
+        # PropertiesChanged callback. We log the event but no transition
+        # currently consumes it.
+        if ev.kind in (EventKind.AC_PLUGGED, EventKind.AC_UNPLUGGED):
+            LOG.info("AC: %s (on_ac=%s)", ev.kind.value, ctx.on_ac)
+
         # ---- main FSM ----
         new = desired_state(state, ev.kind, ctx)
         if new is not None and new is not state:
             LOG.info(
-                "STATE: %s -> %s (event=%s, ext_mon=%d, inhibitor=%s, locked=%s)",
+                "STATE: %s -> %s (event=%s, ext_mon=%d, inhibitor=%s, locked=%s, on_ac=%s)",
                 state.value, new.value, ev.kind.value,
-                ctx.ext_mon_count, ctx.inhibitor, ctx.locked,
+                ctx.ext_mon_count, ctx.inhibitor, ctx.locked, ctx.on_ac,
             )
             state = new
             ctx.state = state
             await on_enter(state, ctx, fx)
         else:
             LOG.debug(
-                "ignored: %s in %s (ext_mon=%d, inhibitor=%s, locked=%s)",
+                "ignored: %s in %s (ext_mon=%d, inhibitor=%s, locked=%s, on_ac=%s)",
                 ev.kind.value, state.value,
-                ctx.ext_mon_count, ctx.inhibitor, ctx.locked,
+                ctx.ext_mon_count, ctx.inhibitor, ctx.locked, ctx.on_ac,
             )
 
         # ---- sub-FSM ----
@@ -839,6 +906,7 @@ async def daemon_main() -> None:
 
     # Resolve session, subscribe, snapshot.
     session = await setup_logind_watchers(bus, manager, queue, ctx)
+    await setup_upower_watcher(bus, queue, ctx)
     fx = Effectors(bus, manager, session, queue)
     fx._lid_inhibit_fd = fx_partial._lid_inhibit_fd
 

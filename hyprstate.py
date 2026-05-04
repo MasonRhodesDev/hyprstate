@@ -53,12 +53,15 @@ LOG = logging.getLogger("hyprstate")
 EDP_MONITOR = "eDP-2"
 MONITORS_CONF = Path.home() / ".config/hypr/configs/monitors.conf"
 HYPRIDLE_LOG = Path.home() / ".config/hypr/logs/hypridle.log"
+PROFILES_DIR = Path.home() / ".config/hypr/profiles"
+ACTIVE_PROFILE_LINK = PROFILES_DIR / ".active.conf"
 
 GRACE_SECONDS = 30
 DPMS_DELAY_SECONDS = 30
 LOCK_WAIT_SECONDS = 2.0
 INHIBIT_POLL_SECONDS = 2
 RECONCILE_SECONDS = 5
+PROFILE_DEBOUNCE_SECONDS = 0.5  # coalesce monitor add/remove bursts
 
 INHIBIT_BASELINE_WHO = frozenset({
     "ModemManager",
@@ -123,6 +126,7 @@ class EventKind(Enum):
     SCREEN_TIMER_EXPIRED = "ScreenTimerExpired"
     RESUMED = "Resumed"
     RECONCILE = "Reconcile"
+    MONITORS_CHANGED = "MonitorsChanged"  # debounced; fires on add/remove bursts
 
 
 @dataclass
@@ -144,9 +148,134 @@ class Context:
     state: State | None = None
     screen_state: ScreenState = ScreenState.ACTIVE
 
+    # Profile sub-FSM: current_profile is the name of the .conf in PROFILES_DIR
+    # currently pointed at by .active.conf (or None if unmanaged). edp_policy is
+    # set from the active profile's `#@ edp =` directive and mediates set_edp().
+    current_profile: str | None = None
+    edp_policy: str = "auto"  # "auto" | "enable" | "disable"
+    profile_debounce_task: asyncio.Task | None = None
+
     @property
     def inhibitor(self) -> bool:
         return self.logind_inhibitor or self.wayland_inhibitor
+
+
+# =========================================================================
+# Monitor profiles
+# =========================================================================
+#
+# A profile is a single .conf in PROFILES_DIR with `#@ key = value` directive
+# comments at the top. Hyprland sources the active profile via a symlink
+# (.active.conf -> the chosen file) which the daemon repoints. Selection is
+# pure: given the set of detected monitor descriptions, pick the profile with
+# the most specific match (or highest explicit `#@ priority`).
+
+
+@dataclass(frozen=True)
+class Profile:
+    name: str
+    path: Path
+    matches: tuple[str, ...]
+    edp: str  # "auto" | "enable" | "disable"
+    hooks: tuple[str, ...]
+    priority: int  # explicit `#@ priority`; defaults to len(matches)
+
+
+_DIRECTIVE_RE = re.compile(r"^#@\s*([a-z]+)\s*=\s*(.+?)\s*$")
+
+
+def load_profiles(profiles_dir: Path = PROFILES_DIR) -> list[Profile]:
+    """Read every *.conf in PROFILES_DIR (excluding the `.active.conf` symlink
+    and any leading-dot file). Malformed profiles are logged and skipped."""
+    profiles: list[Profile] = []
+    if not profiles_dir.is_dir():
+        return profiles
+    for path in sorted(profiles_dir.glob("*.conf")):
+        if path.name.startswith("."):
+            continue
+        try:
+            profiles.append(_parse_profile(path))
+        except Exception as e:
+            LOG.warning("skipping malformed profile %s: %s", path, e)
+    return profiles
+
+
+def _parse_profile(path: Path) -> Profile:
+    matches: list[str] = []
+    hooks: list[str] = []
+    edp = "auto"
+    priority: int | None = None
+    with path.open() as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line.startswith("#@"):
+                # Stop scanning once the body begins. Profile directives must
+                # all sit in the leading comment block — anything below is
+                # passed through to Hyprland as-is.
+                if line.lstrip().startswith("#") or not line.strip():
+                    continue
+                break
+            m = _DIRECTIVE_RE.match(line)
+            if not m:
+                LOG.warning("%s: ignoring malformed directive: %r", path.name, line)
+                continue
+            key, val = m.group(1), m.group(2)
+            if key == "match":
+                matches.append(val)
+            elif key == "hook":
+                hooks.append(val)
+            elif key == "edp":
+                if val not in ("auto", "enable", "disable"):
+                    raise ValueError(f"edp must be auto|enable|disable, got {val!r}")
+                edp = val
+            elif key == "priority":
+                priority = int(val)
+            else:
+                LOG.warning("%s: unknown directive %r", path.name, key)
+    if not matches:
+        raise ValueError("profile has no `#@ match = ...` directives")
+    return Profile(
+        name=path.stem,
+        path=path,
+        matches=tuple(matches),
+        edp=edp,
+        hooks=tuple(hooks),
+        priority=priority if priority is not None else len(matches),
+    )
+
+
+def select_profile(
+    signature: frozenset[str], profiles: list[Profile]
+) -> Profile | None:
+    """Pure: pick the profile whose match set is a subset of `signature`,
+    breaking ties by `priority` (descending). `signature` is the set of
+    monitor descriptions reported by `hyprctl monitors -j` (full strings)."""
+    candidates = [
+        p for p in profiles
+        if all(_match_in_signature(m, signature) for m in p.matches)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: (p.priority, len(p.matches), p.name))
+
+
+def _match_in_signature(match: str, signature: frozenset[str]) -> bool:
+    """A `#@ match = ...` directive matches if any detected monitor description
+    starts with the directive's value. The `desc:` prefix (Hyprland syntax) is
+    stripped for comparison so users can paste rules from monitors.conf
+    verbatim."""
+    needle = match.removeprefix("desc:").strip()
+    return any(desc.startswith(needle) for desc in signature)
+
+
+def monitor_signature() -> frozenset[str]:
+    """Snapshot of currently-connected monitor descriptions from hyprctl."""
+    try:
+        out = run(["hyprctl", "-j", "monitors"]).stdout
+        return frozenset(m.get("description", "") for m in json.loads(out))
+    except Exception as e:
+        LOG.warning("monitor_signature failed: %s", e)
+        return frozenset()
 
 
 # =========================================================================
@@ -173,7 +302,15 @@ class Effectors:
         self._lid_inhibit_fd = fd
         LOG.info("acquired handle-lid-switch inhibitor (fd=%d)", fd)
 
-    def set_edp(self, on: bool) -> None:
+    def set_edp(self, on: bool, ctx: Context | None = None) -> None:
+        # The active profile's `#@ edp` directive overrides the lid-driven
+        # default: docked profiles ("disable") keep eDP off even when the lid
+        # opens; "enable" forces it on; "auto" defers to the caller.
+        if ctx is not None:
+            if ctx.edp_policy == "disable":
+                on = False
+            elif ctx.edp_policy == "enable":
+                on = True
         current_disabled = _edp_is_disabled()
         if on:
             if current_disabled is False:
@@ -185,6 +322,57 @@ class Effectors:
                 return
             LOG.info("disabling %s", EDP_MONITOR)
             run(["hyprctl", "keyword", "monitor", f"{EDP_MONITOR},disable"], check=False)
+
+    def apply_profile(self, profile: Profile, ctx: Context) -> None:
+        """Repoint .active.conf at `profile.path`, run `hyprctl reload`, fire
+        post-apply hooks, then update ctx.current_profile / edp_policy.
+        Idempotent: a no-op when already pointing at the same profile."""
+        target = profile.path
+        link = ACTIVE_PROFILE_LINK
+        try:
+            if link.is_symlink() and link.resolve() == target.resolve():
+                if ctx.current_profile == profile.name:
+                    return  # already applied
+            link.parent.mkdir(parents=True, exist_ok=True)
+            tmp = link.with_suffix(link.suffix + ".tmp")
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+            tmp.symlink_to(target)
+            tmp.replace(link)  # atomic
+        except OSError as e:
+            LOG.error("apply_profile %s: symlink failed: %s", profile.name, e)
+            return
+
+        LOG.info("PROFILE: %s -> %s (edp=%s, hooks=%d)",
+                 ctx.current_profile, profile.name, profile.edp, len(profile.hooks))
+        ctx.current_profile = profile.name
+        ctx.edp_policy = profile.edp
+
+        run(["hyprctl", "reload"], check=False)
+        for cmd in profile.hooks:
+            try:
+                # Profiles run in user context; shell to allow ~ expansion etc.
+                # Hooks are user-authored so this is no broader than what they
+                # can already write into the .conf body.
+                subprocess.Popen(["bash", "-lc", cmd])
+            except Exception as e:
+                LOG.warning("hook %r failed to launch: %s", cmd, e)
+
+    def schedule_profile_reconcile(self, ctx: Context) -> None:
+        """Debounce monitor add/remove bursts. Multiple events within
+        PROFILE_DEBOUNCE_SECONDS coalesce into one MONITORS_CHANGED."""
+        if ctx.profile_debounce_task and not ctx.profile_debounce_task.done():
+            ctx.profile_debounce_task.cancel()
+        ctx.profile_debounce_task = asyncio.create_task(
+            self._profile_debounce_coro()
+        )
+
+    async def _profile_debounce_coro(self) -> None:
+        try:
+            await asyncio.sleep(PROFILE_DEBOUNCE_SECONDS)
+            await self.queue.put(Event(EventKind.MONITORS_CHANGED))
+        except asyncio.CancelledError:
+            pass
 
     def cancel_timer(self, ctx: Context) -> None:
         if ctx.timer_task and not ctx.timer_task.done():
@@ -268,22 +456,22 @@ async def on_enter(state: State, ctx: Context, fx: Effectors) -> None:
 
 def _on_enter_lid_open(ctx: Context, fx: Effectors) -> None:
     fx.cancel_timer(ctx)
-    fx.set_edp(True)
+    fx.set_edp(True, ctx)
 
 
 def _on_enter_docked(ctx: Context, fx: Effectors) -> None:
     fx.cancel_timer(ctx)
-    fx.set_edp(False)
+    fx.set_edp(False, ctx)
 
 
 def _on_enter_deferred(ctx: Context, fx: Effectors) -> None:
     fx.cancel_timer(ctx)
-    fx.set_edp(False)
+    fx.set_edp(False, ctx)
     fx.pause_media()
 
 
 def _on_enter_countdown(ctx: Context, fx: Effectors) -> None:
-    fx.set_edp(False)
+    fx.set_edp(False, ctx)
     fx.start_grace_timer(ctx)
 
 
@@ -624,16 +812,25 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         if ctx.state is None or ctx.state is State.SUSPENDING:
             continue
 
-        # eDP invariant.
+        # eDP invariant. The profile's edp_policy can override the
+        # lid-driven default, so the reconciler routes through set_edp(...,
+        # ctx) and only logs drift when the *resolved* policy is being
+        # violated.
         edp_disabled = _edp_is_disabled()
         should_be_enabled = ctx.state is State.LID_OPEN
+        if ctx.edp_policy == "disable":
+            should_be_enabled = False
+        elif ctx.edp_policy == "enable":
+            should_be_enabled = True
         if edp_disabled is not None:
             if should_be_enabled and edp_disabled:
-                LOG.warning("reconciler: state=%s but eDP disabled — re-enabling", ctx.state.value)
-                fx.set_edp(True)
+                LOG.warning("reconciler: state=%s edp_policy=%s but eDP disabled — re-enabling",
+                            ctx.state.value, ctx.edp_policy)
+                fx.set_edp(True, ctx)
             elif (not should_be_enabled) and (not edp_disabled):
-                LOG.warning("reconciler: state=%s but eDP enabled — re-disabling", ctx.state.value)
-                fx.set_edp(False)
+                LOG.warning("reconciler: state=%s edp_policy=%s but eDP enabled — re-disabling",
+                            ctx.state.value, ctx.edp_policy)
+                fx.set_edp(False, ctx)
 
         # DPMS-DIMMED invariant: re-issue dpms off (idempotent). hyprctl
         # doesn't expose per-monitor dpms status cleanly, so we just re-apply.
@@ -818,6 +1015,22 @@ async def dispatcher(
             ctx.lid_closed = False
         elif ev.kind in (EventKind.MONITOR_ADDED, EventKind.MONITOR_REMOVED):
             ctx.ext_mon_count = _hyprctl_ext_monitor_count()
+            # Debounce: monitor changes often arrive in bursts (mode/scale
+            # negotiation). Coalesce into a single MONITORS_CHANGED event
+            # before reconciling the active profile.
+            fx.schedule_profile_reconcile(ctx)
+        elif ev.kind is EventKind.MONITORS_CHANGED:
+            sig = monitor_signature()
+            profiles = load_profiles()
+            chosen = select_profile(sig, profiles)
+            if chosen is None:
+                LOG.info("PROFILE: no match for signature=%s (have %d profiles)",
+                         sorted(sig), len(profiles))
+            elif chosen.name != ctx.current_profile:
+                fx.apply_profile(chosen, ctx)
+            else:
+                LOG.debug("PROFILE: signature change but %s still wins", chosen.name)
+            continue  # profile reconciliation does not feed the main FSM
         elif ev.kind is EventKind.INHIBITOR_ON:
             if ev.payload == "logind":
                 ctx.logind_inhibitor = True
@@ -917,6 +1130,25 @@ async def daemon_main() -> None:
     ctx.logind_inhibitor = await _logind_real_inhibitor_active(manager)
     ctx.wayland_inhibitor = _wayland_inhibitor_active()
     ctx.ext_mon_count = _hyprctl_ext_monitor_count()
+
+    # Seed the active profile from the existing .active.conf symlink (if any),
+    # so subsequent reconciles can detect "no change" instead of forcing a
+    # spurious hyprctl reload at startup. Then queue a one-shot
+    # MONITORS_CHANGED to align with reality (covers profiles edited offline
+    # or monitors plugged while the daemon was down).
+    try:
+        if ACTIVE_PROFILE_LINK.is_symlink():
+            ctx.current_profile = ACTIVE_PROFILE_LINK.resolve().stem
+            for p in load_profiles():
+                if p.name == ctx.current_profile:
+                    ctx.edp_policy = p.edp
+                    break
+    except OSError as e:
+        LOG.warning("could not read %s: %s", ACTIVE_PROFILE_LINK, e)
+    LOG.info("initial profile: %s (edp_policy=%s)",
+             ctx.current_profile, ctx.edp_policy)
+    await queue.put(Event(EventKind.MONITORS_CHANGED))
+
     if session is not None:
         try:
             ctx.locked = bool(await session.get_locked_hint())
@@ -1066,6 +1298,60 @@ def status_main() -> int:
     return 0
 
 
+def profile_main(action: str, name: str | None = None) -> int:
+    """CLI: profile list | current | switch <name>.
+
+    The daemon's MONITORS_CHANGED handler is the canonical apply path.
+    `switch` repoints .active.conf and signals SIGHUP-equivalent by
+    poking the daemon: it'll re-evaluate via `hyprctl reload` reaching the
+    socket2 `configreloaded` event, then a synthesized MONITORS_CHANGED."""
+    profiles = load_profiles()
+    sig = monitor_signature()
+
+    if action == "list":
+        for p in sorted(profiles, key=lambda p: -p.priority):
+            matches = ", ".join(p.matches)
+            applies = "✓" if all(_match_in_signature(m, sig) for m in p.matches) else " "
+            print(f"  [{applies}] {p.name:<28} prio={p.priority} edp={p.edp:<7} match=[{matches}]")
+        return 0
+
+    if action == "current":
+        try:
+            target = ACTIVE_PROFILE_LINK.resolve()
+            print(target.stem if ACTIVE_PROFILE_LINK.is_symlink() else "(no active profile)")
+        except OSError:
+            print("(no active profile)")
+        return 0
+
+    if action == "switch":
+        if not name:
+            print("switch requires a profile name", file=sys.stderr)
+            return 2
+        match = next((p for p in profiles if p.name == name), None)
+        if match is None:
+            print(f"unknown profile: {name}", file=sys.stderr)
+            print("available:", ", ".join(p.name for p in profiles), file=sys.stderr)
+            return 1
+        # Repoint the symlink atomically; the daemon's reconciler will pick
+        # up the change on its next pass, but we also call hyprctl reload
+        # directly so the user sees the effect immediately.
+        try:
+            tmp = ACTIVE_PROFILE_LINK.with_suffix(ACTIVE_PROFILE_LINK.suffix + ".tmp")
+            if tmp.exists() or tmp.is_symlink():
+                tmp.unlink()
+            tmp.symlink_to(match.path)
+            tmp.replace(ACTIVE_PROFILE_LINK)
+        except OSError as e:
+            print(f"symlink failed: {e}", file=sys.stderr)
+            return 1
+        subprocess.run(["hyprctl", "reload"], check=False)
+        print(f"switched to {name}")
+        return 0
+
+    print(f"unknown action: {action}", file=sys.stderr)
+    return 2
+
+
 # =========================================================================
 # Entrypoint
 # =========================================================================
@@ -1082,6 +1368,9 @@ def main(argv: list[str]) -> int:
     sub.add_parser("install", help="run install.sh")
     sub.add_parser("uninstall", help="reverse install")
     sub.add_parser("status", help="systemctl + journalctl summary")
+    p_prof = sub.add_parser("profile", help="list / current / switch monitor profiles")
+    p_prof.add_argument("action", choices=["list", "current", "switch"])
+    p_prof.add_argument("name", nargs="?", default=None)
 
     args = parser.parse_args(argv)
     if args.cmd == "daemon":
@@ -1103,6 +1392,8 @@ def main(argv: list[str]) -> int:
         return uninstall_main()
     if args.cmd == "status":
         return status_main()
+    if args.cmd == "profile":
+        return profile_main(args.action, args.name)
     return 1
 
 

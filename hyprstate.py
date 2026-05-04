@@ -732,14 +732,16 @@ async def hypr_socket_reader(queue: asyncio.Queue, ctx: Context) -> None:
 
 
 def _parse_hypr_event(line: str) -> Event | None:
+    # Monitor events fire for all outputs (including eDP). The dispatcher's
+    # MONITOR_ADDED/REMOVED handler delegates to _hyprctl_ext_monitor_count
+    # for the lid-FSM count (which itself filters eDP), and feeds
+    # schedule_profile_reconcile which considers the full output set.
     if line.startswith(("monitoradded>>", "monitoraddedv2>>")):
         name = line.split(">>", 1)[1].split(",")[0]
-        if not name.startswith("eDP"):
-            return Event(EventKind.MONITOR_ADDED, payload=name)
+        return Event(EventKind.MONITOR_ADDED, payload=name)
     elif line.startswith("monitorremoved>>"):
         name = line.split(">>", 1)[1]
-        if not name.startswith("eDP"):
-            return Event(EventKind.MONITOR_REMOVED, payload=name)
+        return Event(EventKind.MONITOR_REMOVED, payload=name)
     elif line.startswith("configreloaded"):
         return Event(EventKind.RECONCILE, payload="configreloaded")
     return None

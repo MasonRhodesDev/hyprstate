@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hypr-power: lid / monitor / lock / suspend / wake state machine for Hyprland.
+hyprstate: lid / monitor / profile / lock / suspend / wake state machine for Hyprland.
 
 Subcommands:
     daemon            run the FSM (via systemd --user)
@@ -8,6 +8,7 @@ Subcommands:
     install           idempotent install (delegates to install.sh)
     uninstall         reverse install
     status            short systemctl + journalctl summary
+    profile           list / show / switch monitor profiles
 
 Daemon owns:
     - eDP-2 enable/disable
@@ -16,6 +17,7 @@ Daemon owns:
     - Lock-before-suspend (Session.Lock + 2s wait for LockedHint)
     - DPMS-off sub-FSM when locked + inhibitor with active screens
     - logind handle-lid-switch inhibitor lock (held for process lifetime)
+    - Monitor-profile selection by detected-output signature
 
 Architecture (daemon):
     Layer 1 — Effectors:        narrow, idempotent world mutations.
@@ -42,7 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-LOG = logging.getLogger("hypr-power")
+LOG = logging.getLogger("hyprstate")
 
 # =========================================================================
 # Constants
@@ -64,8 +66,9 @@ INHIBIT_BASELINE_WHO = frozenset({
     "UPower",
     "hypridle",
     "logind-idle-control",
-    "hypr-power",
-    "hypr-fsm",  # transitional; predecessor name
+    "hyprstate",
+    "hypr-power",  # transitional; predecessor name
+    "hypr-fsm",    # transitional; earlier predecessor
 })
 
 LOGIND_BUS = "org.freedesktop.login1"
@@ -163,7 +166,7 @@ class Effectors:
         """Hold a block-mode handle-lid-switch inhibitor for our process lifetime."""
         fd = await self.manager.call_inhibit(
             "handle-lid-switch",
-            "hypr-power",
+            "hyprstate",
             "30s grace window with monitor/inhibitor cancellation",
             "block",
         )
@@ -883,7 +886,7 @@ async def daemon_main() -> None:
         LOG.info("usb-wake state: %s", line)
         bad = [k for k, v in wake.items() if v != "enabled"]
         if bad:
-            LOG.warning("wake disabled on: %s — install sleep hook (`hypr-power install`)",
+            LOG.warning("wake disabled on: %s — install sleep hook (`hyprstate install`)",
                         ", ".join(bad))
     else:
         LOG.info("usb-wake state: (none of the tracked devices found)")
@@ -944,12 +947,12 @@ def sleep_hook_main(action: str) -> int:
     if action not in ("pre", "post"):
         return 0  # systemd-suspend may fire this with other actions; ignore.
 
-    log_path = Path("/var/log/hypr-power-sleep.log")
+    log_path = Path("/var/log/hyprstate-sleep.log")
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_fh = log_path.open("a")
     except OSError as e:
-        sys.stderr.write(f"hypr-power sleep-hook: cannot open log: {e}\n")
+        sys.stderr.write(f"hyprstate sleep-hook: cannot open log: {e}\n")
         log_fh = sys.stderr
 
     def log(msg: str) -> None:
@@ -1034,10 +1037,10 @@ def install_main() -> int:
 
 def uninstall_main() -> int:
     cmds = [
-        ["systemctl", "--user", "disable", "--now", "hypr-power.service"],
-        ["sudo", "rm", "-f", "/usr/local/bin/hypr-power",
-         "/usr/lib/systemd/system-sleep/hypr-power"],
-        ["rm", "-f", str(Path.home() / ".config/systemd/user/hypr-power.service")],
+        ["systemctl", "--user", "disable", "--now", "hyprstate.service"],
+        ["sudo", "rm", "-f", "/usr/local/bin/hyprstate",
+         "/usr/lib/systemd/system-sleep/hyprstate"],
+        ["rm", "-f", str(Path.home() / ".config/systemd/user/hyprstate.service")],
         ["systemctl", "--user", "daemon-reload"],
     ]
     rc = 0
@@ -1052,11 +1055,11 @@ def uninstall_main() -> int:
 
 
 def status_main() -> int:
-    print("=== systemctl --user status hypr-power.service ===")
-    subprocess.run(["systemctl", "--user", "status", "hypr-power.service",
+    print("=== systemctl --user status hyprstate.service ===")
+    subprocess.run(["systemctl", "--user", "status", "hyprstate.service",
                     "--no-pager"], check=False)
     print("\n=== last 20 log lines ===")
-    subprocess.run(["journalctl", "--user", "-u", "hypr-power.service",
+    subprocess.run(["journalctl", "--user", "-u", "hyprstate.service",
                     "-n", "20", "--no-pager"], check=False)
     print("\n=== logind handle-lid-switch inhibitor ===")
     subprocess.run(["systemd-inhibit", "--list", "--no-pager"], check=False)
@@ -1069,7 +1072,7 @@ def status_main() -> int:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="hypr-power")
+    parser = argparse.ArgumentParser(prog="hyprstate")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon", help="run the FSM (systemd --user)")
     p_hook = sub.add_parser("sleep-hook", help="invoked by systemd-suspend (root)")

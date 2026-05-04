@@ -1,7 +1,7 @@
-# /etc/udev/rules.d/60-hypr-power-usb-wake.rules
+# /etc/udev/rules.d/60-hyprstate-usb-wake.rules
 #
 # Make USB input devices wake-capable as soon as they're plugged in. Together
-# with the systemd-sleep hook (`hypr-power sleep-hook`), this guarantees that
+# with the systemd-sleep hook (`hyprstate sleep-hook`), this guarantees that
 # `/sys/<device>/power/wakeup` is "enabled" on every relevant device:
 #   - the udev rule covers initial enumeration and hotplug
 #   - the sleep hook covers the case where the kernel resets state on resume

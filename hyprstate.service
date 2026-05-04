@@ -1,12 +1,12 @@
 [Unit]
-Description=hypr-power: Lid / Monitor / Lock / Suspend state machine
+Description=hyprstate: Hyprland session state machine (lid / monitors / profiles / lock / suspend)
 After=graphical-session.target
 PartOf=graphical-session.target
 Requisite=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/hypr-power daemon
+ExecStart=/usr/local/bin/hyprstate daemon
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

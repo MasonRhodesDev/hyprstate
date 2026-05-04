@@ -1,11 +1,12 @@
-# hypr-power
+# hyprstate
 
-Single-process power-management state machine for Hyprland on Framework 16.
+Single-process session state machine for Hyprland on Framework 16. Owns lid, monitor profiles, eDP-2, lock, suspend, and USB-wake.
 
 ## What it owns
 
 - **Lid switch.** Holds a logind `handle-lid-switch:block` inhibitor so logind doesn't suspend on lid close. The FSM decides instead.
 - **eDP-2 enable/disable.** Disabled when lid closed, re-enabled (via `hyprctl reload`) when lid opens. Hard invariant — re-asserted by a 5s reconciler and on `configreloaded` events.
+- **Monitor profiles.** Auto-applies a profile based on the set of currently-connected monitors. Profiles live as `.conf` snippets in `~/.config/hypr/profiles/` with `#@` directive comments for match signature, hooks, and eDP policy.
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
 - **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for `LockedHint=true`.
@@ -15,8 +16,8 @@ Single-process power-management state machine for Hyprland on Framework 16.
 ## Layout
 
 ```
-hypr-power.py            single-file program with all subcommands
-hypr-power.service       systemd --user unit
+hyprstate.py             single-file program with all subcommands
+hyprstate.service        systemd --user unit
 system-sleep-hook.sh     wrapper invoked by /usr/lib/systemd/system-sleep/
 install.sh               idempotent installer
 ```
@@ -24,11 +25,14 @@ install.sh               idempotent installer
 ## Subcommands
 
 ```
-hypr-power daemon              # run the FSM (systemd --user)
-hypr-power sleep-hook pre|post # invoked by systemd-suspend (root)
-hypr-power install             # symlink + drop systemd unit
-hypr-power uninstall           # reverse install
-hypr-power status              # systemctl + journalctl summary
+hyprstate daemon              # run the FSM (systemd --user)
+hyprstate sleep-hook pre|post # invoked by systemd-suspend (root)
+hyprstate install             # symlink + drop systemd unit
+hyprstate uninstall           # reverse install
+hyprstate status              # systemctl + journalctl summary
+hyprstate profile list        # list known profiles
+hyprstate profile current     # show currently-applied profile
+hyprstate profile switch NAME # force-apply a profile
 ```
 
 ## Install
@@ -37,13 +41,13 @@ hypr-power status              # systemctl + journalctl summary
 ./install.sh        # one sudo prompt, symlinks system bits
 ```
 
-The installer migrates from the older standalone `hypr-fsm.service` and removes the orphan `~/.local/share/systemd-sleep-hooks/usb-wake`.
+The installer migrates from predecessor names (`hypr-power.service`, `hypr-fsm.service`) and removes the orphan `~/.local/share/systemd-sleep-hooks/usb-wake`.
 
 ## Debug
 
 ```
-journalctl --user -u hypr-power.service -f       # daemon log
-sudo tail -f /var/log/hypr-power-sleep.log       # sleep hook log
+journalctl --user -u hyprstate.service -f       # daemon log
+sudo tail -f /var/log/hyprstate-sleep.log       # sleep hook log
 ```
 
 ## Dependencies

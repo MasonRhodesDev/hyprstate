@@ -312,6 +312,8 @@ class Effectors:
             elif ctx.edp_policy == "enable":
                 on = True
         current_disabled = _edp_is_disabled()
+        if current_disabled is None:
+            return  # eDP monitor not present; nothing to do
         if on:
             if current_disabled is False:
                 return

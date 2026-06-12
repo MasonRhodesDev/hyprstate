@@ -13,6 +13,32 @@ pub const LID_STATE_GLOB_DIR: &str = "/proc/acpi/button/lid";
 /// boot where DP links aren't up at early-login sysfs read).
 pub const GPU_SETTLE: Duration = Duration::from_millis(500);
 
+// ---- daemon timing ----
+
+pub const GRACE_SECONDS: Duration = Duration::from_secs(30);
+pub const DPMS_DELAY: Duration = Duration::from_secs(30);
+pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+pub const INHIBIT_POLL: Duration = Duration::from_secs(2);
+pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// Coalesce monitor add/remove bursts before profile reconciliation.
+pub const PROFILE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// AC plug-jiggle settle window before power policy reacts.
+pub const POWER_AC_DEBOUNCE: Duration = Duration::from_secs(5);
+pub const GPU_NOTIFY_MIN: Duration = Duration::from_secs(60);
+
+/// logind inhibitor holders that do NOT count as "a real inhibitor is
+/// active" (baseline daemons + our own).
+pub const INHIBIT_BASELINE_WHO: [&str; 8] = [
+    "ModemManager",
+    "NetworkManager",
+    "UPower",
+    "hypridle",
+    "logind-idle-control",
+    "hyprstate",
+    "hypr-power", // transitional; predecessor name
+    "hypr-fsm",   // transitional; earlier predecessor
+];
+
 fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }

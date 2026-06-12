@@ -1,0 +1,14 @@
+[package]
+name = "hyprstate"
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+description = "Hyprland session/power state machine: lid, monitors, profiles, GPU selection, powerd"
+repository = "https://github.com/MasonRhodesDev/hyprstate"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+lto = true
+strip = true

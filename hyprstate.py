@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -43,7 +44,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -69,6 +70,42 @@ PLATFORM_PROFILE_PATH = Path("/sys/firmware/acpi/platform_profile")
 DRI_BY_PATH = Path("/dev/dri/by-path")
 GPU_NOTIFY_MIN_SECONDS = 60
 GPU_SETTLE_SECONDS = 0.5
+
+# Power management (see POWER_SPEC.md). powerd (root) owns the sysfs writes
+# behind a narrow D-Bus interface; the user daemon owns policy. The override
+# file carries the profile only — the daemon stamps the base state itself.
+POWER_CONF_FILE = Path.home() / ".config/hypr/power.conf"
+POWER_OVERRIDE_FILE = Path.home() / ".config/hypr/power-override"
+POWER_PROFILES = ("power-saver", "balanced", "performance")
+POWERD_BUS = "org.hyprstate.Power1"
+POWERD_PATH = "/org/hyprstate/Power1"
+POWERD_STATE_FILE = Path("/var/lib/hyprstate/profile")
+POWER_AC_DEBOUNCE_SECONDS = 5
+POWER_ADOPT_SUPPRESS_SECONDS = 5
+BATTERY_LOW_EXIT_DELTA = 3
+BRIGHTNESS_GUARD_PCT = 0.005  # quantization slack only; beyond this = the user
+
+# platform_profile value fallback chains, validated against _choices at apply
+# time. Also the self-write acceptance set: ANY value in a chain counts as our
+# own write (quiet-only firmware writes "quiet" when we asked for power-saver).
+PLATFORM_PROFILE_CHAINS = {
+    "power-saver": ("low-power", "quiet"),
+    "balanced": ("balanced",),
+    "performance": ("performance",),
+}
+
+# power.conf needs its own directive regex: keys contain hyphens
+# (docked-ac, battery-low). The shared profile _DIRECTIVE_RE must NOT gain
+# hyphens — "battery-low" is not a legal monitor-profile directive key.
+_POWER_DIRECTIVE_RE = re.compile(r"^#@\s*([a-z][a-z-]*)\s*=\s*(.+?)\s*$")
+
+DEFAULT_POWER_POLICY = {
+    "docked-ac": "balanced",
+    "ac": "balanced",
+    "battery": "power-saver",
+    "battery-low": "power-saver",
+}
+DEFAULT_BATTERY_LOW_PCT = 15
 
 GRACE_SECONDS = 30
 DPMS_DELAY_SECONDS = 30
@@ -143,6 +180,9 @@ class EventKind(Enum):
     MONITORS_CHANGED = "MonitorsChanged"  # debounced; fires on add/remove bursts
     PLATFORM_PROFILE_CHANGED = "PlatformProfileChanged"
     GPU_OVERRIDE_CHANGED = "GpuOverrideChanged"
+    BATTERY_LOW_CHANGED = "BatteryLowChanged"
+    POWER_OVERRIDE_CHANGED = "PowerOverrideChanged"
+    POWER_AC_SETTLED = "PowerAcSettled"  # debounced AC state, power policy input
 
 
 @dataclass
@@ -181,6 +221,30 @@ class Context:
     gpu_actual_pending: bool = True
     gpu_last_notified: str | None = None
     gpu_last_notify_at: float = 0.0
+
+    # Power policy. on_ac_settled is the debounced AC state power policy reads
+    # (raw on_ac flips during the 5s plug-jiggle window must not thrash
+    # profiles). battery_percent None = no battery (desktop) — machinery off.
+    # power_expected holds (expiry, frozenset-of-values) entries for self-write
+    # detection on platform_profile (full fallback chain per apply).
+    on_ac_settled: bool = True
+    battery_percent: float | None = 100.0
+    low_battery: bool = False
+    power_policy: dict = field(default_factory=lambda: dict(DEFAULT_POWER_POLICY))
+    battery_low_pct: int = DEFAULT_BATTERY_LOW_PCT
+    power_override: str | None = None
+    power_override_base: str | None = None
+    power_applied: str | None = None
+    power_last_base: str | None = None
+    power_expected: list = field(default_factory=list)
+    power_apply_at: float = 0.0
+    power_debounce_task: asyncio.Task | None = None
+    powerd_available: bool = True
+    powerd_warned: bool = False
+    brightness_dev: str | None = None
+    brightness_max: int = 0
+    brightness_set: int | None = None
+    brightness_saved: int | None = None
 
     @property
     def inhibitor(self) -> bool:
@@ -606,6 +670,134 @@ def _hyprland_aq_devices() -> list[str] | None:
 
 
 # =========================================================================
+# Power policy (see POWER_SPEC.md)
+# =========================================================================
+#
+# Pure policy map over base states — no timed states, so no sub-FSM (same
+# rationale as gpu_drift_check). powerd (root) is the mechanism; nothing in
+# this section writes sysfs.
+
+
+def load_power_policy() -> tuple[dict[str, str], int]:
+    """Parse ~/.config/hypr/power.conf -> (base-state -> profile map, low %).
+    Missing file/keys fall back to defaults; invalid values warn + default."""
+    policy = dict(DEFAULT_POWER_POLICY)
+    low_pct = DEFAULT_BATTERY_LOW_PCT
+    try:
+        text = POWER_CONF_FILE.read_text()
+    except OSError:
+        return policy, low_pct
+    parsed: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("#@"):
+            continue
+        m = _POWER_DIRECTIVE_RE.match(line)
+        if not m:
+            LOG.warning("power.conf: ignoring malformed directive: %r", line)
+            continue
+        key, val = m.group(1), m.group(2)
+        if key == "battery-low-percent":
+            try:
+                low_pct = max(1, min(50, int(val)))
+                parsed.append(key)
+            except ValueError:
+                LOG.warning("power.conf: bad battery-low-percent %r", val)
+        elif key in policy:
+            if val in POWER_PROFILES:
+                policy[key] = val
+                parsed.append(key)
+            else:
+                LOG.warning("power.conf: %s must be one of %s, got %r — using %s",
+                            key, "|".join(POWER_PROFILES), val, policy[key])
+        else:
+            LOG.warning("power.conf: unknown directive %r", key)
+    LOG.info("power.conf: parsed keys %s -> %s (battery-low-percent=%d)",
+             parsed, policy, low_pct)
+    return policy, low_pct
+
+
+def power_base_state(ctx: Context) -> str:
+    """Pure: docked-ac | ac | battery | battery-low. No battery present ->
+    permanently on the AC side."""
+    if ctx.battery_percent is None or ctx.on_ac_settled:
+        return "docked-ac" if ctx.ext_mon_count >= 1 else "ac"
+    return "battery-low" if ctx.low_battery else "battery"
+
+
+def _ac_axis(base: str) -> str:
+    return "ac" if base in ("ac", "docked-ac") else "battery"
+
+
+def profile_from_platform_value(value: str | None) -> str:
+    """Map an externally-written platform_profile value back to a profile
+    (adopt-don't-revert path)."""
+    if value in ("low-power", "quiet"):
+        return "power-saver"
+    if value == "performance":
+        return "performance"
+    return "balanced"
+
+
+def _prune_power_expected(ctx: Context) -> None:
+    now = time.monotonic()
+    ctx.power_expected = [(exp, vals) for exp, vals in ctx.power_expected
+                          if exp > now]
+
+
+def power_self_write(ctx: Context, value: str | None) -> bool:
+    """True if a platform_profile change is one of our own in-flight applies
+    (or inside the adoption-suppression window after any apply)."""
+    _prune_power_expected(ctx)
+    for i, (_exp, vals) in enumerate(ctx.power_expected):
+        if value in vals:
+            del ctx.power_expected[i]
+            return True
+    return time.monotonic() - ctx.power_apply_at < POWER_ADOPT_SUPPRESS_SECONDS
+
+
+async def power_policy_check(ctx: Context, fx: Effectors) -> None:
+    """Evaluate base state -> handle override stamping/expiry -> apply the
+    desired profile + brightness edges. Idempotent on unchanged inputs (the
+    poller echoes the daemon's own override-file writes ~2s later — that echo
+    must be a no-op)."""
+    base = power_base_state(ctx)
+
+    if ctx.power_override:
+        if ctx.power_override_base is None:
+            # First ingest: the daemon stamps the base itself — the CLI can't
+            # know the hysteresis-adjusted state (override set at 16% must not
+            # be expired by the 15-18 band 2s later).
+            ctx.power_override_base = base
+            LOG.info("POWER: override %s stamped at base=%s",
+                     ctx.power_override, base)
+        elif (_ac_axis(base) != _ac_axis(ctx.power_override_base)
+              or (base == "battery-low"
+                  and ctx.power_override_base != "battery-low")):
+            # Expiry: AC axis flip or battery-low entry only. docked-ac <-> ac
+            # never expires (a display blink must not delete explicit intent).
+            LOG.info("POWER: override %s expired (base %s -> %s)",
+                     ctx.power_override, ctx.power_override_base, base)
+            fx.clear_power_override(ctx)
+            fx.notify_power(f"Power override cleared — back to automatic "
+                            f"({ctx.power_policy.get(base, 'balanced')} on {base})")
+
+    desired = ctx.power_override or ctx.power_policy.get(base, "balanced")
+    await fx.apply_power_profile(ctx, desired)
+
+    # Brightness on base-state EDGES only (never on manual profile changes).
+    prev = ctx.power_last_base
+    ctx.power_last_base = base
+    if prev is None or prev == base:
+        return
+    if _ac_axis(prev) == "ac" and _ac_axis(base) == "battery":
+        fx.brightness_save_and_cap(ctx, 0.50)
+    if base == "battery-low" and prev != "battery-low":
+        fx.brightness_cap(ctx, 0.25)
+    if _ac_axis(prev) == "battery" and _ac_axis(base) == "ac":
+        fx.brightness_restore(ctx)
+
+
+# =========================================================================
 # Daemon: effectors (Layer 1)
 # =========================================================================
 
@@ -617,6 +809,7 @@ class Effectors:
         self.session = session_iface
         self.queue = queue
         self._lid_inhibit_fd: int | None = None
+        self._powerd = None  # lazy org.hyprstate.Power1 proxy cache
 
     async def take_lid_inhibitor(self) -> None:
         """Hold a block-mode handle-lid-switch inhibitor for our process lifetime."""
@@ -703,6 +896,15 @@ class Effectors:
         except asyncio.CancelledError:
             pass
 
+    def schedule_power_settle(self, ctx: Context) -> None:
+        """Debounce AC flips: each raw AC event restarts the 5s window;
+        POWER_AC_SETTLED fires only once the state stops bouncing."""
+        if ctx.power_debounce_task and not ctx.power_debounce_task.done():
+            ctx.power_debounce_task.cancel()
+        ctx.power_debounce_task = asyncio.create_task(
+            self._timer_coro(POWER_AC_DEBOUNCE_SECONDS,
+                             EventKind.POWER_AC_SETTLED))
+
     def cancel_timer(self, ctx: Context) -> None:
         if ctx.timer_task and not ctx.timer_task.done():
             ctx.timer_task.cancel()
@@ -760,6 +962,130 @@ class Effectors:
         run(["notify-send", "-a", "hyprstate",
              "-h", "string:x-canonical-private-synchronous:hyprstate-gpu",
              "GPU selection drift", body], check=False)
+
+    async def apply_power_profile(self, ctx: Context, profile: str) -> None:
+        """Ask powerd (root, system bus) to apply a profile. No-op when
+        already applied. Registers the expected platform_profile values
+        (full fallback chain) BEFORE the call so the poller can't observe
+        the sysfs change ahead of the bookkeeping."""
+        if profile == ctx.power_applied or not ctx.powerd_available:
+            return
+        ctx.power_expected.append((
+            time.monotonic() + POWER_ADOPT_SUPPRESS_SECONDS,
+            frozenset(PLATFORM_PROFILE_CHAINS.get(profile, ())),
+        ))
+        ctx.power_apply_at = time.monotonic()
+        try:
+            if self._powerd is None:
+                introspect = await self.bus.introspect(POWERD_BUS, POWERD_PATH)
+                obj = self.bus.get_proxy_object(POWERD_BUS, POWERD_PATH, introspect)
+                self._powerd = obj.get_interface(POWERD_BUS)
+            results = await self._powerd.call_apply_profile(profile)
+        except Exception as e:
+            self._powerd = None
+            ctx.powerd_available = False  # NameOwnerChanged re-enables
+            if not ctx.powerd_warned:
+                ctx.powerd_warned = True
+                LOG.warning("powerd unavailable (%s) — power profiles disabled "
+                            "until org.hyprstate.Power1 appears", e)
+            return
+        ctx.power_applied = profile
+        interesting = {k: v for k, v in results.items()
+                       if v not in ("unchanged", "skipped-missing")}
+        LOG.info("POWER: applied %s (%s)", profile, interesting or "all unchanged")
+
+    def clear_power_override(self, ctx: Context) -> None:
+        """Delete the override file and update ctx SYNCHRONOUSLY — the poller
+        echo of the deletion must arrive as a no-op."""
+        ctx.power_override = None
+        ctx.power_override_base = None
+        try:
+            POWER_OVERRIDE_FILE.unlink(missing_ok=True)
+        except OSError as e:
+            LOG.warning("power override clear failed: %s", e)
+
+    def adopt_power_override(self, ctx: Context, profile: str) -> None:
+        """External platform_profile write -> adopt as override (never
+        revert-fight). File + ctx updated synchronously."""
+        ctx.power_override = profile
+        ctx.power_override_base = None  # re-stamped on next policy check
+        try:
+            POWER_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            POWER_OVERRIDE_FILE.write_text(profile + "\n")
+        except OSError as e:
+            LOG.warning("power override write failed: %s", e)
+        self.notify_power(f"Adopted external power change as override: {profile}")
+
+    def notify_power(self, body: str) -> None:
+        LOG.info("POWER: notify: %s", body)
+        run(["notify-send", "-a", "hyprstate",
+             "-h", "string:x-canonical-private-synchronous:hyprstate-power",
+             "Power profile", body], check=False)
+
+    # ---- brightness (logind SetBrightness — unprivileged, session-scoped) ----
+
+    def _brightness_read(self, ctx: Context) -> int | None:
+        if not ctx.brightness_dev:
+            return None
+        try:
+            return int((Path("/sys/class/backlight") / ctx.brightness_dev /
+                        "brightness").read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _brightness_user_took_over(self, ctx: Context) -> bool:
+        """Guard at ±0.5% of max: hyprstate re-reads what it wrote, so any
+        larger delta is a deliberate user adjustment — leave it alone."""
+        if ctx.brightness_set is None:
+            return False
+        cur = self._brightness_read(ctx)
+        if cur is None:
+            return False
+        return abs(cur - ctx.brightness_set) > ctx.brightness_max * BRIGHTNESS_GUARD_PCT
+
+    async def _brightness_write(self, ctx: Context, value: int) -> None:
+        if not ctx.brightness_dev or self.session is None:
+            LOG.debug("brightness: no device/session — skipping")
+            return
+        value = max(1, min(ctx.brightness_max, value))
+        try:
+            await self.session.call_set_brightness(
+                "backlight", ctx.brightness_dev, value)
+            ctx.brightness_set = value
+        except Exception as e:
+            LOG.warning("SetBrightness failed: %s", e)
+
+    def brightness_save_and_cap(self, ctx: Context, pct: float) -> None:
+        if self._brightness_user_took_over(ctx):
+            ctx.brightness_saved = None
+            ctx.brightness_set = self._brightness_read(ctx)
+            return
+        cur = self._brightness_read(ctx)
+        if cur is None:
+            return
+        ctx.brightness_saved = cur
+        cap = int(ctx.brightness_max * pct)
+        if cur > cap:
+            asyncio.create_task(self._brightness_write(ctx, cap))
+
+    def brightness_cap(self, ctx: Context, pct: float) -> None:
+        if self._brightness_user_took_over(ctx):
+            ctx.brightness_saved = None
+            ctx.brightness_set = self._brightness_read(ctx)
+            return
+        cur = self._brightness_read(ctx)
+        cap = int(ctx.brightness_max * pct)
+        if cur is not None and cur > cap:
+            asyncio.create_task(self._brightness_write(ctx, cap))
+
+    def brightness_restore(self, ctx: Context) -> None:
+        saved, ctx.brightness_saved = ctx.brightness_saved, None
+        if saved is None:
+            return
+        if self._brightness_user_took_over(ctx):
+            ctx.brightness_set = self._brightness_read(ctx)
+            return
+        asyncio.create_task(self._brightness_write(ctx, saved))
 
     def pause_media(self) -> None:
         run(["playerctl", "--all-players", "pause"], check=False)
@@ -953,14 +1279,16 @@ def _edp_is_disabled() -> bool | None:
     return None
 
 
-def _hyprctl_ext_monitor_count() -> int:
+def _hyprctl_ext_monitor_count(prev: int = 0) -> int:
+    """Returns `prev` on hyprctl failure: a transient hyprctl error must not
+    look like an undock (it would expire power overrides and flip profiles)."""
     try:
         out = run(["hyprctl", "-j", "monitors"]).stdout
         mons = json.loads(out)
         return sum(1 for m in mons if not m["name"].startswith("eDP"))
     except Exception as e:
-        LOG.warning("ext_monitor_count failed: %s", e)
-        return 0
+        LOG.warning("ext_monitor_count failed (keeping %d): %s", prev, e)
+        return prev
 
 
 def _wayland_inhibitor_active() -> bool:
@@ -1131,12 +1459,14 @@ async def inhibitor_poller(queue: asyncio.Queue, ctx: Context, manager_iface) ->
         await asyncio.sleep(INHIBIT_POLL_SECONDS)
 
 
-async def gpu_mode_poller(queue: asyncio.Queue) -> None:
-    """Queue events when platform_profile or the gpu-select override changes.
-    Sibling of inhibitor_poller (sysfs/file diff -> event); the reconciler
-    stays event-free per its silent-ctx-repair contract."""
+async def mode_poller(queue: asyncio.Queue) -> None:
+    """Queue events when platform_profile, the gpu-select override, or the
+    power override changes. Sibling of inhibitor_poller (sysfs/file diff ->
+    event); the reconciler stays event-free per its silent-ctx-repair contract
+    (one documented exception: see reconciler)."""
     last_profile = _read_first_word(PLATFORM_PROFILE_PATH)
-    last_override = _read_first_word(GPU_OVERRIDE_FILE)
+    last_gpu = _read_first_word(GPU_OVERRIDE_FILE)
+    last_power = _read_first_word(POWER_OVERRIDE_FILE)
     while True:
         await asyncio.sleep(INHIBIT_POLL_SECONDS)
         cur = _read_first_word(PLATFORM_PROFILE_PATH)
@@ -1144,9 +1474,13 @@ async def gpu_mode_poller(queue: asyncio.Queue) -> None:
             last_profile = cur
             await queue.put(Event(EventKind.PLATFORM_PROFILE_CHANGED, payload=cur))
         cur = _read_first_word(GPU_OVERRIDE_FILE)
-        if cur != last_override:
-            last_override = cur
+        if cur != last_gpu:
+            last_gpu = cur
             await queue.put(Event(EventKind.GPU_OVERRIDE_CHANGED, payload=cur))
+        cur = _read_first_word(POWER_OVERRIDE_FILE)
+        if cur != last_power:
+            last_power = cur
+            await queue.put(Event(EventKind.POWER_OVERRIDE_CHANGED, payload=cur))
 
 
 def _resolve_gpu_actual(ctx: Context) -> None:
@@ -1207,7 +1541,7 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         await asyncio.sleep(RECONCILE_SECONDS)
         try:
             real_lid = await manager_iface.get_lid_closed()
-            real_ext = _hyprctl_ext_monitor_count()
+            real_ext = _hyprctl_ext_monitor_count(ctx.ext_mon_count)
             real_logind_inh = await _logind_real_inhibitor_active(manager_iface)
             real_wayland_inh = _wayland_inhibitor_active()
             real_locked = _hyprlock_running()
@@ -1220,9 +1554,11 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         if real_lid != ctx.lid_closed:
             drift.append(f"lid_closed {ctx.lid_closed}->{real_lid}")
             ctx.lid_closed = real_lid
+        power_input_drift = False
         if real_ext != ctx.ext_mon_count:
             drift.append(f"ext_mon {ctx.ext_mon_count}->{real_ext}")
             ctx.ext_mon_count = real_ext
+            power_input_drift = True
         if real_logind_inh != ctx.logind_inhibitor:
             drift.append(f"logind_inh {ctx.logind_inhibitor}->{real_logind_inh}")
             ctx.logind_inhibitor = real_logind_inh
@@ -1235,9 +1571,18 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         if real_on_ac is not None and real_on_ac != ctx.on_ac:
             drift.append(f"on_ac {ctx.on_ac}->{real_on_ac} (sysfs fallback)")
             ctx.on_ac = real_on_ac
+            power_input_drift = True
 
         if drift:
             LOG.warning("reconciler ctx drift: %s", "; ".join(drift))
+
+        # The ONE exception to the reconciler's event-free contract: repaired
+        # power inputs (on_ac / ext_mon_count) must reach power policy —
+        # covers boot-on-battery with UPower down, which would otherwise run
+        # the AC profile indefinitely. POWER_AC_SETTLED feeds only power
+        # policy, so monitor-profile logic is unaffected.
+        if power_input_drift:
+            await fx.queue.put(Event(EventKind.POWER_AC_SETTLED))
 
         if ctx.state is None or ctx.state is State.SUSPENDING:
             continue
@@ -1269,10 +1614,9 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
 
 
 async def setup_upower_watcher(bus, queue: asyncio.Queue, ctx: Context) -> None:
-    """Subscribe to UPower's OnBattery property. Currently observed only —
-    no transition consumes ctx.on_ac. Wired in so future power-aware behaviour
-    has a clean signal to attach to.
-    """
+    """Subscribe to UPower's OnBattery property (raw AC events; power policy
+    consumes the debounced POWER_AC_SETTLED) and the DisplayDevice battery
+    percentage (battery-low hysteresis input)."""
     try:
         introspect = await bus.introspect(UPOWER_BUS, UPOWER_PATH)
         obj = bus.get_proxy_object(UPOWER_BUS, UPOWER_PATH, introspect)
@@ -1280,10 +1624,12 @@ async def setup_upower_watcher(bus, queue: asyncio.Queue, ctx: Context) -> None:
         upower = obj.get_interface(UPOWER_IFACE)
     except Exception as e:
         LOG.warning("UPower interface unavailable: %s — on_ac left at default", e)
+        ctx.battery_percent = None
         return
 
     try:
         ctx.on_ac = not bool(await upower.get_on_battery())
+        ctx.on_ac_settled = ctx.on_ac
     except Exception as e:
         LOG.warning("initial OnBattery read failed: %s", e)
 
@@ -1302,6 +1648,81 @@ async def setup_upower_watcher(bus, queue: asyncio.Queue, ctx: Context) -> None:
 
     props.on_properties_changed(on_props_changed)
     LOG.info("subscribed to UPower OnBattery (on_ac=%s)", ctx.on_ac)
+
+    # ---- battery percentage (power policy input) ----
+    # Initial GetAll BEFORE the startup policy evaluation: subscription-only
+    # would leave a restart at 10%% blind until the next 1%% drain signal.
+    # Desktops are NOT "DisplayDevice absent" — they report IsPresent=false
+    # with Percentage=0.0, which must not latch low_battery.
+    try:
+        dd_path = "/org/freedesktop/UPower/devices/DisplayDevice"
+        dd_introspect = await bus.introspect(UPOWER_BUS, dd_path)
+        dd_obj = bus.get_proxy_object(UPOWER_BUS, dd_path, dd_introspect)
+        dd_props = dd_obj.get_interface("org.freedesktop.DBus.Properties")
+        dd = dd_obj.get_interface("org.freedesktop.UPower.Device")
+        present = bool(await dd.get_is_present())
+        dtype = int(await dd.get_type())
+        if not present or dtype not in (2, 3):  # 2=battery, 3=ups
+            ctx.battery_percent = None
+            ctx.low_battery = False
+            LOG.info("no battery present — battery policy inputs disabled")
+            return
+        ctx.battery_percent = float(await dd.get_percentage())
+        ctx.low_battery = ctx.battery_percent <= ctx.battery_low_pct
+        LOG.info("battery: %.0f%% (low=%s, threshold=%d)",
+                 ctx.battery_percent, ctx.low_battery, ctx.battery_low_pct)
+
+        def on_dd_changed(iface: str, changed: dict, _inv: list):
+            if iface != "org.freedesktop.UPower.Device":
+                return
+            if "Percentage" not in changed:
+                return
+            pct = float(changed["Percentage"].value)
+            ctx.battery_percent = pct
+            # Hysteresis: enter <= threshold, exit >= threshold + 3.
+            new_low = ctx.low_battery
+            if not ctx.low_battery and pct <= ctx.battery_low_pct:
+                new_low = True
+            elif ctx.low_battery and pct >= ctx.battery_low_pct + BATTERY_LOW_EXIT_DELTA:
+                new_low = False
+            if new_low != ctx.low_battery:
+                ctx.low_battery = new_low
+                asyncio.create_task(queue.put(
+                    Event(EventKind.BATTERY_LOW_CHANGED, payload=new_low)))
+
+        dd_props.on_properties_changed(on_dd_changed)
+    except Exception as e:
+        ctx.battery_percent = None
+        ctx.low_battery = False
+        LOG.warning("UPower DisplayDevice unavailable: %s — battery inputs off", e)
+
+
+async def setup_powerd_watcher(bus, queue: asyncio.Queue, ctx: Context) -> None:
+    """Re-enable power applies when org.hyprstate.Power1 (re)appears on the
+    bus — a boot race or powerd restart must not disable profiles for the
+    whole session (the bus-activation file usually prevents the race, but
+    belt and braces)."""
+    try:
+        introspect = await bus.introspect("org.freedesktop.DBus",
+                                          "/org/freedesktop/DBus")
+        obj = bus.get_proxy_object("org.freedesktop.DBus",
+                                   "/org/freedesktop/DBus", introspect)
+        dbus_iface = obj.get_interface("org.freedesktop.DBus")
+    except Exception as e:
+        LOG.warning("DBus daemon interface unavailable: %s", e)
+        return
+
+    def on_name_owner_changed(name: str, _old: str, new: str):
+        if name != POWERD_BUS or not new:
+            return
+        if not ctx.powerd_available:
+            LOG.info("powerd appeared on the bus — re-enabling power applies")
+            ctx.powerd_available = True
+            ctx.powerd_warned = False
+            ctx.power_applied = None  # force a re-apply
+            asyncio.create_task(queue.put(Event(EventKind.POWER_AC_SETTLED)))
+
+    dbus_iface.on_name_owner_changed(on_name_owner_changed)
 
 
 async def setup_logind_watchers(
@@ -1444,7 +1865,7 @@ async def dispatcher(
         elif ev.kind is EventKind.LID_OPEN:
             ctx.lid_closed = False
         elif ev.kind in (EventKind.MONITOR_ADDED, EventKind.MONITOR_REMOVED):
-            ctx.ext_mon_count = _hyprctl_ext_monitor_count()
+            ctx.ext_mon_count = _hyprctl_ext_monitor_count(ctx.ext_mon_count)
             # Debounce: monitor changes often arrive in bursts (mode/scale
             # negotiation). Coalesce into a single MONITORS_CHANGED event
             # before reconciling the active profile.
@@ -1466,7 +1887,28 @@ async def dispatcher(
             fx.write_gpu_breadcrumb(chosen.gpu if chosen else None)
             gpu_drift_check(ctx, fx, "monitors changed",
                             chosen.gpu if chosen else "auto")
+            # Docked-ness (ext_mon_count) is a power-policy input.
+            await power_policy_check(ctx, fx)
             continue  # profile reconciliation does not feed the main FSM
+        elif ev.kind is EventKind.POWER_AC_SETTLED:
+            # The debounced AC state power policy reads — raw on_ac flips
+            # inside the 5s window must not thrash profiles.
+            ctx.on_ac_settled = ctx.on_ac
+        elif ev.kind is EventKind.POWER_OVERRIDE_CHANGED:
+            # Ingest the override file (poller payload = first word / None).
+            # Echoes of the daemon's own writes arrive with ctx already
+            # matching — those land as no-ops by design.
+            word = ev.payload
+            if word is None:
+                ctx.power_override = None
+                ctx.power_override_base = None
+            elif word == ctx.power_override:
+                pass  # our own write echoing back
+            elif word in POWER_PROFILES:
+                ctx.power_override = word
+                ctx.power_override_base = None  # daemon stamps at next check
+            else:
+                LOG.warning("power-override: unknown profile %r — ignoring", word)
         elif ev.kind is EventKind.INHIBITOR_ON:
             if ev.payload == "logind":
                 ctx.logind_inhibitor = True
@@ -1480,11 +1922,30 @@ async def dispatcher(
         # LOCK_ENGAGED/RELEASED already update ctx.locked in the
         # PropertiesChanged callback (eager).
 
+        # Re-arm the brightness takeover guard on resume: panel raw values
+        # can drift across suspend, and that drift must not read as a user
+        # adjustment (it would block a legitimate restore on a resume-time
+        # AC edge).
+        if ev.kind is EventKind.RESUMED and ctx.brightness_dev:
+            ctx.brightness_set = fx._brightness_read(ctx)
+
         # AC_PLUGGED/AC_UNPLUGGED: ctx.on_ac was already set in the
-        # PropertiesChanged callback. We log the event but no transition
-        # currently consumes it.
+        # PropertiesChanged callback. The lid FSM doesn't consume it; power
+        # policy consumes the DEBOUNCED form (POWER_AC_SETTLED) only.
         if ev.kind in (EventKind.AC_PLUGGED, EventKind.AC_UNPLUGGED):
             LOG.info("AC: %s (on_ac=%s)", ev.kind.value, ctx.on_ac)
+            fx.schedule_power_settle(ctx)
+
+        # External platform_profile writes: ours (or within the suppression
+        # window of an apply) are ignored; anything else is adopted as a
+        # manual override — never reverted (no write-fights).
+        if ev.kind is EventKind.PLATFORM_PROFILE_CHANGED:
+            if power_self_write(ctx, ev.payload):
+                LOG.debug("platform_profile -> %r: own write", ev.payload)
+            else:
+                fx.adopt_power_override(
+                    ctx, profile_from_platform_value(ev.payload))
+                await power_policy_check(ctx, fx)
 
         # GPU drift advice on power/override changes. NOT routed through
         # RECONCILE (its early `continue` above would skip this) — these
@@ -1495,6 +1956,12 @@ async def dispatcher(
             chosen = select_profile(monitor_signature(), load_profiles())
             gpu_drift_check(ctx, fx, ev.kind.value,
                             chosen.gpu if chosen else "auto")
+
+        # Power policy evaluation on its (debounced/derived) inputs.
+        if ev.kind in (EventKind.BATTERY_LOW_CHANGED,
+                       EventKind.POWER_OVERRIDE_CHANGED,
+                       EventKind.POWER_AC_SETTLED):
+            await power_policy_check(ctx, fx)
 
         # ---- main FSM ----
         new = desired_state(state, ev.kind, ctx)
@@ -1561,21 +2028,41 @@ async def daemon_main() -> None:
     manager = obj.get_interface(LOGIND_IFACE)
 
     ctx = Context()
+    ctx.power_policy, ctx.battery_low_pct = load_power_policy()
 
     # Lid inhibitor first.
     fx_partial = Effectors(bus, manager, None, queue)
     await fx_partial.take_lid_inhibitor()
 
-    # Resolve session, subscribe, snapshot.
+    # Resolve session, subscribe, snapshot. (battery_low_pct must be set
+    # before setup_upower_watcher computes the initial low_battery.)
     session = await setup_logind_watchers(bus, manager, queue, ctx)
     await setup_upower_watcher(bus, queue, ctx)
+    await setup_powerd_watcher(bus, queue, ctx)
     fx = Effectors(bus, manager, session, queue)
     fx._lid_inhibit_fd = fx_partial._lid_inhibit_fd
+
+    # Backlight discovery (V16): exclude ddcci (external-monitor devices that
+    # must not be dimmed by laptop power policy), prefer panel drivers.
+    try:
+        names = sorted(p.name for p in Path("/sys/class/backlight").iterdir()
+                       if not p.name.startswith("ddcci"))
+        preferred = [n for n in names
+                     if re.match(r"amdgpu_bl|intel_backlight|acpi_video", n)]
+        ctx.brightness_dev = (preferred or names or [None])[0]
+        if ctx.brightness_dev:
+            ctx.brightness_max = _read_int(
+                Path("/sys/class/backlight") / ctx.brightness_dev / "max_brightness")
+            LOG.info("backlight: %s (max=%d)", ctx.brightness_dev, ctx.brightness_max)
+        if not ctx.brightness_max:
+            ctx.brightness_dev = None
+    except OSError:
+        ctx.brightness_dev = None
 
     ctx.lid_closed = await manager.get_lid_closed()
     ctx.logind_inhibitor = await _logind_real_inhibitor_active(manager)
     ctx.wayland_inhibitor = _wayland_inhibitor_active()
-    ctx.ext_mon_count = _hyprctl_ext_monitor_count()
+    ctx.ext_mon_count = _hyprctl_ext_monitor_count(ctx.ext_mon_count)
 
     # Seed the active profile from the existing .active.conf symlink (if any),
     # so subsequent reconciles can detect "no change" instead of forcing a
@@ -1595,6 +2082,11 @@ async def daemon_main() -> None:
              ctx.current_profile, ctx.edp_policy)
     await queue.put(Event(EventKind.MONITORS_CHANGED))
 
+    # Seed power policy: ingest any persisted override, then force one
+    # evaluation AFTER the seeded MONITORS_CHANGED (docked-ness lands first).
+    await queue.put(Event(EventKind.POWER_OVERRIDE_CHANGED,
+                          payload=_read_first_word(POWER_OVERRIDE_FILE)))
+
     if session is not None:
         try:
             ctx.locked = bool(await session.get_locked_hint())
@@ -1610,7 +2102,7 @@ async def daemon_main() -> None:
         dispatcher(queue, ctx, fx, initial),
         hypr_socket_reader(queue, ctx),
         inhibitor_poller(queue, ctx, manager),
-        gpu_mode_poller(queue),
+        mode_poller(queue),
         reconciler(ctx, fx, manager),
     )
 
@@ -1699,8 +2191,428 @@ def sleep_hook_main(action: str) -> int:
 
 
 # =========================================================================
-# Subcommand: install / uninstall / status
+# Subcommand: powerd (root effector — see POWER_SPEC.md)
 # =========================================================================
+#
+# Mechanism only, no policy: a narrow system-bus interface mapping three
+# profile names onto a hardcoded whitelist of sysfs writes. Runs as root from
+# a root-owned copy at /usr/local/libexec/hyprstate (never the user-writable
+# dev symlink). All rows are read-before-write idempotent and exception-
+# isolated; ApplyProfile "success" means the call completed — per-row
+# results are informational.
+
+PLATFORM_PROFILE_CHOICES_PATH = Path("/sys/firmware/acpi/platform_profile_choices")
+CPUFREQ_DIR = Path("/sys/devices/system/cpu/cpufreq")
+ASPM_POLICY_PATH = Path("/sys/module/pcie_aspm/parameters/policy")
+INTEL_NO_TURBO_PATH = Path("/sys/devices/system/cpu/intel_pstate/no_turbo")
+
+POWERD_GOVERNOR = {"power-saver": "powersave", "balanced": "powersave",
+                   "performance": "performance"}
+POWERD_EPP = {"power-saver": "power", "balanced": "balance_performance"}
+POWERD_BOOST = {"power-saver": "0", "balanced": "1", "performance": "1"}
+POWERD_DGPU_DPM = {"power-saver": "low", "balanced": "auto", "performance": "auto"}
+POWERD_ASPM = {"power-saver": "powersupersave", "balanced": "default",
+               "performance": "default"}
+
+
+def _knob_write(path: Path, value: str) -> str:
+    """Idempotent single-knob write -> result enum. EBUSY/EPERM/EACCES are
+    'skipped-unsupported' (EPP locked by performance governor, BIOS-locked
+    turbo, BIOS-disabled ASPM) — expected hardware conditions, not errors."""
+    try:
+        if path.read_text().strip() == value:
+            return "unchanged"
+    except FileNotFoundError:
+        return "skipped-missing"
+    except OSError as e:
+        return f"error:{e}"
+    try:
+        path.write_text(value)
+        return "written"
+    except OSError as e:
+        if e.errno in (errno.EBUSY, errno.EPERM, errno.EACCES):
+            return "skipped-unsupported"
+        return f"error:{e}"
+
+
+def _merge_row(statuses: list[str]) -> str:
+    """Collapse per-CPU-policy statuses into one result entry."""
+    if not statuses:
+        return "skipped-missing"
+    for s in statuses:
+        if s.startswith("error"):
+            return s
+    if "written" in statuses:
+        return "written"
+    if all(s == "unchanged" for s in statuses):
+        return "unchanged"
+    return statuses[0]
+
+
+def _powerd_cpu_rows(profile: str, res: dict[str, str]) -> None:
+    policies = sorted(CPUFREQ_DIR.glob("policy[0-9]*"))
+    if not policies:
+        res["cpu"] = "skipped-missing"
+        return
+    p0 = policies[0]
+    driver = ""
+    try:
+        driver = (p0 / "scaling_driver").read_text().strip()
+    except OSError:
+        pass
+    epp_capable = ((p0 / "energy_performance_preference").exists()
+                   or driver in ("amd-pstate-epp", "intel_pstate"))
+    if not epp_capable:
+        # On acpi-cpufreq "powersave" PINS MIN FREQUENCY (our balanced profile
+        # would crawl); on schedutil kernels our values don't exist. Only EPP
+        # drivers interpret powersave/performance the way this matrix means.
+        res["scaling_governor"] = "skipped-unsupported"
+        res["energy_performance_preference"] = "skipped-unsupported"
+        return
+    gov = POWERD_GOVERNOR[profile]
+    gov_statuses, epp_statuses = [], []
+    for pol in policies:
+        try:
+            avail = (pol / "scaling_available_governors").read_text().split()
+        except OSError:
+            avail = []
+        if gov in avail:
+            gov_statuses.append(_knob_write(pol / "scaling_governor", gov))
+        else:
+            gov_statuses.append("skipped-unsupported")
+    res["scaling_governor"] = _merge_row(gov_statuses)
+    if profile in POWERD_EPP:  # written AFTER governor; EBUSY tolerated
+        for pol in policies:
+            epp_statuses.append(_knob_write(
+                pol / "energy_performance_preference", POWERD_EPP[profile]))
+        res["energy_performance_preference"] = _merge_row(epp_statuses)
+
+
+def _powerd_boost_row(profile: str, res: dict[str, str]) -> None:
+    boost = CPUFREQ_DIR / "boost"
+    if boost.exists():
+        res["boost"] = _knob_write(boost, POWERD_BOOST[profile])
+    elif INTEL_NO_TURBO_PATH.exists():
+        # Inverted semantics: no_turbo=1 disables boost.
+        res["no_turbo"] = _knob_write(
+            INTEL_NO_TURBO_PATH, "1" if profile == "power-saver" else "0")
+    else:
+        res["boost"] = "skipped-missing"
+
+
+def _powerd_gpu_rows(profile: str, res: dict[str, str]) -> None:
+    snap = gpu_snapshot()
+    if len(snap.cards) == 0:
+        res["gpu"] = "skipped-missing"
+        return
+    if len(snap.cards) == 1 or _integrated_card(snap.cards) is None:
+        # Single-card desktops must not have their only (discrete) GPU
+        # misclassified and clamped; _integrated_card needs >= 2 cards.
+        res["gpu"] = "skipped-ambiguous"
+        return
+    integrated = _integrated_card(snap.cards)
+    for c in snap.cards:
+        label = "dpm:" + c.path.rsplit("/", 1)[-1].removesuffix("-card")
+        dev = Path("/sys/class/drm") / c.card / "device"
+        knob = dev / "power_dpm_force_performance_level"
+        if c is integrated:
+            res[label] = _knob_write(knob, "auto")
+            continue
+        # runtime_status FIRST — opening the dpm knob on a runtime-suspended
+        # card wakes it, destroying the GPU-omission power win.
+        try:
+            if (dev / "power/runtime_status").read_text().strip() == "suspended":
+                res[label] = "skipped-suspended"
+                continue
+        except OSError:
+            res[label] = "skipped-missing"
+            continue
+        res[label] = _knob_write(knob, POWERD_DGPU_DPM[profile])
+
+
+def _powerd_aspm_row(profile: str, res: dict[str, str], writable: bool) -> None:
+    if not ASPM_POLICY_PATH.exists():
+        res["pcie_aspm"] = "skipped-missing"
+        return
+    if not writable:
+        res["pcie_aspm"] = "skipped-unsupported"  # BIOS-disabled ASPM
+        return
+    try:
+        opts = ASPM_POLICY_PATH.read_text().split()
+    except OSError as e:
+        res["pcie_aspm"] = f"error:{e}"
+        return
+    current = next((o[1:-1] for o in opts if o.startswith("[")), None)
+    target = POWERD_ASPM[profile]
+    if target not in (o.strip("[]") for o in opts):
+        res["pcie_aspm"] = "skipped-unsupported"
+    elif current == target:
+        res["pcie_aspm"] = "unchanged"
+    else:
+        res["pcie_aspm"] = _knob_write(ASPM_POLICY_PATH, target)
+
+
+def powerd_apply(profile: str, aspm_writable: bool) -> dict[str, str]:
+    """Apply the whitelist for `profile`. Every row exception-isolated."""
+    res: dict[str, str] = {}
+    rows = [
+        ("platform_profile", lambda: _powerd_platform_row(profile, res)),
+        ("cpu", lambda: _powerd_cpu_rows(profile, res)),
+        ("boost-row", lambda: _powerd_boost_row(profile, res)),
+        ("gpu-rows", lambda: _powerd_gpu_rows(profile, res)),
+        ("aspm-row", lambda: _powerd_aspm_row(profile, res, aspm_writable)),
+    ]
+    for name, fn in rows:
+        try:
+            fn()
+        except Exception as e:  # per-row isolation: never a failed ApplyProfile
+            res[name] = f"error:{e}"
+    return res
+
+
+def _powerd_platform_row(profile: str, res: dict[str, str]) -> None:
+    if not PLATFORM_PROFILE_PATH.exists():
+        res["platform_profile"] = "skipped-missing"
+        return
+    try:
+        choices = PLATFORM_PROFILE_CHOICES_PATH.read_text().split()
+    except OSError:
+        choices = []
+    target = next((v for v in PLATFORM_PROFILE_CHAINS[profile] if v in choices),
+                  None)
+    res["platform_profile"] = (_knob_write(PLATFORM_PROFILE_PATH, target)
+                               if target else "skipped-unsupported")
+
+
+def _powerd_persisted() -> str:
+    try:
+        words = POWERD_STATE_FILE.read_text().split()
+        if words and words[0] in POWER_PROFILES:
+            return words[0]
+        if words:
+            LOG.warning("persisted profile %r invalid — using balanced", words[0])
+    except OSError:
+        pass
+    return "balanced"
+
+
+def _powerd_persist(profile: str) -> None:
+    try:
+        POWERD_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = POWERD_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(profile + "\n")
+        tmp.replace(POWERD_STATE_FILE)
+    except OSError as e:
+        LOG.warning("persist failed: %s", e)
+
+
+def powerd_knob_snapshot() -> dict[str, str]:
+    """Read-only live values for GetKnobs / status."""
+    out: dict[str, str] = {}
+    for label, path in (
+        ("platform_profile", PLATFORM_PROFILE_PATH),
+        ("scaling_governor", CPUFREQ_DIR / "policy0/scaling_governor"),
+        ("energy_performance_preference",
+         CPUFREQ_DIR / "policy0/energy_performance_preference"),
+        ("boost", CPUFREQ_DIR / "boost"),
+        ("no_turbo", INTEL_NO_TURBO_PATH),
+        ("pcie_aspm", ASPM_POLICY_PATH),
+    ):
+        try:
+            out[label] = path.read_text().strip()
+        except OSError:
+            continue
+    try:
+        for c in gpu_snapshot().cards:
+            dev = Path("/sys/class/drm") / c.card / "device"
+            label = "dpm:" + c.path.rsplit("/", 1)[-1].removesuffix("-card")
+            try:
+                status = (dev / "power/runtime_status").read_text().strip()
+                if status == "suspended":
+                    out[label] = "(runtime-suspended)"
+                    continue
+                out[label] = (dev / "power_dpm_force_performance_level"
+                              ).read_text().strip()
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+async def powerd_main() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s",
+                        stream=sys.stdout)
+    from dbus_next import BusType, DBusError
+    from dbus_next.aio import MessageBus
+    from dbus_next.constants import PropertyAccess
+    from dbus_next.service import ServiceInterface, dbus_property, method
+    from dbus_next.service import signal as dbus_signal
+
+    # ASPM writability probe: one same-value rewrite at startup; EPERM means
+    # BIOS-disabled ASPM and the row is skipped-unsupported forever.
+    aspm_writable = False
+    try:
+        if ASPM_POLICY_PATH.exists():
+            opts = ASPM_POLICY_PATH.read_text().split()
+            cur = next((o[1:-1] for o in opts if o.startswith("[")), None)
+            if cur:
+                ASPM_POLICY_PATH.write_text(cur)
+                aspm_writable = True
+    except OSError as e:
+        LOG.info("ASPM not writable (%s) — row disabled", e)
+
+    class Power1(ServiceInterface):
+        def __init__(self):
+            super().__init__(POWERD_BUS)
+            self._active = _powerd_persisted()
+            self._lock = asyncio.Lock()
+            self._latest: str | None = None
+
+        @method()
+        async def ApplyProfile(self, profile: "s") -> "a{ss}":
+            if profile not in POWER_PROFILES:
+                raise DBusError(POWERD_BUS + ".InvalidProfile",
+                                f"profile must be one of {POWER_PROFILES}")
+            # Coalesce: a click storm updates the latest-request slot;
+            # superseded waiters return immediately, only first+latest apply.
+            self._latest = profile
+            async with self._lock:
+                if self._latest != profile:
+                    return {"coalesced": f"superseded-by:{self._latest}"}
+                results = powerd_apply(profile, aspm_writable)
+                self._active = profile
+                _powerd_persist(profile)
+                self.ProfileApplied(profile)
+                self.emit_properties_changed({"ActiveProfile": profile})
+                LOG.info("applied %s: %s", profile, results)
+                return results
+
+        @method()
+        def GetProfile(self) -> "s":
+            return self._active
+
+        @method()
+        def GetKnobs(self) -> "a{ss}":
+            return powerd_knob_snapshot()
+
+        @dbus_signal()
+        def ProfileApplied(self, profile: str) -> "s":
+            return profile
+
+        @dbus_property(access=PropertyAccess.READ)
+        def ActiveProfile(self) -> "s":
+            return self._active
+
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    iface = Power1()
+    bus.export(POWERD_PATH, iface)
+    await bus.request_name(POWERD_BUS)
+    LOG.info("powerd up as %s", POWERD_BUS)
+
+    # Initial apply of the persisted profile.
+    LOG.info("startup apply %s: %s", iface._active,
+             powerd_apply(iface._active, aspm_writable))
+
+    # Re-apply on resume: firmware can reset EPP/boost across s2idle.
+    try:
+        introspect = await bus.introspect(LOGIND_BUS, LOGIND_PATH)
+        mgr = bus.get_proxy_object(LOGIND_BUS, LOGIND_PATH, introspect
+                                   ).get_interface(LOGIND_IFACE)
+
+        def on_prepare_for_sleep(started: bool):
+            if not started:
+                LOG.info("resume: re-applying %s", iface._active)
+                powerd_apply(iface._active, aspm_writable)
+
+        mgr.on_prepare_for_sleep(on_prepare_for_sleep)
+    except Exception as e:
+        LOG.warning("PrepareForSleep subscription failed: %s", e)
+
+    await bus.wait_for_disconnect()
+
+
+# =========================================================================
+# Subcommand: power (user-side CLI)
+# =========================================================================
+
+
+async def _powerd_query() -> tuple[str, dict[str, str]]:
+    from dbus_next import BusType
+    from dbus_next.aio import MessageBus
+    bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+    try:
+        introspect = await bus.introspect(POWERD_BUS, POWERD_PATH)
+        iface = bus.get_proxy_object(POWERD_BUS, POWERD_PATH, introspect
+                                     ).get_interface(POWERD_BUS)
+        return await iface.call_get_profile(), await iface.call_get_knobs()
+    finally:
+        bus.disconnect()
+
+
+_WAYBAR_ICONS = {"power-saver": "\U000f0fb6", "balanced": "\U000f0fb5",
+                 "performance": "\U000f04c5"}
+
+
+def power_main(action: str, value: str | None, waybar: bool) -> int:
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(levelname)s %(message)s", stream=sys.stderr)
+    override = _read_first_word(POWER_OVERRIDE_FILE)
+
+    if action == "set":
+        if value == "auto":
+            POWER_OVERRIDE_FILE.unlink(missing_ok=True)
+            print("override cleared — automatic policy")
+            return 0
+        if value not in POWER_PROFILES:
+            print(f"value must be auto|{'|'.join(POWER_PROFILES)}",
+                  file=sys.stderr)
+            return 2
+        POWER_OVERRIDE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        POWER_OVERRIDE_FILE.write_text(value + "\n")
+        print(f"override: {value} (clears when AC state changes; "
+              f"`hyprstate power set auto` to clear now)")
+        return 0
+
+    if action == "cycle":
+        order = [None, "power-saver", "balanced", "performance"]
+        cur = override if override in POWER_PROFILES else None
+        nxt = order[(order.index(cur) + 1) % len(order)]
+        return power_main("set", nxt or "auto", waybar)
+
+    if action == "get":
+        if override:
+            print(f"override: {override}")
+        else:
+            policy, _pct = load_power_policy()
+            print(f"auto (policy: {policy})")
+        return 0
+
+    # status
+    try:
+        applied, knobs = asyncio.run(_powerd_query())
+    except Exception as e:
+        if waybar:
+            print(json.dumps({"text": "⚡?", "tooltip": "powerd unavailable",
+                              "class": "unavailable"}))
+            return 0
+        print(f"powerd : unavailable ({e})")
+        if override:
+            print(f"override: {override}")
+        return 0
+    if waybar:
+        mode = "override" if override else "auto"
+        print(json.dumps({
+            "text": _WAYBAR_ICONS.get(applied, applied),
+            "tooltip": f"power: {applied} ({mode})",
+            "class": f"{mode} {applied}",
+        }))
+        return 0
+    print(f"applied : {applied}" + (" (override)" if override else " (auto)"))
+    for k, v in sorted(knobs.items()):
+        print(f"  {k:<34} {v}")
+    return 0
 
 
 def install_main() -> int:
@@ -1717,8 +2629,14 @@ def install_main() -> int:
 def uninstall_main() -> int:
     cmds = [
         ["systemctl", "--user", "disable", "--now", "hyprstate.service"],
+        ["sudo", "systemctl", "disable", "--now", "hyprstate-powerd.service"],
         ["sudo", "rm", "-f", "/usr/local/bin/hyprstate",
+         "/usr/local/libexec/hyprstate",
+         "/etc/systemd/system/hyprstate-powerd.service",
+         "/etc/dbus-1/system.d/org.hyprstate.Power1.conf",
+         "/usr/share/dbus-1/system-services/org.hyprstate.Power1.service",
          "/usr/lib/systemd/system-sleep/hyprstate"],
+        ["sudo", "systemctl", "daemon-reload"],
         ["rm", "-f", str(Path.home() / ".config/systemd/user/hyprstate.service")],
         ["systemctl", "--user", "daemon-reload"],
     ]
@@ -1744,6 +2662,8 @@ def status_main() -> int:
     subprocess.run(["systemd-inhibit", "--list", "--no-pager"], check=False)
     print("\n=== gpu selection ===")
     _gpu_status()
+    print("\n=== power profile ===")
+    power_main("status", None, False)
     return 0
 
 
@@ -1885,6 +2805,11 @@ def main(argv: list[str]) -> int:
     p_prof.add_argument("name", nargs="?", default=None)
     p_gpu = sub.add_parser("gpu", help="GPU-primary selection (uwsm + drift status)")
     p_gpu.add_argument("action", choices=["select", "check", "status"])
+    p_power = sub.add_parser("power", help="power profile policy (set/get/cycle/status)")
+    p_power.add_argument("action", choices=["set", "get", "cycle", "status"])
+    p_power.add_argument("value", nargs="?", default=None)
+    p_power.add_argument("--waybar", action="store_true")
+    sub.add_parser("powerd", help="root power effector (systemd system service)")
 
     args = parser.parse_args(argv)
     if args.cmd == "daemon":
@@ -1910,6 +2835,14 @@ def main(argv: list[str]) -> int:
         return profile_main(args.action, args.name)
     if args.cmd == "gpu":
         return gpu_main(args.action)
+    if args.cmd == "power":
+        return power_main(args.action, args.value, args.waybar)
+    if args.cmd == "powerd":
+        try:
+            asyncio.run(powerd_main())
+        except KeyboardInterrupt:
+            return 0
+        return 0
     return 1
 
 

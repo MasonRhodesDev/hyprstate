@@ -21,6 +21,24 @@ echo "  -> $BIN_TARGET"
 echo "  -> $HOOK_TARGET"
 echo "  -> /etc/udev/rules.d/60-hyprstate-usb-wake.rules"
 
+# ---- 1b. powerd: root-owned COPY + system unit + bus policy + activation ----
+# powerd runs as root; it must execute a root-owned copy, never the
+# user-writable dev symlink above. Updating powerd = rerun this script.
+sudo install -D -m 755 -o root -g root "$SRC/hyprstate.py" /usr/local/libexec/hyprstate
+sudo install -m 644 "$SRC/hyprstate-powerd.service" /etc/systemd/system/hyprstate-powerd.service
+sudo install -m 644 "$SRC/org.hyprstate.Power1.conf" /etc/dbus-1/system.d/org.hyprstate.Power1.conf
+sudo install -m 644 "$SRC/org.hyprstate.Power1.service" /usr/share/dbus-1/system-services/org.hyprstate.Power1.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hyprstate-powerd.service
+sleep 1
+if ! systemctl is-active --quiet hyprstate-powerd.service; then
+    echo "ERROR: hyprstate-powerd failed to start (bus policy? unit?)" >&2
+    systemctl status hyprstate-powerd.service --no-pager >&2 || true
+    exit 1
+fi
+echo "  -> /usr/local/libexec/hyprstate (root-owned copy)"
+echo "  -> hyprstate-powerd.service (active)"
+
 # ---- 2. user-level: systemd unit ----
 mkdir -p "$USER_UNIT_DIR"
 cp "$SRC/hyprstate.service" "$USER_UNIT_DIR/hyprstate.service"

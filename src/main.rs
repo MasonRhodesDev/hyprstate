@@ -65,11 +65,23 @@ enum Cmd {
         #[arg(long)]
         waybar: bool,
     },
-    /// Monitor profiles
+    /// Monitor profiles (save captures the live layout as a new profile)
     Profile {
-        #[arg(value_parser = ["list", "current", "switch"])]
+        #[arg(value_parser = ["list", "current", "switch", "save"])]
         action: String,
         name: Option<String>,
+        /// save: eDP policy directive for the captured profile
+        #[arg(long, value_parser = ["auto", "enable", "disable"], default_value = "auto")]
+        edp: String,
+        /// save: render-GPU preference directive
+        #[arg(long, value_parser = ["auto", "igpu", "dgpu"], default_value = "auto")]
+        gpu: String,
+        /// save: explicit `#@ priority` (default: implicit match count)
+        #[arg(long)]
+        priority: Option<i64>,
+        /// save: overwrite an existing profile
+        #[arg(long)]
+        force: bool,
     },
     /// systemctl + journalctl + gpu + power summary
     Status,
@@ -126,7 +138,31 @@ fn main() {
             value,
             waybar,
         } => cli::power::run(&action, value.as_deref(), waybar),
-        Cmd::Profile { action, name } => cli::profile::run(&action, name.as_deref()),
+        Cmd::Profile {
+            action,
+            name,
+            edp,
+            gpu,
+            priority,
+            force,
+        } => {
+            use pure::profiles::{EdpPolicy, GpuPref};
+            let save = cli::profile::SaveOpts {
+                edp: match edp.as_str() {
+                    "enable" => EdpPolicy::Enable,
+                    "disable" => EdpPolicy::Disable,
+                    _ => EdpPolicy::Auto,
+                },
+                gpu: match gpu.as_str() {
+                    "igpu" => GpuPref::Igpu,
+                    "dgpu" => GpuPref::Dgpu,
+                    _ => GpuPref::Auto,
+                },
+                priority,
+                force,
+            };
+            cli::profile::run(&action, name.as_deref(), &save)
+        }
         Cmd::Status => cli::status::run(),
     };
     std::process::exit(rc);

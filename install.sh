@@ -1,6 +1,7 @@
 #!/bin/bash
 # Idempotent installer for hyprstate.
-# Symlinks the binary + sleep hook into system paths, drops the systemd user unit.
+# Symlinks the user-facing binary, installs root-owned copies of everything
+# root executes (sleep hook, powerd libexec), drops the systemd user unit.
 # Migrates from predecessor names (hypr-power, hypr-fsm) if found.
 set -euo pipefail
 
@@ -12,9 +13,12 @@ USER_UNIT_DIR="$HOME/.config/systemd/user"
 echo "Source: $SRC"
 
 # ---- 1. system-level: binary symlink + sleep hook + udev rule (one sudo prompt) ----
+# The /usr/local/bin symlink serves the USER daemon + CLI only. The sleep
+# hook runs as root, so it is a root-owned COPY (execing the libexec copy
+# from 1b) — root must never execute user-writable code (POWER_SPEC V3).
 chmod +x "$SRC/hyprstate.py" "$SRC/system-sleep-hook.sh"
 sudo ln -sfn "$SRC/hyprstate.py" "$BIN_TARGET"
-sudo ln -sfn "$SRC/system-sleep-hook.sh" "$HOOK_TARGET"
+sudo install -m 755 -o root -g root "$SRC/system-sleep-hook.sh" "$HOOK_TARGET"
 sudo install -m 644 "$SRC/60-hyprstate-usb-wake.rules" /etc/udev/rules.d/60-hyprstate-usb-wake.rules
 sudo udevadm control --reload-rules
 echo "  -> $BIN_TARGET"

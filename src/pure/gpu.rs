@@ -34,6 +34,17 @@ pub enum GpuMode {
     Off,
 }
 
+impl GpuMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GpuMode::Auto => "auto",
+            GpuMode::Igpu => "igpu",
+            GpuMode::Dgpu => "dgpu",
+            GpuMode::Off => "off",
+        }
+    }
+}
+
 /// Where the mode came from — feeds the `reason` strings (`override-igpu`,
 /// `profile-dgpu`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

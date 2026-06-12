@@ -47,6 +47,36 @@ pub fn platform_profile_path() -> &'static Path {
     Path::new(PLATFORM_PROFILE_PATH)
 }
 
+// ---- monitor profiles ----
+
+pub fn profiles_dir() -> PathBuf {
+    hypr_config("profiles")
+}
+
+pub fn active_profile_link() -> PathBuf {
+    profiles_dir().join(".active.conf")
+}
+
+// ---- power policy (user side) ----
+
+pub fn power_conf_file() -> PathBuf {
+    hypr_config("power.conf")
+}
+
+pub fn power_override_file() -> PathBuf {
+    hypr_config("power-override")
+}
+
+// ---- sleep hook / usb wake ----
+
+pub const SLEEP_HOOK_LOG: &str = "/var/log/hyprstate-sleep.log";
+pub const WAKE_USB_CONTROLLER: &str = "/sys/bus/pci/devices/0000:0e:00.3/power/wakeup";
+/// (idVendor, idProduct) -> label for the input devices the hook tracks.
+pub const WAKE_USB_VENDORS: [((&str, &str), &str); 2] = [
+    (("3297", "1977"), "ZSA Voyager (keyboard)"),
+    (("046d", "c539"), "Logitech Lightspeed (mouse receiver)"),
+];
+
 // ---- powerd (root effector; see POWER_SPEC.md) ----
 
 pub const POWERD_BUS: &str = "org.hyprstate.Power1";

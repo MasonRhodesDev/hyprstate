@@ -33,7 +33,8 @@ for hotplugged hubs. Configuration lives in ~/.config/hypr (power.conf,
 profiles/) and is not part of this package.
 
 %prep
-%autosetup -p1
+# -a1 unpacks the vendor tarball (vendor/ at its root) into the source dir.
+%autosetup -p1 -a1
 %cargo_prep -v vendor
 
 %build

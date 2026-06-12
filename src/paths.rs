@@ -46,3 +46,13 @@ pub fn gpu_state_path() -> PathBuf {
 pub fn platform_profile_path() -> &'static Path {
     Path::new(PLATFORM_PROFILE_PATH)
 }
+
+// ---- powerd (root effector; see POWER_SPEC.md) ----
+
+pub const POWERD_BUS: &str = "org.hyprstate.Power1";
+pub const POWERD_PATH: &str = "/org/hyprstate/Power1";
+pub const POWERD_STATE_FILE: &str = "/var/lib/hyprstate/profile";
+pub const PLATFORM_PROFILE_CHOICES_PATH: &str = "/sys/firmware/acpi/platform_profile_choices";
+pub const CPUFREQ_DIR: &str = "/sys/devices/system/cpu/cpufreq";
+pub const ASPM_POLICY_PATH: &str = "/sys/module/pcie_aspm/parameters/policy";
+pub const INTEL_NO_TURBO_PATH: &str = "/sys/devices/system/cpu/intel_pstate/no_turbo";

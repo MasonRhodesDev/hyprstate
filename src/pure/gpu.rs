@@ -130,6 +130,13 @@ pub fn devnode(card: &GpuCard) -> String {
     format!("/dev/dri/{}", card.card)
 }
 
+/// pci-0000:03:00.0 from .../pci-0000:03:00.0-card — the stable per-card
+/// key used in the state-file snapshot and powerd's dpm row labels.
+pub fn pci_key(path: &str) -> &str {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.strip_suffix("-card").unwrap_or(base)
+}
+
 /// Pure: (device list primary-first, reason) or (None, reason) = unmanaged
 /// (caller prints nothing; Hyprland falls back to its own defaults).
 pub fn gpu_desired(

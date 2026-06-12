@@ -32,10 +32,8 @@ pub struct CardRecord {
     pub edp: u32,
 }
 
-/// pci-0000:03:00.0 from .../pci-0000:03:00.0-card.
 fn snapshot_key(path: &str) -> String {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    base.strip_suffix("-card").unwrap_or(base).to_string()
+    crate::pure::gpu::pci_key(path).to_string()
 }
 
 /// Best-effort atomic intent record. Never panics, never touches stdout

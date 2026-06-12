@@ -8,9 +8,12 @@
 //!   Layer 3 — pure/:          (state, inputs) -> state maps; no I/O at all.
 
 mod cli;
+// dead_code: parts of the dbus/pure/sysio layers are consumed by milestones
+// that haven't landed yet (daemon, remaining CLIs).
+#[allow(dead_code)]
+mod dbus;
 mod paths;
-// dead_code: parts of the pure/sysio layers are consumed by milestones that
-// haven't landed yet (powerd, daemon).
+mod powerd;
 #[allow(dead_code)]
 mod pure;
 #[allow(dead_code)]
@@ -35,7 +38,12 @@ enum Cmd {
         shadow: bool,
     },
     /// Root power effector (systemd system service, org.hyprstate.Power1)
-    Powerd,
+    Powerd {
+        /// Dev/testing: serve on the session bus instead of the system bus.
+        /// Sysfs writes degrade to skipped-unsupported when unprivileged.
+        #[arg(long, hide = true)]
+        session: bool,
+    },
     /// Invoked by /usr/lib/systemd/system-sleep/ as root
     SleepHook {
         action: Option<String>,
@@ -69,7 +77,22 @@ fn main() {
     let cli = Cli::parse();
     let rc = match cli.cmd {
         Cmd::Daemon { .. } => todo("daemon"),
-        Cmd::Powerd => todo("powerd"),
+        Cmd::Powerd { session } => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stdout)
+                .init();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            match rt.block_on(powerd::run(session)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("powerd failed: {e:#}");
+                    1
+                }
+            }
+        }
         Cmd::SleepHook { .. } => todo("sleep-hook"),
         Cmd::Gpu { action } => cli::gpu::run(&action),
         Cmd::Power { .. } => todo("power"),

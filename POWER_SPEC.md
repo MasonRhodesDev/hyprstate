@@ -102,8 +102,13 @@ tuned.service tlp.service, WantedBy=multi-user.target.
 ### Base states & config
 
 `docked-ac` (on_ac_settled ∧ ext_mon_count ≥ 1) | `ac` | `battery` |
-`battery-low` (enter ≤ threshold, exit ≥ threshold+3). No battery present →
-permanently `ac`/`docked-ac` (V10).
+`battery-low` (enter ≤ threshold, exit ≥ threshold+3). The AC axis is decided
+by `on_ac_settled` alone — desktops never see an unplug, so no battery →
+permanently `ac`/`docked-ac` falls out without a special case (V10), and a
+laptop with UPower down still reaches battery profiles via the V8 reconciler
+repair. `battery_percent` gates only the low-battery machinery; it must NOT
+gate the axis (that would pin a UPower-down laptop to AC profiles, defeating
+V8).
 
 `~/.config/hypr/power.conf` (chezmoi-delivered), parsed by a **dedicated
 `_POWER_DIRECTIVE_RE = ^#@\s*([a-z][a-z-]*)\s*=\s*(.+?)\s*$`** (V1 — the shared

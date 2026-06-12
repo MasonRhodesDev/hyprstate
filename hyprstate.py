@@ -728,9 +728,17 @@ def load_power_policy() -> tuple[dict[str, str], int]:
 
 
 def power_base_state(ctx: Context) -> str:
-    """Pure: docked-ac | ac | battery | battery-low. No battery present ->
-    permanently on the AC side."""
-    if ctx.battery_percent is None or ctx.on_ac_settled:
+    """Pure: docked-ac | ac | battery | battery-low.
+
+    The AC axis is decided by on_ac_settled ALONE. Desktops never observe an
+    AC-unplug, so on_ac_settled stays True and they sit permanently on the AC
+    side without a special case — while a laptop with UPower down (which
+    leaves battery_percent None) still reaches the battery profiles via the
+    reconciler's sysfs on_ac repair + POWER_AC_SETTLED. Gating the axis on
+    battery_percent here would pin that laptop to AC profiles forever,
+    defeating the V8 reconciler exception. battery_percent only gates the
+    low-battery machinery (low_battery is never True without a battery)."""
+    if ctx.on_ac_settled:
         return "docked-ac" if ctx.ext_mon_count >= 1 else "ac"
     return "battery-low" if ctx.low_battery else "battery"
 

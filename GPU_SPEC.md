@@ -29,7 +29,14 @@ hyprstate gpu check    # compute; print; NO state-file write
 hyprstate gpu status   # human-readable: state file vs live check, sync verdict
 ```
 
-`select`/`check` print a colon-separated `/dev/dri/by-path/...` list (primary first)
+**Output format — `/dev/dri/cardN` device nodes, NOT by-path.** `AQ_DRM_DEVICES`
+is colon-separated and PCI by-path names contain colons (`pci-0000:03:00.0-card`),
+so aquamarine (verified on 0.9.5) shatters a by-path value on every `:` →
+"Failed to canonicalize path … Found no gpus to use" → backend fails → no GUI.
+We SELECT by the stable PCI by-path (cardN renumbers across boots) but EMIT the
+resolved cardN node, recomputed fresh every login so renumbering is harmless.
+
+`select`/`check` print a colon-separated `/dev/dri/cardN` list (primary first)
 on stdout, or **nothing** when unmanaged. Exit 0 in all those cases. The `gpu`
 subcommand path never configures logging to stdout (daemon's `stream=sys.stdout`
 convention is forbidden here — stderr only); the device list is emitted exactly once,
@@ -109,7 +116,7 @@ Discrete candidates sorted by (external display count desc, VRAM desc); best = [
   "version": 1,
   "mode": "auto",
   "reason": "dgpu-has-display",
-  "primary": "/dev/dri/by-path/pci-0000:03:00.0-card",
+  "primary": "/dev/dri/card1",
   "devices": ["...03:00.0-card", "...c4:00.0-card"],
   "omitted": [],
   "snapshot": {"pci-0000:03:00.0": {"type": "discrete", "boot_vga": 0,
@@ -188,7 +195,7 @@ if [ -x "$_gpu_sel" ]; then
     _aq=$("$_gpu_sel" gpu select 2>/dev/null) || _aq=""
     case "$_aq" in *[!/:.A-Za-z0-9_-]*) _aq="" ;; esac   # reject newlines/garbage
     case "$_aq" in
-        /dev/dri/by-path/pci-*-card*) export AQ_DRM_DEVICES="$_aq" ;;
+        /dev/dri/card*) export AQ_DRM_DEVICES="$_aq" ;;
     esac
 fi
 unset _gpu_sel _aq

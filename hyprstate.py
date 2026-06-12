@@ -526,7 +526,18 @@ def gpu_desired(snap: GpuSnapshot, mode: str, source: str) -> tuple[list[str] | 
     )
     if not usable:
         return None, "bailed-transient"
-    return [c.path for c in devices], reason
+    # Emit /dev/dri/cardN device NODES, not the by-path symlinks. AQ_DRM_DEVICES
+    # is colon-separated and PCI by-path names contain colons
+    # (pci-0000:03:00.0-card), so aquamarine shatters a by-path value on every
+    # ':' and finds no GPUs ("Failed to canonicalize path ... Found no gpus").
+    # We still SELECT by the stable PCI by-path (c.path) — boot renumbering is
+    # a non-issue because we re-resolve cardN fresh every login.
+    return [_gpu_devnode(c) for c in devices], reason
+
+
+def _gpu_devnode(card: GpuCard) -> str:
+    """Colon-free device node for AQ_DRM_DEVICES (see gpu_desired)."""
+    return f"/dev/dri/{card.card}"
 
 
 def _write_gpu_state(mode: str, reason: str, devices: list[str] | None,
@@ -541,8 +552,8 @@ def _write_gpu_state(mode: str, reason: str, devices: list[str] | None,
             "reason": reason,
             "primary": devices[0] if devices else None,
             "devices": devices or [],
-            "omitted": [c.path for c in snap.cards
-                        if not devices or c.path not in devices],
+            "omitted": [_gpu_devnode(c) for c in snap.cards
+                        if not devices or _gpu_devnode(c) not in devices],
             "snapshot": {
                 c.path.rsplit("/", 1)[-1].removesuffix("-card"): {
                     "type": "integrated" if c is integrated else "discrete",

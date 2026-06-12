@@ -1,0 +1,29 @@
+[Unit]
+Description=hyprstate powerd: root power-profile effector (org.hyprstate.Power1)
+Documentation=https://github.com/MasonRhodesDev/hyprstate
+# Mutually exclusive with other platform_profile owners.
+Conflicts=power-profiles-daemon.service tuned.service tlp.service
+
+[Service]
+Type=dbus
+BusName=org.hyprstate.Power1
+ExecStart=/usr/bin/hyprstate powerd
+StateDirectory=hyprstate
+Restart=on-failure
+RestartSec=2
+# Hardening. Deliberately ABSENT: ProtectKernelTunables (it remounts /sys
+# read-only, and writing /sys is this service's entire purpose).
+ProtectSystem=strict
+ReadWritePaths=/sys
+ProtectHome=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=hyprstate: Hyprland session state machine (lid / monitors / profiles / lock / suspend)
+After=graphical-session.target
+PartOf=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hyprstate daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

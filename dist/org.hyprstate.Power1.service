@@ -1,0 +1,8 @@
+# D-Bus activation: a caller hitting org.hyprstate.Power1 before the unit is
+# up triggers systemd activation instead of ServiceUnknown (closes the boot
+# race for early ApplyProfile calls).
+[D-BUS Service]
+Name=org.hyprstate.Power1
+Exec=/bin/false
+User=root
+SystemdService=hyprstate-powerd.service

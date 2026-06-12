@@ -8,8 +8,9 @@
 //!   Layer 3 — pure/:          (state, inputs) -> state maps; no I/O at all.
 
 mod cli;
-// dead_code: parts of the dbus/pure/sysio layers are consumed by milestones
-// that haven't landed yet (daemon, remaining CLIs).
+mod daemon;
+// dead_code: a few proxy methods exist for completeness of the pinned
+// interface shapes rather than current callers.
 #[allow(dead_code)]
 mod dbus;
 mod paths;
@@ -77,7 +78,22 @@ enum Cmd {
 fn main() {
     let cli = Cli::parse();
     let rc = match cli.cmd {
-        Cmd::Daemon { .. } => todo("daemon"),
+        Cmd::Daemon { shadow } => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stdout)
+                .init();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            match rt.block_on(daemon::run(shadow)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("daemon failed: {e:#}");
+                    1
+                }
+            }
+        }
         Cmd::Powerd { session } => {
             tracing_subscriber::fmt()
                 .with_writer(std::io::stdout)
@@ -114,9 +130,4 @@ fn main() {
         Cmd::Status => cli::status::run(),
     };
     std::process::exit(rc);
-}
-
-fn todo(cmd: &str) -> i32 {
-    eprintln!("hyprstate v2: `{cmd}` is not ported yet — use hyprstate.py (v1)");
-    2
 }

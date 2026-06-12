@@ -2,3 +2,4 @@
 
 pub mod logind;
 pub mod powerd_client;
+pub mod upower;

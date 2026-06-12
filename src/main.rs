@@ -7,10 +7,14 @@
 //!   Layer 2 — on_enter:       composes effectors; the only place effects fire.
 //!   Layer 3 — pure/:          (state, inputs) -> state maps; no I/O at all.
 
-// dead_code: the pure layer's consumers (gpu CLI, powerd, daemon) land in
-// later milestones; only the tests exercise it so far.
+mod cli;
+mod paths;
+// dead_code: parts of the pure/sysio layers are consumed by milestones that
+// haven't landed yet (powerd, daemon).
 #[allow(dead_code)]
 mod pure;
+#[allow(dead_code)]
+mod sysio;
 
 use clap::{Parser, Subcommand};
 
@@ -67,7 +71,7 @@ fn main() {
         Cmd::Daemon { .. } => todo("daemon"),
         Cmd::Powerd => todo("powerd"),
         Cmd::SleepHook { .. } => todo("sleep-hook"),
-        Cmd::Gpu { .. } => todo("gpu"),
+        Cmd::Gpu { action } => cli::gpu::run(&action),
         Cmd::Power { .. } => todo("power"),
         Cmd::Profile { .. } => todo("profile"),
         Cmd::Status => todo("status"),

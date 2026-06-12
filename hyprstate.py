@@ -377,6 +377,36 @@ def monitor_signature() -> frozenset[str]:
         return frozenset()
 
 
+def ingest_active_profile(ctx: Context) -> bool:
+    """Sync ctx.current_profile / edp_policy with the .active.conf symlink.
+    Returns True when an out-of-band repoint (`hyprstate profile switch`) was
+    ingested. The daemon's own apply_profile updates ctx synchronously, so
+    this only fires for external changes — without it the reconciler would
+    keep enforcing the OLD profile's eDP policy against the new config every
+    5 seconds. The switched-to profile holds until the monitor set changes
+    (MONITORS_CHANGED re-derives from the signature; a manual switch is a
+    force-apply, not a pin)."""
+    try:
+        if not ACTIVE_PROFILE_LINK.is_symlink():
+            return False
+        name = ACTIVE_PROFILE_LINK.resolve().stem
+    except OSError as e:
+        LOG.warning("could not read %s: %s", ACTIVE_PROFILE_LINK, e)
+        return False
+    if name == ctx.current_profile:
+        return False
+    edp = "auto"
+    for p in load_profiles():
+        if p.name == name:
+            edp = p.edp
+            break
+    LOG.info("PROFILE: ingested external switch %s -> %s (edp=%s)",
+             ctx.current_profile, name, edp)
+    ctx.current_profile = name
+    ctx.edp_policy = edp
+    return True
+
+
 # =========================================================================
 # GPU-primary selection (see GPU_SPEC.md)
 # =========================================================================
@@ -1638,7 +1668,11 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         # eDP invariant. The profile's edp_policy can override the
         # lid-driven default, so the reconciler routes through set_edp(...,
         # ctx) and only logs drift when the *resolved* policy is being
-        # violated.
+        # violated. Ingest any out-of-band .active.conf repoint first —
+        # enforcing a stale edp_policy here would fight a manual
+        # `profile switch` every pass (backstop for the RECONCILE-event
+        # ingest, e.g. when the socket reader is down).
+        ingest_active_profile(ctx)
         edp_disabled = _edp_is_disabled()
         should_be_enabled = ctx.state is State.LID_OPEN
         if ctx.edp_policy == "disable":
@@ -1901,6 +1935,11 @@ async def dispatcher(
 
         if ev.kind is EventKind.RECONCILE:
             if state is not State.SUSPENDING:
+                # `profile switch` repoints .active.conf and runs `hyprctl
+                # reload`, which lands here as configreloaded — ingest the
+                # repoint BEFORE re-asserting so set_edp uses the new
+                # profile's policy, not the stale one.
+                ingest_active_profile(ctx)
                 LOG.info("RECONCILE (%s): re-asserting %s/%s",
                          ev.payload, state.value, ctx.screen_state.value)
                 await on_enter(state, ctx, fx)
@@ -2782,9 +2821,13 @@ def profile_main(action: str, name: str | None = None) -> int:
     """CLI: profile list | current | switch <name>.
 
     The daemon's MONITORS_CHANGED handler is the canonical apply path.
-    `switch` repoints .active.conf and signals SIGHUP-equivalent by
-    poking the daemon: it'll re-evaluate via `hyprctl reload` reaching the
-    socket2 `configreloaded` event, then a synthesized MONITORS_CHANGED."""
+    `switch` repoints .active.conf and runs `hyprctl reload` so the user sees
+    the effect immediately; the daemon picks the repoint up via
+    ingest_active_profile (on the resulting configreloaded RECONCILE, with
+    the 5s reconciler as backstop) and adopts the new edp policy. The switch
+    holds until the monitor set changes — MONITORS_CHANGED re-derives the
+    profile from the signature; a manual switch is a force-apply, not a
+    pin."""
     profiles = load_profiles()
     sig = monitor_signature()
 

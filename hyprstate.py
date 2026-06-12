@@ -178,6 +178,7 @@ class EventKind(Enum):
     RESUMED = "Resumed"
     RECONCILE = "Reconcile"
     MONITORS_CHANGED = "MonitorsChanged"  # debounced; fires on add/remove bursts
+    CTX_REPAIRED = "CtxRepaired"  # reconciler fixed drifted inputs; re-derive state
     PLATFORM_PROFILE_CHANGED = "PlatformProfileChanged"
     GPU_OVERRIDE_CHANGED = "GpuOverrideChanged"
     BATTERY_LOW_CHANGED = "BatteryLowChanged"
@@ -1218,7 +1219,14 @@ async def on_enter_screen(state: ScreenState, ctx: Context, fx: Effectors) -> No
 
 def desired_state(state: State, ev: EventKind, ctx: Context) -> State | None:
     if ev is EventKind.TIMER_EXPIRED:
-        return State.SUSPENDING if state is State.COUNTDOWN else None
+        if state is not State.COUNTDOWN:
+            return None
+        # Re-derive before suspending: if ctx was repaired behind the FSM's
+        # back (reconciler drift — e.g. a missed LidClosed change), no
+        # transition fired and the grace timer was never cancelled. A stale
+        # timer must not suspend a machine whose world says LID_OPEN.
+        target = _world_state(ctx)
+        return State.SUSPENDING if target is State.COUNTDOWN else target
 
     if ev is EventKind.RESUMED:
         return _world_state(ctx) if state is State.SUSPENDING else None
@@ -1481,8 +1489,9 @@ async def inhibitor_poller(queue: asyncio.Queue, ctx: Context, manager_iface) ->
 async def mode_poller(queue: asyncio.Queue) -> None:
     """Queue events when platform_profile, the gpu-select override, or the
     power override changes. Sibling of inhibitor_poller (sysfs/file diff ->
-    event); the reconciler stays event-free per its silent-ctx-repair contract
-    (one documented exception: see reconciler)."""
+    event); the reconciler's job is ctx repair, but it routes repairs back
+    through the dispatcher (CTX_REPAIRED / POWER_AC_SETTLED) rather than
+    polling new inputs — new input sources belong here."""
     last_profile = _read_first_word(PLATFORM_PROFILE_PATH)
     last_gpu = _read_first_word(GPU_OVERRIDE_FILE)
     last_power = _read_first_word(POWER_OVERRIDE_FILE)
@@ -1555,7 +1564,10 @@ def gpu_drift_check(ctx: Context, fx: Effectors, trigger: str,
 
 
 async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
-    """Every RECONCILE_SECONDS, refresh ctx + re-assert eDP and DPMS invariants."""
+    """Every RECONCILE_SECONDS, refresh ctx + re-assert eDP and DPMS
+    invariants. Repaired inputs are also routed back into the dispatcher
+    (CTX_REPAIRED for the FSMs, POWER_AC_SETTLED for power policy) so drift
+    correction drives transitions instead of silently diverging from them."""
     while True:
         await asyncio.sleep(RECONCILE_SECONDS)
         try:
@@ -1570,23 +1582,32 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
             continue
 
         drift = []
+        fsm_input_drift = False  # any input _world_state / the screen FSM reads
+        power_input_drift = False
         if real_lid != ctx.lid_closed:
             drift.append(f"lid_closed {ctx.lid_closed}->{real_lid}")
             ctx.lid_closed = real_lid
-        power_input_drift = False
+            fsm_input_drift = True
         if real_ext != ctx.ext_mon_count:
             drift.append(f"ext_mon {ctx.ext_mon_count}->{real_ext}")
             ctx.ext_mon_count = real_ext
+            fsm_input_drift = True
             power_input_drift = True
+            # Monitor events were evidently missed, so profile reconciliation
+            # was missed too — re-derive via the normal debounced path.
+            fx.schedule_profile_reconcile(ctx)
         if real_logind_inh != ctx.logind_inhibitor:
             drift.append(f"logind_inh {ctx.logind_inhibitor}->{real_logind_inh}")
             ctx.logind_inhibitor = real_logind_inh
+            fsm_input_drift = True
         if real_wayland_inh != ctx.wayland_inhibitor:
             drift.append(f"wayland_inh {ctx.wayland_inhibitor}->{real_wayland_inh}")
             ctx.wayland_inhibitor = real_wayland_inh
+            fsm_input_drift = True
         if real_locked != ctx.locked:
             drift.append(f"locked {ctx.locked}->{real_locked} (pgrep fallback)")
             ctx.locked = real_locked
+            fsm_input_drift = True
         if real_on_ac is not None and real_on_ac != ctx.on_ac:
             drift.append(f"on_ac {ctx.on_ac}->{real_on_ac} (sysfs fallback)")
             ctx.on_ac = real_on_ac
@@ -1595,11 +1616,19 @@ async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
         if drift:
             LOG.warning("reconciler ctx drift: %s", "; ".join(drift))
 
-        # The ONE exception to the reconciler's event-free contract: repaired
-        # power inputs (on_ac / ext_mon_count) must reach power policy —
-        # covers boot-on-battery with UPower down, which would otherwise run
-        # the AC profile indefinitely. POWER_AC_SETTLED feeds only power
-        # policy, so monitor-profile logic is unaffected.
+        # Repaired ctx must also DRIVE the machines, not just describe them —
+        # a missed LidClosed signal would otherwise leave the FSM stale
+        # forever (worst case: a stale grace timer suspending a lid-open
+        # machine). CTX_REPAIRED carries no ctx mutations of its own; it just
+        # routes the repaired inputs through the normal desired_state /
+        # desired_screen_state paths.
+        if fsm_input_drift:
+            await fx.queue.put(Event(EventKind.CTX_REPAIRED))
+
+        # Repaired power inputs (on_ac / ext_mon_count) must reach power
+        # policy — covers boot-on-battery with UPower down, which would
+        # otherwise run the AC profile indefinitely. POWER_AC_SETTLED feeds
+        # only power policy, so monitor-profile logic is unaffected.
         if power_input_drift:
             await fx.queue.put(Event(EventKind.POWER_AC_SETTLED))
 

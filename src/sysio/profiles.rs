@@ -78,6 +78,44 @@ pub fn repoint_active_profile(target: &Path) -> std::io::Result<()> {
     fs::rename(&tmp, &link)
 }
 
+/// All monitors (including disabled) from `hyprctl monitors all -j`, for
+/// `profile save` capture. Empty on any failure.
+pub fn monitor_snapshot_all() -> Vec<crate::pure::profiles::MonitorSnapshot> {
+    let out = match std::process::Command::new("hyprctl")
+        .args(["monitors", "all", "-j"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("WARNING hyprctl monitors all failed: {e}");
+            return Vec::new();
+        }
+    };
+    let Ok(monitors) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) else {
+        eprintln!("WARNING monitor_snapshot_all: bad hyprctl json");
+        return Vec::new();
+    };
+    monitors
+        .iter()
+        .map(|m| {
+            let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let n = |k: &str| m.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            crate::pure::profiles::MonitorSnapshot {
+                name: s("name"),
+                description: s("description"),
+                width: n("width") as u32,
+                height: n("height") as u32,
+                refresh: n("refreshRate"),
+                x: n("x") as i32,
+                y: n("y") as i32,
+                scale: n("scale"),
+                transform: n("transform") as u8,
+                disabled: m.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
 /// Snapshot of currently-connected monitor descriptions from hyprctl.
 pub fn monitor_signature() -> Vec<String> {
     let out = match std::process::Command::new("hyprctl")

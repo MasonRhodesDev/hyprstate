@@ -161,6 +161,131 @@ pub fn select_profile<'a>(signature: &[String], profiles: &'a [Profile]) -> Opti
         })
 }
 
+// =========================================================================
+// Profile capture (`profile save` — the editor folded in from hyprdm)
+// =========================================================================
+
+/// One monitor from `hyprctl monitors all -j`, as capture needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MonitorSnapshot {
+    pub name: String,
+    pub description: String,
+    pub width: u32,
+    pub height: u32,
+    pub refresh: f64,
+    pub x: i32,
+    pub y: i32,
+    pub scale: f64,
+    pub transform: u8,
+    pub disabled: bool,
+}
+
+/// "165.00000" -> "165", "1.25" -> "1.25" — matches hand-written profiles.
+fn fmt_num(v: f64) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Hyprland monitor selector. Convention from the hand-written profiles:
+/// the internal panel is addressed by NAME (eDP-*), externals by stable
+/// `desc:`. Descriptions containing commas would shatter the monitor
+/// keyword's comma-separated syntax — fall back to the (unstable) name and
+/// warn.
+fn selector(m: &MonitorSnapshot, warnings: &mut Vec<String>) -> String {
+    if m.name.starts_with("eDP") {
+        return m.name.clone();
+    }
+    if m.description.contains(',') {
+        warnings.push(format!(
+            "{}: description contains a comma — using the connector name \
+             (NOT stable across replugs): {:?}",
+            m.name, m.description
+        ));
+        return m.name.clone();
+    }
+    format!("desc:{}", m.description)
+}
+
+/// Render the current layout as a profile body (the capture side of
+/// `profile save`). Conventions, all lifted from the hand-written profiles:
+/// - `#@ match` on EXTERNAL descriptions only, so the profile keeps matching
+///   when the lid closes and eDP leaves the signature; a layout with no
+///   externals matches on the eDP description (the laptop-only case).
+/// - Enabled monitors sorted left-to-right; disabled ones pinned `disable`.
+/// - Default priority (match count) is left implicit unless overridden.
+pub fn render_profile(
+    name: &str,
+    date: &str,
+    monitors: &[MonitorSnapshot],
+    edp: EdpPolicy,
+    gpu: GpuPref,
+    priority: Option<i64>,
+) -> Result<(String, Vec<String>), String> {
+    let mut enabled: Vec<&MonitorSnapshot> = monitors.iter().filter(|m| !m.disabled).collect();
+    if enabled.is_empty() {
+        return Err("no enabled monitors to capture".into());
+    }
+    enabled.sort_by_key(|m| (m.x, m.y));
+    let disabled: Vec<&MonitorSnapshot> = monitors.iter().filter(|m| m.disabled).collect();
+
+    let mut warnings = Vec::new();
+    let externals: Vec<&&MonitorSnapshot> = enabled
+        .iter()
+        .filter(|m| !m.name.starts_with("eDP"))
+        .collect();
+    let match_descs: Vec<&str> = if externals.is_empty() {
+        enabled.iter().map(|m| m.description.as_str()).collect()
+    } else {
+        externals.iter().map(|m| m.description.as_str()).collect()
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# Profile: {name} — captured from the live layout ({date}).\n#\n"
+    ));
+    for desc in &match_descs {
+        out.push_str(&format!("#@ match = desc:{desc}\n"));
+    }
+    out.push_str(&format!("#@ edp = {}\n", edp.as_str()));
+    if gpu != GpuPref::Auto {
+        out.push_str(&format!("#@ gpu = {}\n", gpu.as_str()));
+    }
+    if let Some(p) = priority {
+        out.push_str(&format!("#@ priority = {p}\n"));
+    }
+    out.push('\n');
+
+    for m in &enabled {
+        let mut line = format!(
+            "monitor = {},{}x{}@{},{}x{},{}",
+            selector(m, &mut warnings),
+            m.width,
+            m.height,
+            fmt_num(m.refresh),
+            m.x,
+            m.y,
+            fmt_num(m.scale)
+        );
+        if m.transform != 0 {
+            line.push_str(&format!(",transform,{}", m.transform));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    for m in &disabled {
+        out.push_str(&format!(
+            "monitor = {},disable\n",
+            selector(m, &mut warnings)
+        ));
+    }
+
+    out.push_str(
+        "\n# Add workspace pinning if desired, e.g.:\n\
+         # workspace = 1, monitor:desc:..., default:true\n",
+    );
+    Ok((out, warnings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +414,139 @@ mod tests {
         assert!(match_in_signature("desc:Dell U2723QE", &signature));
         assert!(match_in_signature("Dell U2723QE", &signature));
         assert!(!match_in_signature("U2723QE", &signature)); // not a prefix
+    }
+
+    fn mon(
+        name: &str,
+        desc: &str,
+        x: i32,
+        refresh: f64,
+        scale: f64,
+        disabled: bool,
+    ) -> MonitorSnapshot {
+        MonitorSnapshot {
+            name: name.to_string(),
+            description: desc.to_string(),
+            width: 3840,
+            height: 2160,
+            refresh,
+            x,
+            y: 0,
+            scale,
+            transform: 0,
+            disabled,
+        }
+    }
+
+    #[test]
+    fn test_render_profile_docked_layout() {
+        // eDP enabled alongside externals: matches must cover EXTERNALS
+        // only (lid close removes eDP from the signature) and the panel is
+        // addressed by name, externals by desc — the dual-4k conventions.
+        let monitors = vec![
+            mon("eDP-2", "BOE 0x0BC9", 6144, 165.0, 1.25, false),
+            mon("DP-1", "Dell B", 3072, 120.0, 1.25, false),
+            mon("DP-4", "Dell A", 0, 120.0, 1.25, false),
+        ];
+        let (text, warnings) = render_profile(
+            "desk",
+            "2026-06-12",
+            &monitors,
+            EdpPolicy::Auto,
+            GpuPref::Auto,
+            None,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+        let expected = "\
+# Profile: desk — captured from the live layout (2026-06-12).
+#
+#@ match = desc:Dell A
+#@ match = desc:Dell B
+#@ edp = auto
+
+monitor = desc:Dell A,3840x2160@120,0x0,1.25
+monitor = desc:Dell B,3840x2160@120,3072x0,1.25
+monitor = eDP-2,3840x2160@165,6144x0,1.25
+
+# Add workspace pinning if desired, e.g.:
+# workspace = 1, monitor:desc:..., default:true
+";
+        assert_eq!(text, expected);
+        // Round-trip: the rendered profile must parse and self-match.
+        let (profile, _) = parse_profile("desk", &text).unwrap();
+        assert_eq!(profile.priority, 2); // implicit = match count
+        let signature = sig(&["Dell A", "Dell B", "BOE 0x0BC9"]);
+        assert!(
+            profile
+                .matches
+                .iter()
+                .all(|m| match_in_signature(m, &signature))
+        );
+    }
+
+    #[test]
+    fn test_render_profile_laptop_only_matches_edp() {
+        let monitors = vec![mon("eDP-2", "BOE 0x0BC9", 0, 165.0, 1.25, false)];
+        let (text, _) = render_profile(
+            "mobile",
+            "2026-06-12",
+            &monitors,
+            EdpPolicy::Auto,
+            GpuPref::Auto,
+            None,
+        )
+        .unwrap();
+        assert!(text.contains("#@ match = desc:BOE 0x0BC9\n"));
+        assert!(text.contains("monitor = eDP-2,3840x2160@165,0x0,1.25\n"));
+    }
+
+    #[test]
+    fn test_render_profile_disabled_transform_and_directives() {
+        let mut rotated = mon("DP-1", "Dell A", 0, 60.0, 1.0, false);
+        rotated.transform = 1;
+        let monitors = vec![rotated, mon("eDP-2", "BOE 0x0BC9", 1920, 165.0, 1.25, true)];
+        let (text, _) = render_profile(
+            "pivot",
+            "2026-06-12",
+            &monitors,
+            EdpPolicy::Disable,
+            GpuPref::Dgpu,
+            Some(99),
+        )
+        .unwrap();
+        assert!(text.contains("#@ edp = disable\n"));
+        assert!(text.contains("#@ gpu = dgpu\n"));
+        assert!(text.contains("#@ priority = 99\n"));
+        assert!(text.contains("monitor = desc:Dell A,3840x2160@60,0x0,1,transform,1\n"));
+        assert!(text.contains("monitor = eDP-2,disable\n"));
+        let (profile, _) = parse_profile("pivot", &text).unwrap();
+        assert_eq!(profile.priority, 99);
+        assert_eq!(profile.gpu, GpuPref::Dgpu);
+    }
+
+    #[test]
+    fn test_render_profile_comma_desc_falls_back_to_name() {
+        let monitors = vec![mon("DP-3", "Weird, Inc. Display", 0, 60.0, 1.0, false)];
+        let (text, warnings) = render_profile(
+            "odd",
+            "2026-06-12",
+            &monitors,
+            EdpPolicy::Auto,
+            GpuPref::Auto,
+            None,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(text.contains("monitor = DP-3,"));
+        // The match directive still uses the description (prefix-matched
+        // against the signature, commas are fine there).
+        assert!(text.contains("#@ match = desc:Weird, Inc. Display\n"));
+    }
+
+    #[test]
+    fn test_render_profile_no_enabled_monitors_errors() {
+        let monitors = vec![mon("eDP-2", "BOE", 0, 165.0, 1.25, true)];
+        assert!(render_profile("x", "d", &monitors, EdpPolicy::Auto, GpuPref::Auto, None).is_err());
     }
 }

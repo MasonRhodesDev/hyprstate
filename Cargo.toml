@@ -10,6 +10,13 @@ repository = "https://github.com/MasonRhodesDev/hyprstate"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "process", "io-util", "signal"] }
+futures-util = { version = "0.3", default-features = false }
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
 
 [profile.release]
 lto = true

@@ -1,0 +1,62 @@
+# Maintainer: Mason Rhodes <mrhodesdev@gmail.com>
+#
+# Arch package for hyprstate. Same payload as the Fedora RPM
+# (packaging/hyprstate.spec); all paths are identical across both distros.
+# Usable directly with makepkg from this directory after a release tag is
+# pushed, or published to the AUR (regenerate .SRCINFO with
+# `makepkg --printsrcinfo > .SRCINFO` on every change).
+
+pkgname=hyprstate
+pkgver=2.0.0
+pkgrel=1
+pkgdesc="Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)"
+arch=('x86_64')
+url="https://github.com/MasonRhodesDev/hyprstate"
+license=('MIT')
+depends=('systemd' 'dbus')
+makedepends=('cargo')
+optdepends=(
+  'playerctl: media auto-pause on deferred lid close'
+  'hypridle: lock pipeline + idle-inhibit detection'
+)
+# The powerd unit Conflicts= with power-profiles-daemon/tuned/tlp at
+# runtime; no pacman-level conflicts (parallel installs are fine, only one
+# may own platform_profile).
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP') # pin on release: updpkgsums
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 dist/hyprstate.service "$pkgdir/usr/lib/systemd/user/hyprstate.service"
+  install -Dm644 dist/hyprstate-powerd.service "$pkgdir/usr/lib/systemd/system/hyprstate-powerd.service"
+  install -Dm644 dist/org.hyprstate.Power1.conf "$pkgdir/usr/share/dbus-1/system.d/org.hyprstate.Power1.conf"
+  install -Dm644 dist/org.hyprstate.Power1.service "$pkgdir/usr/share/dbus-1/system-services/org.hyprstate.Power1.service"
+  install -Dm644 dist/60-hyprstate-usb-wake.rules "$pkgdir/usr/lib/udev/rules.d/60-hyprstate-usb-wake.rules"
+  install -Dm755 dist/sleep-hook-wrapper.sh "$pkgdir/usr/lib/systemd/system-sleep/hyprstate"
+  install -Dm644 dist/90-hyprstate.system.preset "$pkgdir/usr/lib/systemd/system-preset/90-hyprstate.preset"
+  install -Dm644 dist/90-hyprstate.user.preset "$pkgdir/usr/lib/systemd/user-preset/90-hyprstate.preset"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 POWER_SPEC.md "$pkgdir/usr/share/doc/$pkgname/POWER_SPEC.md"
+  install -Dm644 GPU_SPEC.md "$pkgdir/usr/share/doc/$pkgname/GPU_SPEC.md"
+}

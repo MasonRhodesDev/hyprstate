@@ -9,6 +9,7 @@ Subcommands:
     uninstall         reverse install
     status            short systemctl + journalctl summary
     profile           list / show / switch monitor profiles
+    gpu               select / check / status for GPU-primary selection
 
 Daemon owns:
     - eDP-2 enable/disable
@@ -18,6 +19,7 @@ Daemon owns:
     - DPMS-off sub-FSM when locked + inhibitor with active screens
     - logind handle-lid-switch inhibitor lock (held for process lifetime)
     - Monitor-profile selection by detected-output signature
+    - GPU-selection drift detection (notify-only; AQ_DRM_DEVICES is login-time)
 
 Architecture (daemon):
     Layer 1 — Effectors:        narrow, idempotent world mutations.
@@ -39,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -55,6 +58,17 @@ MONITORS_CONF = Path.home() / ".config/hypr/configs/monitors.conf"
 HYPRIDLE_LOG = Path.home() / ".config/hypr/logs/hypridle.log"
 PROFILES_DIR = Path.home() / ".config/hypr/profiles"
 ACTIVE_PROFILE_LINK = PROFILES_DIR / ".active.conf"
+
+# GPU selection. The override and breadcrumb files are runtime user state
+# (deliberately not chezmoi-managed); the state file is the contract between
+# `gpu select` (run pre-compositor by uwsm's env-hyprland) and the daemon's
+# drift detection. See GPU_SPEC.md.
+GPU_OVERRIDE_FILE = Path.home() / ".config/hypr/gpu-select"
+GPU_BREADCRUMB_FILE = Path.home() / ".config/hypr/gpu-profile"
+PLATFORM_PROFILE_PATH = Path("/sys/firmware/acpi/platform_profile")
+DRI_BY_PATH = Path("/dev/dri/by-path")
+GPU_NOTIFY_MIN_SECONDS = 60
+GPU_SETTLE_SECONDS = 0.5
 
 GRACE_SECONDS = 30
 DPMS_DELAY_SECONDS = 30
@@ -127,6 +141,8 @@ class EventKind(Enum):
     RESUMED = "Resumed"
     RECONCILE = "Reconcile"
     MONITORS_CHANGED = "MonitorsChanged"  # debounced; fires on add/remove bursts
+    PLATFORM_PROFILE_CHANGED = "PlatformProfileChanged"
+    GPU_OVERRIDE_CHANGED = "GpuOverrideChanged"
 
 
 @dataclass
@@ -155,6 +171,17 @@ class Context:
     edp_policy: str = "auto"  # "auto" | "enable" | "disable"
     profile_debounce_task: asyncio.Task | None = None
 
+    # GPU drift detection. gpu_actual is the AQ_DRM_DEVICES list read from
+    # Hyprland's own environ (ground truth): pending until first resolved;
+    # None = unmanaged session (drift checks disabled); [] = compositor
+    # defaults but advice still wanted (post transient-bail select).
+    # gpu_last_notified debounces per desired-list; reset on sync so a
+    # re-dock after convergence notifies again.
+    gpu_actual: list[str] | None = None
+    gpu_actual_pending: bool = True
+    gpu_last_notified: str | None = None
+    gpu_last_notify_at: float = 0.0
+
     @property
     def inhibitor(self) -> bool:
         return self.logind_inhibitor or self.wayland_inhibitor
@@ -179,6 +206,7 @@ class Profile:
     edp: str  # "auto" | "enable" | "disable"
     hooks: tuple[str, ...]
     priority: int  # explicit `#@ priority`; defaults to len(matches)
+    gpu: str = "auto"  # "auto" | "igpu" | "dgpu" — render-GPU preference
 
 
 _DIRECTIVE_RE = re.compile(r"^#@\s*([a-z]+)\s*=\s*(.+?)\s*$")
@@ -204,6 +232,7 @@ def _parse_profile(path: Path) -> Profile:
     matches: list[str] = []
     hooks: list[str] = []
     edp = "auto"
+    gpu = "auto"
     priority: int | None = None
     with path.open() as fh:
         for raw in fh:
@@ -228,6 +257,10 @@ def _parse_profile(path: Path) -> Profile:
                 if val not in ("auto", "enable", "disable"):
                     raise ValueError(f"edp must be auto|enable|disable, got {val!r}")
                 edp = val
+            elif key == "gpu":
+                if val not in ("auto", "igpu", "dgpu"):
+                    raise ValueError(f"gpu must be auto|igpu|dgpu, got {val!r}")
+                gpu = val
             elif key == "priority":
                 priority = int(val)
             else:
@@ -241,6 +274,7 @@ def _parse_profile(path: Path) -> Profile:
         edp=edp,
         hooks=tuple(hooks),
         priority=priority if priority is not None else len(matches),
+        gpu=gpu,
     )
 
 
@@ -276,6 +310,299 @@ def monitor_signature() -> frozenset[str]:
     except Exception as e:
         LOG.warning("monitor_signature failed: %s", e)
         return frozenset()
+
+
+# =========================================================================
+# GPU-primary selection (see GPU_SPEC.md)
+# =========================================================================
+#
+# `gpu select` runs pre-compositor (uwsm env-hyprland): no Hyprland, no
+# daemon, no D-Bus — sysfs only, stdout is consumed raw by the shell caller,
+# so this section must never write anything but the device list to stdout.
+# The daemon reuses the same pure pipeline for drift detection at runtime.
+
+
+@dataclass(frozen=True)
+class GpuCard:
+    path: str  # stable /dev/dri/by-path entry
+    card: str  # resolved cardN (NOT stable across boots; sysfs lookup only)
+    boot_vga: int
+    vram: int
+    external: int  # connected non-eDP connectors
+    edp: int       # connected eDP connectors
+
+
+@dataclass(frozen=True)
+class GpuSnapshot:
+    cards: tuple[GpuCard, ...]
+    non_pci_display: bool  # a non-candidate DRM device has a connected output
+    lid_closed: bool
+
+
+def _read_int(path: Path, default: int = 0) -> int:
+    try:
+        return int(path.read_text().strip(), 0)
+    except (OSError, ValueError):
+        return default
+
+
+def _read_first_word(path: Path) -> str | None:
+    try:
+        words = path.read_text().split()
+        return words[0] if words else None
+    except OSError:
+        return None
+
+
+def _card_connectors(card: str) -> tuple[int, int]:
+    """(external, edp) connected-connector counts for cardN."""
+    external = edp = 0
+    for status in Path("/sys/class/drm").glob(f"{card}-*/status"):
+        conn = status.parent.name  # e.g. card1-DP-1
+        if "-Writeback-" in conn:
+            continue
+        try:
+            if status.read_text().strip() != "connected":
+                continue
+        except OSError:
+            continue
+        if "eDP" in conn:
+            edp += 1
+        else:
+            external += 1
+    return external, edp
+
+
+def _lid_closed_sysfs() -> bool:
+    """Lid state without logind (D-Bus is unavailable at select time)."""
+    try:
+        for state in Path("/proc/acpi/button/lid").glob("*/state"):
+            return "closed" in state.read_text()
+    except OSError:
+        pass
+    return False
+
+
+def gpu_snapshot() -> GpuSnapshot:
+    """Enumerate GPU candidates from /dev/dri/by-path. A candidate must be a
+    PCI display-class device (class 0x03*) with no usb segment in its by-path
+    name — this excludes DisplayLink/evdi and platform devices, which we never
+    list in AQ_DRM_DEVICES (untested scanout path). If such a non-candidate
+    has a connected output, the snapshot flags it so selection can bail to
+    today's open-all-GPUs behavior instead of killing that output."""
+    cards: list[GpuCard] = []
+    seen: set[str] = set()
+    non_pci_display = False
+    try:
+        entries = sorted(DRI_BY_PATH.glob("*-card"))
+    except OSError:
+        entries = []
+    for link in entries:
+        card = os.path.realpath(link).rsplit("/", 1)[-1]
+        if not card.startswith("card") or card in seen:
+            continue
+        seen.add(card)
+        external, edp = _card_connectors(card)
+        dev = Path("/sys/class/drm") / card / "device"
+        pci_class = ""
+        try:
+            pci_class = (dev / "class").read_text().strip()
+        except OSError:
+            pass
+        name = link.name
+        is_candidate = (
+            name.startswith("pci-")
+            and "-usb-" not in name
+            and "-usbv2-" not in name
+            and pci_class.startswith("0x03")
+        )
+        if not is_candidate:
+            if external or edp:
+                non_pci_display = True
+            continue
+        cards.append(GpuCard(
+            path=str(link),
+            card=card,
+            boot_vga=_read_int(dev / "boot_vga"),
+            vram=_read_int(dev / "mem_info_vram_total"),
+            external=external,
+            edp=edp,
+        ))
+    return GpuSnapshot(tuple(cards), non_pci_display, _lid_closed_sysfs())
+
+
+def resolve_gpu_mode(profile_overlay: str | None = None) -> tuple[str, str]:
+    """-> (mode, source). Precedence: override file > profile preference >
+    platform_profile > auto.
+
+    profile_overlay: the daemon passes the freshly-selected profile's `#@ gpu`
+    value ("auto" when no profile matches — never the stale ctx value). When
+    None (CLI / pre-compositor, where profiles can't be matched), the
+    breadcrumb file written by the daemon stands in for it, keeping desired
+    and next-login select computing from identical inputs."""
+    word = _read_first_word(GPU_OVERRIDE_FILE)
+    if word is not None:
+        if word in ("igpu", "dgpu", "off"):
+            return word, "override"
+        if word != "auto":
+            LOG.warning("%s: ignoring unknown mode %r", GPU_OVERRIDE_FILE, word)
+    overlay = (profile_overlay if profile_overlay is not None
+               else _read_first_word(GPU_BREADCRUMB_FILE))
+    if overlay in ("igpu", "dgpu"):
+        return overlay, "profile"
+    word = _read_first_word(PLATFORM_PROFILE_PATH)
+    if word in ("low-power", "quiet"):
+        return "igpu", "platform"
+    if word == "performance":
+        return "dgpu", "platform"
+    # balanced / balanced-performance / cool / custom / missing / unknown:
+    # deliberately auto (exhaustive against the platform_profile ABI).
+    return "auto", "default"
+
+
+def _integrated_card(cards: tuple[GpuCard, ...]) -> GpuCard | None:
+    """Integrated = boot_vga AND smallest-VRAM agreeing on the same card.
+    Disagreement (e.g. a muxed laptop reporting boot_vga on the discrete) or
+    a VRAM tie without boot_vga -> None -> unmanaged. Cards lacking
+    mem_info_vram_total (Intel, nouveau) read as 0, which agrees trivially."""
+    min_vram = min(c.vram for c in cards)
+    by_vram = [c for c in cards if c.vram == min_vram]
+    by_vga = [c for c in cards if c.boot_vga == 1]
+    if len(by_vga) == 1:
+        return by_vga[0] if by_vga[0] in by_vram else None
+    if not by_vga and len(by_vram) == 1:
+        return by_vram[0]
+    return None
+
+
+def gpu_desired(snap: GpuSnapshot, mode: str, source: str) -> tuple[list[str] | None, str]:
+    """Pure: (device list primary-first, reason) or (None, reason) = unmanaged
+    (caller prints nothing; Hyprland falls back to its own defaults)."""
+    if mode == "off":
+        return None, "override-off"
+    if len(snap.cards) < 2:
+        return None, "no-multi-gpu"
+    if snap.non_pci_display:
+        return None, "non-pci-display-present"
+    integrated = _integrated_card(snap.cards)
+    if integrated is None:
+        return None, "ambiguous-integrated"
+    if snap.lid_closed and not any(c.external for c in snap.cards):
+        # Docked cold boot: DP links can still be down at early-login sysfs
+        # read. Omitting the dock's GPU here would leave a lid-closed session
+        # with no usable output (and the lid FSM would suspend-loop). The
+        # caller does one settle retry; persistent -> unmanaged.
+        return None, "bailed-transient"
+
+    discretes = sorted(
+        (c for c in snap.cards if c is not integrated),
+        key=lambda c: (-c.external, -c.vram, c.path),
+    )
+    best = discretes[0]
+
+    if mode == "auto":
+        if best.external or best.edp:
+            primary, reason = best, "dgpu-has-display"
+        else:
+            primary, reason = integrated, "dgpu-idle-omitted"
+    elif mode == "igpu":
+        primary, reason = integrated, f"{source}-igpu"
+    else:  # dgpu: forced on (and kept awake) even with no display
+        primary, reason = best, f"{source}-dgpu"
+
+    devices = [primary]
+    if integrated is not primary:
+        devices.append(integrated)  # integrated always listed (eDP/hotplug)
+    for c in discretes:
+        if c is primary:
+            continue
+        if c.external or c.edp:
+            devices.append(c)  # display-less discretes omitted -> runtime PM
+
+    # Usable-output invariant: never emit a list under which nothing can
+    # light up — a connected external on a listed card, or eDP with lid open.
+    usable = any(c.external for c in devices) or (
+        not snap.lid_closed and any(c.edp for c in devices)
+    )
+    if not usable:
+        return None, "bailed-transient"
+    return [c.path for c in devices], reason
+
+
+def _write_gpu_state(mode: str, reason: str, devices: list[str] | None,
+                     snap: GpuSnapshot) -> None:
+    """Best-effort atomic intent record for the daemon/status. Never raises,
+    never touches stdout."""
+    try:
+        integrated = _integrated_card(snap.cards) if len(snap.cards) >= 2 else None
+        payload = {
+            "version": 1,
+            "mode": mode,
+            "reason": reason,
+            "primary": devices[0] if devices else None,
+            "devices": devices or [],
+            "omitted": [c.path for c in snap.cards
+                        if not devices or c.path not in devices],
+            "snapshot": {
+                c.path.rsplit("/", 1)[-1].removesuffix("-card"): {
+                    "type": "integrated" if c is integrated else "discrete",
+                    "boot_vga": c.boot_vga,
+                    "vram": c.vram,
+                    "external": c.external,
+                    "edp": c.edp,
+                }
+                for c in snap.cards
+            },
+        }
+        state = gpu_state_path()
+        tmp = state.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=1))
+        tmp.replace(state)
+    except Exception as e:
+        LOG.warning("gpu state write failed: %s", e)
+
+
+def gpu_state_path() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "hypr-gpu-primary.json"
+
+
+def _hyprland_pid() -> int | None:
+    """PID from the instance lock file. pgrep is forbidden here: nested
+    Hyprland instances are a known use pattern and comm matching can't
+    distinguish them; the lock file is scoped by instance signature."""
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if not sig or not runtime:
+        return None
+    lock = Path(runtime) / "hypr" / sig / "hyprland.lock"
+    try:
+        pid = int(lock.read_text().splitlines()[0].strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        if Path(f"/proc/{pid}/comm").read_text().strip() != "Hyprland":
+            return None
+    except OSError:
+        return None
+    return pid
+
+
+def _hyprland_aq_devices() -> list[str] | None:
+    """AQ_DRM_DEVICES from Hyprland's own environ — ground truth for what the
+    session actually uses (the state file is only intent). None = no confirmed
+    Hyprland yet; [] = running with the var unset (compositor defaults)."""
+    pid = _hyprland_pid()
+    if pid is None:
+        return None
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    for chunk in environ.split(b"\0"):
+        if chunk.startswith(b"AQ_DRM_DEVICES="):
+            val = chunk.split(b"=", 1)[1].decode(errors="replace")
+            return [p for p in val.split(":") if p]
+    return []
 
 
 # =========================================================================
@@ -404,6 +731,35 @@ class Effectors:
             await self.queue.put(Event(kind))
         except asyncio.CancelledError:
             pass
+
+    def write_gpu_breadcrumb(self, value: str | None) -> None:
+        """Record the active profile's `#@ gpu` preference for the next
+        login's `gpu select` (profiles can't be matched pre-compositor).
+        Cleared on no-match or "auto" so the file only exists when it means
+        something — this is what keeps desired and next-login select
+        computing from identical inputs (no relog loop)."""
+        try:
+            if value in (None, "auto"):
+                GPU_BREADCRUMB_FILE.unlink(missing_ok=True)
+            else:
+                GPU_BREADCRUMB_FILE.parent.mkdir(parents=True, exist_ok=True)
+                GPU_BREADCRUMB_FILE.write_text(value + "\n")
+        except OSError as e:
+            LOG.warning("gpu breadcrumb write failed: %s", e)
+
+    def notify_gpu_drift(self, desired: list[str], reason: str, trigger: str,
+                         on_ac: bool) -> None:
+        """Narrow effect: tell the user a relog would change the render GPU.
+        Never acts on the session itself — AQ_DRM_DEVICES is login-time only."""
+        primary = desired[0].rsplit("/", 1)[-1].removesuffix("-card")
+        body = f"{trigger}: a relog would switch rendering to {primary} ({reason})"
+        if not on_ac:
+            body += " — on battery"
+        LOG.info("GPU drift: desired=%s reason=%s trigger=%s",
+                 ":".join(desired), reason, trigger)
+        run(["notify-send", "-a", "hyprstate",
+             "-h", "string:x-canonical-private-synchronous:hyprstate-gpu",
+             "GPU selection drift", body], check=False)
 
     def pause_media(self) -> None:
         run(["playerctl", "--all-players", "pause"], check=False)
@@ -775,6 +1131,76 @@ async def inhibitor_poller(queue: asyncio.Queue, ctx: Context, manager_iface) ->
         await asyncio.sleep(INHIBIT_POLL_SECONDS)
 
 
+async def gpu_mode_poller(queue: asyncio.Queue) -> None:
+    """Queue events when platform_profile or the gpu-select override changes.
+    Sibling of inhibitor_poller (sysfs/file diff -> event); the reconciler
+    stays event-free per its silent-ctx-repair contract."""
+    last_profile = _read_first_word(PLATFORM_PROFILE_PATH)
+    last_override = _read_first_word(GPU_OVERRIDE_FILE)
+    while True:
+        await asyncio.sleep(INHIBIT_POLL_SECONDS)
+        cur = _read_first_word(PLATFORM_PROFILE_PATH)
+        if cur != last_profile:
+            last_profile = cur
+            await queue.put(Event(EventKind.PLATFORM_PROFILE_CHANGED, payload=cur))
+        cur = _read_first_word(GPU_OVERRIDE_FILE)
+        if cur != last_override:
+            last_override = cur
+            await queue.put(Event(EventKind.GPU_OVERRIDE_CHANGED, payload=cur))
+
+
+def _resolve_gpu_actual(ctx: Context) -> None:
+    """Lazily resolve the session's actual device list. Stays pending on
+    transient failure (Hyprland not up yet — daemon start races compositor
+    exec) so the next drift check retries; the socket reader has the same
+    retry posture."""
+    devices = _hyprland_aq_devices()
+    if devices is None:
+        return  # still pending
+    ctx.gpu_actual_pending = False
+    if devices:
+        ctx.gpu_actual = devices
+        return
+    # Var unset: normally an unmanaged session — except after a transient or
+    # validation bail at select time, where the user still wants to hear that
+    # a relog would now produce a managed selection.
+    reason = None
+    try:
+        reason = json.loads(gpu_state_path().read_text()).get("reason")
+    except (OSError, ValueError):
+        pass
+    ctx.gpu_actual = [] if reason in ("bailed-transient", "validation-failed") else None
+
+
+def gpu_drift_check(ctx: Context, fx: Effectors, trigger: str,
+                    profile_gpu: str) -> None:
+    """Compute desired vs actual; notify on mismatch (debounced). Decision
+    lives here (Layer 3 style); fx.notify_gpu_drift is the only effect.
+    profile_gpu is always the FRESH select_profile result ("auto" on
+    no-match), never ctx.current_profile — stale profiles must not drive
+    advice."""
+    if ctx.gpu_actual_pending:
+        _resolve_gpu_actual(ctx)
+    if ctx.gpu_actual_pending or ctx.gpu_actual is None:
+        return  # not resolved yet, or unmanaged session
+    mode, source = resolve_gpu_mode(profile_overlay=profile_gpu)
+    desired, reason = gpu_desired(gpu_snapshot(), mode, source)
+    if desired is None:
+        return  # nothing actionable to advise
+    if desired == ctx.gpu_actual:
+        ctx.gpu_last_notified = None  # re-arm: future drift notifies again
+        return
+    key = ":".join(desired)
+    if key == ctx.gpu_last_notified:
+        return
+    now = time.monotonic()
+    if now - ctx.gpu_last_notify_at < GPU_NOTIFY_MIN_SECONDS:
+        return
+    ctx.gpu_last_notified = key
+    ctx.gpu_last_notify_at = now
+    fx.notify_gpu_drift(desired, reason, trigger, on_ac=ctx.on_ac)
+
+
 async def reconciler(ctx: Context, fx: Effectors, manager_iface) -> None:
     """Every RECONCILE_SECONDS, refresh ctx + re-assert eDP and DPMS invariants."""
     while True:
@@ -1034,6 +1460,12 @@ async def dispatcher(
                 fx.apply_profile(chosen, ctx)
             else:
                 LOG.debug("PROFILE: signature change but %s still wins", chosen.name)
+            # Breadcrumb before drift check: "relog to apply" must always be
+            # satisfiable by one relog, so next-login select needs the same
+            # profile overlay the drift computation is about to use.
+            fx.write_gpu_breadcrumb(chosen.gpu if chosen else None)
+            gpu_drift_check(ctx, fx, "monitors changed",
+                            chosen.gpu if chosen else "auto")
             continue  # profile reconciliation does not feed the main FSM
         elif ev.kind is EventKind.INHIBITOR_ON:
             if ev.payload == "logind":
@@ -1053,6 +1485,16 @@ async def dispatcher(
         # currently consumes it.
         if ev.kind in (EventKind.AC_PLUGGED, EventKind.AC_UNPLUGGED):
             LOG.info("AC: %s (on_ac=%s)", ev.kind.value, ctx.on_ac)
+
+        # GPU drift advice on power/override changes. NOT routed through
+        # RECONCILE (its early `continue` above would skip this) — these
+        # events fall through to the FSMs below, which ignore them.
+        if ev.kind in (EventKind.AC_PLUGGED, EventKind.AC_UNPLUGGED,
+                       EventKind.PLATFORM_PROFILE_CHANGED,
+                       EventKind.GPU_OVERRIDE_CHANGED):
+            chosen = select_profile(monitor_signature(), load_profiles())
+            gpu_drift_check(ctx, fx, ev.kind.value,
+                            chosen.gpu if chosen else "auto")
 
         # ---- main FSM ----
         new = desired_state(state, ev.kind, ctx)
@@ -1168,6 +1610,7 @@ async def daemon_main() -> None:
         dispatcher(queue, ctx, fx, initial),
         hypr_socket_reader(queue, ctx),
         inhibitor_poller(queue, ctx, manager),
+        gpu_mode_poller(queue),
         reconciler(ctx, fx, manager),
     )
 
@@ -1299,6 +1742,71 @@ def status_main() -> int:
                     "-n", "20", "--no-pager"], check=False)
     print("\n=== logind handle-lid-switch inhibitor ===")
     subprocess.run(["systemd-inhibit", "--list", "--no-pager"], check=False)
+    print("\n=== gpu selection ===")
+    _gpu_status()
+    return 0
+
+
+# =========================================================================
+# Subcommand: gpu
+# =========================================================================
+
+
+def gpu_main(action: str) -> int:
+    """CLI: gpu select | check | status.
+
+    select/check print the device list (or nothing) on stdout — consumed raw
+    by uwsm's env-hyprland — so logging is stderr-only here (the daemon's
+    stdout basicConfig convention is deliberately not used) and the list is
+    the single, final stdout write."""
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(levelname)s %(message)s", stream=sys.stderr)
+    if action == "status":
+        return _gpu_status()
+
+    snap = gpu_snapshot()
+    mode, source = resolve_gpu_mode()
+    devices, reason = gpu_desired(snap, mode, source)
+    if devices is None and reason == "bailed-transient" and action == "select":
+        # One settle retry: docked cold boot can race DP link training.
+        time.sleep(GPU_SETTLE_SECONDS)
+        snap = gpu_snapshot()
+        devices, reason = gpu_desired(snap, mode, source)
+    if devices is not None and not all(os.path.exists(d) for d in devices):
+        # All-or-nothing: dropping individual paths could silently violate
+        # the integrated-always-included / usable-output invariants.
+        devices, reason = None, "validation-failed"
+    if action == "select":
+        _write_gpu_state(mode, reason, devices, snap)
+    if devices:
+        sys.stdout.write(":".join(devices) + "\n")
+        sys.stdout.flush()
+    return 0
+
+
+def _gpu_status() -> int:
+    try:
+        state = json.loads(gpu_state_path().read_text())
+        print(f"intent : mode={state.get('mode')} reason={state.get('reason')}")
+        print(f"         devices={':'.join(state.get('devices') or []) or '(none)'}")
+    except (OSError, ValueError):
+        print("intent : (no state file)")
+    actual = _hyprland_aq_devices()
+    if actual is None:
+        print("actual : (no Hyprland session found)")
+    elif not actual:
+        print("actual : (compositor defaults — AQ_DRM_DEVICES unset)")
+    else:
+        print(f"actual : {':'.join(actual)}")
+    mode, source = resolve_gpu_mode()
+    desired, reason = gpu_desired(gpu_snapshot(), mode, source)
+    if desired is None:
+        print(f"desired: (unmanaged — {reason})")
+    else:
+        print(f"desired: {':'.join(desired)}  (mode={mode}/{source}, {reason})")
+    if actual is not None and desired is not None:
+        print("sync   : in sync" if desired == actual
+              else "sync   : MISMATCH — relog to apply")
     return 0
 
 
@@ -1375,6 +1883,8 @@ def main(argv: list[str]) -> int:
     p_prof = sub.add_parser("profile", help="list / current / switch monitor profiles")
     p_prof.add_argument("action", choices=["list", "current", "switch"])
     p_prof.add_argument("name", nargs="?", default=None)
+    p_gpu = sub.add_parser("gpu", help="GPU-primary selection (uwsm + drift status)")
+    p_gpu.add_argument("action", choices=["select", "check", "status"])
 
     args = parser.parse_args(argv)
     if args.cmd == "daemon":
@@ -1398,6 +1908,8 @@ def main(argv: list[str]) -> int:
         return status_main()
     if args.cmd == "profile":
         return profile_main(args.action, args.name)
+    if args.cmd == "gpu":
+        return gpu_main(args.action)
     return 1
 
 

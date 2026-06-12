@@ -3,4 +3,6 @@
 
 pub mod gpu_state;
 pub mod hypr_instance;
+pub mod power_conf;
+pub mod profiles;
 pub mod sysfs;

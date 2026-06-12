@@ -16,6 +16,7 @@ mod paths;
 mod powerd;
 #[allow(dead_code)]
 mod pure;
+mod sleep_hook;
 #[allow(dead_code)]
 mod sysio;
 
@@ -93,11 +94,24 @@ fn main() {
                 }
             }
         }
-        Cmd::SleepHook { .. } => todo("sleep-hook"),
+        Cmd::SleepHook {
+            action,
+            sleep_type: _,
+        } => match action {
+            Some(a) => sleep_hook::run(&a),
+            None => {
+                eprintln!("sleep-hook requires pre|post");
+                1
+            }
+        },
         Cmd::Gpu { action } => cli::gpu::run(&action),
-        Cmd::Power { .. } => todo("power"),
-        Cmd::Profile { .. } => todo("profile"),
-        Cmd::Status => todo("status"),
+        Cmd::Power {
+            action,
+            value,
+            waybar,
+        } => cli::power::run(&action, value.as_deref(), waybar),
+        Cmd::Profile { action, name } => cli::profile::run(&action, name.as_deref()),
+        Cmd::Status => cli::status::run(),
     };
     std::process::exit(rc);
 }

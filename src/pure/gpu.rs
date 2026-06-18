@@ -186,7 +186,7 @@ pub fn gpu_desired(
             if snap.cards[best].external > 0 || snap.cards[best].edp > 0 {
                 (best, "dgpu-has-display".into())
             } else {
-                (integrated, "dgpu-idle-omitted".into())
+                (integrated, "dgpu-idle-listed".into())
             }
         }
         GpuMode::Igpu => (integrated, format!("{}-igpu", source.as_str())),
@@ -194,6 +194,12 @@ pub fn gpu_desired(
         GpuMode::Off => unreachable!(),
     };
 
+    // In auto mode, list every non-primary candidate, even display-less ones:
+    // aquamarine (>= PR#239 / 0.10) deinitializes a secondary renderer with no
+    // enabled outputs, so amdgpu runtime PM suspends the idle dGPU anyway. Listing
+    // it keeps it available for live hotplug and PRIME offload at zero idle cost.
+    // igpu/dgpu keep the strict rule (display-less discretes omitted -> unopened).
+    let keep_idle = mode == GpuMode::Auto;
     let mut devices = vec![primary];
     if integrated != primary {
         devices.push(integrated); // integrated always listed (eDP/hotplug)
@@ -202,8 +208,8 @@ pub fn gpu_desired(
         if i == primary {
             continue;
         }
-        if snap.cards[i].external > 0 || snap.cards[i].edp > 0 {
-            devices.push(i); // display-less discretes omitted -> runtime PM
+        if keep_idle || snap.cards[i].external > 0 || snap.cards[i].edp > 0 {
+            devices.push(i);
         }
     }
 
@@ -355,15 +361,36 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_auto_idle_dgpu_is_omitted() {
+    fn test_gpu_auto_idle_dgpu_is_listed_secondary() {
         let (devices, reason) = gpu_desired(
             &snap(fw16(1, 0), false, false),
             GpuMode::Auto,
             GpuModeSource::Default,
         );
-        // iGPU only; dGPU omitted -> runtime PM suspends it.
-        assert_eq!(devices.unwrap(), vec!["/dev/dri/card2"]);
-        assert_eq!(reason, "dgpu-idle-omitted");
+        // iGPU primary, idle dGPU listed as trailing secondary: aquamarine deinits
+        // it (no enabled outputs) -> runtime PM suspends it, but it stays available
+        // for live hotplug / PRIME offload.
+        assert_eq!(devices.unwrap(), vec!["/dev/dri/card2", "/dev/dri/card1"]);
+        assert_eq!(reason, "dgpu-idle-listed");
+    }
+
+    #[test]
+    fn test_gpu_auto_idle_dgpu_listed_without_igpu() {
+        // Dual-discrete, no real iGPU: card0 (boot_vga + smaller VRAM) classifies
+        // as "integrated" and is primary; the display-less card1 is still listed
+        // as a trailing secondary (topology-agnostic: the rule is about
+        // non-primary candidates, not about an integrated GPU existing).
+        let cards = vec![
+            card("a", "card0", 1, 4 << 30, 0, 1),
+            card("b", "card1", 0, 16 << 30, 0, 0),
+        ];
+        let (devices, reason) = gpu_desired(
+            &snap(cards, false, false),
+            GpuMode::Auto,
+            GpuModeSource::Default,
+        );
+        assert_eq!(devices.unwrap(), vec!["/dev/dri/card0", "/dev/dri/card1"]);
+        assert_eq!(reason, "dgpu-idle-listed");
     }
 
     #[test]

@@ -86,9 +86,12 @@ Discrete candidates sorted by (external display count desc, VRAM desc); best = [
 - `< 2` GPU candidates → unmanaged (print nothing).
 - `off` → unmanaged.
 - `auto`: best discrete has a connected display (external or eDP) → discrete
-  primary; else iGPU primary and display-less discretes **omitted entirely**
-  (omitted card unused by Hyprland → amdgpu runtime PM suspends it; that *is* the
-  power saving).
+  primary; else iGPU primary. Either way, **all non-primary candidates (including
+  display-less discretes) are listed** as trailing secondaries. aquamarine
+  (≥ PR#239 / 0.10) deinitializes a secondary renderer with no enabled outputs, so
+  amdgpu runtime PM still suspends the idle dGPU — *that* is the power saving — while
+  the card stays available for live hotplug (re-inits on connect) and PRIME offload.
+  (Older aquamarine kept listed secondaries powered; this mode assumes ≥ PR#239.)
 - `igpu`: integrated primary; discretes listed only if they have a connected
   display, omitted otherwise.
 - `dgpu`: best discrete primary and always listed (performance mode keeps it awake
@@ -124,7 +127,7 @@ Discrete candidates sorted by (external display count desc, VRAM desc); best = [
 }
 ```
 
-`reason` enum: `no-multi-gpu | dgpu-has-display | dgpu-idle-omitted | override-igpu |
+`reason` enum: `no-multi-gpu | dgpu-has-display | dgpu-idle-listed | override-igpu |
 override-dgpu | profile-igpu | profile-dgpu | platform-igpu | platform-dgpu |
 bailed-transient | validation-failed | non-pci-display-present | ambiguous-integrated`.
 State file = *intent* record (mode/reason, for `gpu status`); ground truth for
@@ -208,8 +211,13 @@ partial stdout → charset/shape guards reject; every failure path leaves
 
 ## Known accepted limitations
 
-- dGPU omitted + display hotplugged into its port mid-session → dead output until
-  relog (daemon notifies).
+- `auto` assumes aquamarine ≥ PR#239 (≥ 0.10), which deinitializes idle secondary
+  renderers so a listed-but-display-less dGPU suspends. On older aquamarine a listed
+  idle secondary stays powered (battery drain) — use `igpu` mode there. (Verified
+  stack: Hyprland 0.54 linking libaquamarine 0.11.0.)
+- `igpu` mode still omits the display-less dGPU entirely, so a display hotplugged
+  into its port mid-session is dead output until relog (daemon notifies). In `auto`
+  the dGPU is listed, so aquamarine lights up the hotplugged display live.
 - Mid-session platform_profile / override changes only notify; selection is
   login-time.
 - DisplayLink-equipped machines are always unmanaged (non-PCI guard) — no runtime-PM

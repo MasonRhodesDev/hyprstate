@@ -6,6 +6,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use crate::paths;
 
@@ -132,6 +134,86 @@ pub fn run(action: &str) -> i32 {
         }
     }
 
+    // Touchpad rebind: resume only, and only if currently bound (skip silently
+    // if the module was physically detached). See paths::TOUCHPAD_I2C_CLIENT.
+    if action == "post" {
+        rebind_touchpad(&mut log);
+    }
+
     log.line(&format!("=== {label} complete ==="));
     0
+}
+
+/// Number of bind attempts and the settle delay between them. The hook can run
+/// before the i2c controller has finished resuming, so the first `bind` may
+/// fail at descriptor read; retrying after a short delay lets resume catch up.
+const REBIND_ATTEMPTS: u32 = 4;
+const REBIND_BACKOFF: Duration = Duration::from_millis(300);
+
+/// Force a clean re-enumeration of the PIXA i2c-HID touchpad by cycling it
+/// through the driver's unbind/bind sysfs files. On resume the device often
+/// comes back wedged (motion dropped, buttons fine); a clean rebind makes the
+/// compositor's libinput recreate it.
+///
+/// Shape is dictated by two resume-specific failure modes. First, the hook can
+/// run before the i2c controller has resumed, so an immediate `bind` may fail
+/// at descriptor read — hence the bounded retry with a settle delay. Second,
+/// `unbind` succeeding while `bind` fails leaves the device fully UNBOUND
+/// (worse than wedged); so the skip guard keys on the device being absent from
+/// the bus (never on un-bound-ness), we keep retrying `bind`, and we verify the
+/// bound symlink actually returns rather than trusting the write's `Ok`. A
+/// present-but-unbound device therefore self-heals on the next resume instead
+/// of being skipped forever.
+///
+/// Both sysfs writes are synchronous (they block through remove()/probe()), so
+/// no inter-write delay is needed; the backoff is only to let resume settle.
+fn rebind_touchpad(log: &mut HookLog) {
+    let driver = Path::new(paths::I2C_HID_DRIVER_DIR);
+    let bound = driver.join(paths::TOUCHPAD_I2C_CLIENT);
+    let present = Path::new(paths::I2C_DEVICES_DIR).join(paths::TOUCHPAD_I2C_CLIENT);
+
+    if !present.exists() {
+        // No such device on the bus: module physically detached, or a board
+        // revision with a different touchpad. Nothing to recover.
+        log.line("  touchpad rebind: skipped (device absent)");
+        return;
+    }
+
+    for attempt in 1..=REBIND_ATTEMPTS {
+        // Only unbind if currently bound; if a prior attempt left it unbound,
+        // go straight to bind — that is the self-heal path.
+        if bound.exists()
+            && let Err(e) = fs::write(driver.join("unbind"), paths::TOUCHPAD_I2C_CLIENT)
+        {
+            log.line(&format!("  ! touchpad unbind: {e}"));
+        }
+        // `bind` blocks through the synchronous probe; success == Ok AND the
+        // bound symlink reappeared (a probe can fail after an Ok-looking write).
+        let res = fs::write(driver.join("bind"), paths::TOUCHPAD_I2C_CLIENT);
+        if res.is_ok() && bound.exists() {
+            if attempt == 1 {
+                log.line("  touchpad rebind: ok");
+            } else {
+                log.line(&format!("  touchpad rebind: ok (attempt {attempt})"));
+            }
+            return;
+        }
+        log.line(&format!(
+            "  touchpad rebind: attempt {attempt} failed ({res:?}); retrying"
+        ));
+        thread::sleep(REBIND_BACKOFF);
+    }
+
+    // Exhausted. Distinguish "still wedged" from the dangerous "left unbound"
+    // (no touchpad until manual rebind/reboot) — the next resume will retry the
+    // bind regardless, since the skip guard keys on presence, not bound-ness.
+    if bound.exists() {
+        log.line("  touchpad rebind: FAILED (still bound; may still be wedged)");
+    } else {
+        log.line(
+            "  ! touchpad rebind: FAILED — device left UNBOUND; \
+             recover with: echo -n i2c-PIXA3854:00 | sudo tee \
+             /sys/bus/i2c/drivers/i2c_hid_acpi/bind",
+        );
+    }
 }

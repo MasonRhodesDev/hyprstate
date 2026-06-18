@@ -103,6 +103,22 @@ pub const WAKE_USB_VENDORS: [((&str, &str), &str); 2] = [
     (("046d", "c539"), "Logitech Lightspeed (mouse receiver)"),
 ];
 
+// The PIXA i2c-HID touchpad wedges on resume: the device stays half-alive
+// (button events pass through, motion is silently dropped) until re-enumerated.
+// Unbind/bind on post-resume forces a clean udev remove/add so the compositor's
+// libinput backend recreates the device instead of reusing the wedged one.
+//
+// Two sysfs markers, deliberately tracked separately (see rebind_touchpad):
+//   I2C_DEVICES_DIR/<client>     — symlink iff the device is present on the bus
+//   I2C_HID_DRIVER_DIR/<client>  — symlink iff it is currently *bound*
+// The driver dir also holds the bind/unbind files; writing the client name to
+// unbind then bind cycles it. A device can be present-but-unbound (e.g. a prior
+// failed bind), which is exactly the state a bind should recover — so the skip
+// guard keys on presence, never on bound-ness.
+pub const I2C_HID_DRIVER_DIR: &str = "/sys/bus/i2c/drivers/i2c_hid_acpi";
+pub const I2C_DEVICES_DIR: &str = "/sys/bus/i2c/devices";
+pub const TOUCHPAD_I2C_CLIENT: &str = "i2c-PIXA3854:00";
+
 // ---- powerd (root effector; see POWER_SPEC.md) ----
 
 pub const POWERD_BUS: &str = "org.hyprstate.Power1";

@@ -10,6 +10,7 @@ pub mod event;
 pub mod gpu_drift;
 pub mod power_policy;
 pub mod sources;
+pub mod telemetry;
 
 use std::fs;
 use std::path::Path;

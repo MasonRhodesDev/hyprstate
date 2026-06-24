@@ -19,6 +19,7 @@ use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::gpu_drift_check;
 use super::power_policy::power_policy_check;
+use super::telemetry::{FrameCtx, TelemetryEmitter, build_frame};
 use crate::pure::fsm::{
     EventKind, ScreenState, State, desired_screen_state, desired_state, world_state,
 };
@@ -118,13 +119,38 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
 }
 
 /// Run both transition maps for one event kind; fire on_enter on change.
-async fn evaluate_fsms(ctx: &mut Context, fx: &Effectors, kind: EventKind, label: &str) {
+async fn evaluate_fsms(
+    ctx: &mut Context,
+    fx: &Effectors,
+    kind: EventKind,
+    label: &'static str,
+    telem: &mut TelemetryEmitter,
+) {
+    let from = ctx.state;
     if let Some(new) = desired_state(ctx.state, kind, &ctx.world())
         && new != ctx.state
     {
         log_state_transition(ctx, ctx.state, new, label);
         ctx.state = new;
         on_enter(new, Entry::Fresh, ctx, fx).await;
+
+        // Best-effort telemetry — never affects FSM behavior.
+        let frame = build_frame(
+            from,
+            new,
+            kind,
+            label,
+            ctx.screen_state,
+            FrameCtx {
+                lid_closed: ctx.lid_closed,
+                ext_mon_count: ctx.ext_mon_count,
+                inhibitor: ctx.inhibitor(),
+                locked: ctx.locked,
+                on_ac: ctx.on_ac,
+            },
+            on_enter_effector_names(new),
+        );
+        telem.emit(&frame);
     } else {
         debug!(
             "ignored: {label} in {} (ext_mon={}, inhibitor={}, locked={}, on_ac={})",
@@ -150,6 +176,17 @@ async fn evaluate_fsms(ctx: &mut Context, fx: &Effectors, kind: EventKind, label
         let prev = ctx.screen_state;
         ctx.screen_state = new;
         on_enter_screen(prev, new, Entry::Fresh, ctx, fx).await;
+    }
+}
+
+/// Map state to the effector names fired during on_enter (for telemetry).
+fn on_enter_effector_names(state: State) -> Vec<&'static str> {
+    match state {
+        State::LidOpen => vec!["cancel_grace_timer", "set_edp_on"],
+        State::Docked => vec!["cancel_grace_timer", "set_edp_off"],
+        State::Deferred => vec!["cancel_grace_timer", "set_edp_off", "pause_media"],
+        State::Countdown => vec!["set_edp_off", "start_grace_timer"],
+        State::Suspending => vec!["cancel_grace_timer", "lock_then_suspend"],
     }
 }
 
@@ -185,7 +222,12 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
 
 /// Diff a reconciler snapshot against ctx; repair, route repairs back into
 /// the machines, and re-assert the eDP/DPMS invariants.
-async fn handle_reconcile_tick(snap: ReconcileSnapshot, ctx: &mut Context, fx: &Effectors) {
+async fn handle_reconcile_tick(
+    snap: ReconcileSnapshot,
+    ctx: &mut Context,
+    fx: &Effectors,
+    telem: &mut TelemetryEmitter,
+) {
     let mut drift: Vec<String> = Vec::new();
     let mut fsm_drift = false;
     let mut power_drift = false;
@@ -254,7 +296,7 @@ async fn handle_reconcile_tick(snap: ReconcileSnapshot, ctx: &mut Context, fx: &
     }
     // Repaired FSM inputs must DRIVE the machines, not just describe them.
     if fsm_drift {
-        evaluate_fsms(ctx, fx, EventKind::CtxRepaired, "CtxRepaired").await;
+        evaluate_fsms(ctx, fx, EventKind::CtxRepaired, "CtxRepaired", telem).await;
     }
 
     if ctx.state == State::Suspending {
@@ -298,6 +340,7 @@ async fn handle_reconcile_tick(snap: ReconcileSnapshot, ctx: &mut Context, fx: &
 }
 
 pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors) {
+    let mut telem = TelemetryEmitter::new();
     ctx.state = world_state(&ctx.world());
     info!(
         "initial state: {} (ext_mon={}, inhibitor={}, locked={}, on_ac={})",
@@ -358,7 +401,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 continue;
             }
             Event::ReconcileTick(snap) => {
-                handle_reconcile_tick(*snap, &mut ctx, &fx).await;
+                handle_reconcile_tick(*snap, &mut ctx, &fx, &mut telem).await;
                 continue;
             }
             Event::MonitorsChanged => {
@@ -480,6 +523,6 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             power_policy_check(&mut ctx, &fx).await;
         }
 
-        evaluate_fsms(&mut ctx, &fx, kind, label).await;
+        evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;
     }
 }

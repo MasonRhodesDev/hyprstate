@@ -6,7 +6,7 @@
 //! dispatch time.
 
 /// Main FSM states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     LidOpen,
     Docked,
@@ -29,7 +29,7 @@ impl State {
 }
 
 /// Screen-DPMS sub-FSM states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScreenState {
     Active,
     DimPending,
@@ -48,7 +48,7 @@ impl ScreenState {
 
 /// Event kinds as the transition maps see them. The daemon's `Event` enum
 /// carries payloads; it projects to this for the pure layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EventKind {
     LidClose,
     LidOpen,

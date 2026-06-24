@@ -392,6 +392,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "hyprstate-fsm",
  "libc",
  "serde",
  "serde_json",
@@ -399,6 +400,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zbus",
+]
+
+[[package]]
+name = "hyprstate-fsm"
+version = "2.0.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

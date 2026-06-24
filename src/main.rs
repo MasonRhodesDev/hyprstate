@@ -15,8 +15,10 @@ mod daemon;
 mod dbus;
 mod paths;
 mod powerd;
-#[allow(dead_code)]
-mod pure;
+// The pure (I/O-free) FSM + policy layer now lives in its own crate so the GUI
+// can share the exact same types. Aliased to `pure` so the daemon's existing
+// `crate::pure::...` paths are unchanged.
+use hyprstate_fsm as pure;
 mod sleep_hook;
 #[allow(dead_code)]
 mod sysio;

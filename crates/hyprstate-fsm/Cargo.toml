@@ -1,0 +1,12 @@
+[package]
+name = "hyprstate-fsm"
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+description = "Pure, I/O-free state machine + policy layer for hyprstate (shared by the daemon and the GUI)."
+repository = "https://github.com/MasonRhodesDev/hyprstate"
+
+[dependencies]
+# serde so the daemon can emit FSM state over telemetry and the GUI can render
+# it from the same definitions — no hand-mirrored model to drift.
+serde = { version = "1", features = ["derive"] }

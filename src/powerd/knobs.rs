@@ -352,7 +352,7 @@ pub fn persisted_profile() -> PowerProfile {
     if let Ok(text) = fs::read_to_string(paths::POWERD_STATE_FILE)
         && let Some(word) = text.split_whitespace().next()
     {
-        if let Some(p) = PowerProfile::from_str(word) {
+        if let Ok(p) = word.parse::<PowerProfile>() {
             return p;
         }
         warn!("persisted profile {word:?} invalid — using balanced");

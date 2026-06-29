@@ -47,7 +47,7 @@ pub fn run(action: &str, value: Option<&str>, waybar: bool) -> i32 {
     let override_word = read_first_word(&paths::power_override_file());
     let override_profile = override_word
         .as_deref()
-        .filter(|w| PowerProfile::from_str(w).is_some());
+        .filter(|w| w.parse::<PowerProfile>().is_ok());
 
     match action {
         "set" => {
@@ -60,7 +60,7 @@ pub fn run(action: &str, value: Option<&str>, waybar: bool) -> i32 {
                 println!("override cleared — automatic policy");
                 return 0;
             }
-            if PowerProfile::from_str(value).is_none() {
+            if value.parse::<PowerProfile>().is_err() {
                 eprintln!("value must be auto|power-saver|balanced|performance");
                 return 2;
             }

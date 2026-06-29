@@ -16,41 +16,54 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 ## Layout
 
 ```
-hyprstate.py             single-file program with all subcommands
-hyprstate.service        systemd --user unit
-system-sleep-hook.sh     wrapper invoked by /usr/lib/systemd/system-sleep/
-install.sh               idempotent installer
+src/, crates/   Rust sources — a single `hyprstate` binary (daemon, powerd, CLI)
+dist/           packaged units, dbus policy, udev rule, sleep hook, presets
+packaging/      hyprstate.spec (Fedora), PKGBUILD (Arch), build-srpm.sh, migrate-from-devinstall.sh
 ```
 
 ## Subcommands
 
 ```
-hyprstate daemon              # run the FSM (systemd --user)
-hyprstate sleep-hook pre|post # invoked by systemd-suspend (root)
-hyprstate install             # symlink + drop systemd unit
-hyprstate uninstall           # reverse install
-hyprstate status              # systemctl + journalctl summary
-hyprstate profile list        # list known profiles
-hyprstate profile current     # show currently-applied profile
-hyprstate profile switch NAME # force-apply a profile
+hyprstate daemon                  # run the FSM (systemd --user)
+hyprstate powerd                  # root power effector (systemd system, org.hyprstate.Power1)
+hyprstate sleep-hook pre|post     # invoked by systemd-suspend (root)
+hyprstate status                  # systemctl + journalctl + gpu + power summary
+hyprstate power set|get|cycle|status [--waybar]
+hyprstate gpu select|check|status # GPU-primary selection (see GPU_SPEC.md)
+hyprstate profile list|current|switch|save [NAME]
 ```
 
 ## Install
 
+Packaged install only (Fedora COPR / Arch). The binary is built with `cargo
+build --release`; the units, dbus policy, udev rule, sleep hook, and presets
+are installed from `dist/` by the spec / PKGBUILD.
+
 ```
-./install.sh        # one sudo prompt, symlinks system bits
+# Fedora
+sudo dnf copr enable <fas>/hyprstate && sudo dnf install hyprstate
+
+# Arch
+cd packaging && makepkg -si        # or paru -S hyprstate
+
+sudo systemctl enable --now hyprstate-powerd     # root effector
+systemctl --user enable --now hyprstate          # session daemon
 ```
 
-The installer migrates from predecessor names (`hypr-power.service`, `hypr-fsm.service`) and removes the orphan `~/.local/share/systemd-sleep-hooks/usb-wake`.
+Migrating off the old git-symlink / `install.sh` dev install: run
+`packaging/migrate-from-devinstall.sh` once (it removes the `/usr/local`
+symlink, the libexec copy, and the `/etc` drop-ins that would shadow the
+packaged files), then install the package. The release flow (tag → SRPM → COPR,
+plus Arch) is documented at the top of `packaging/build-srpm.sh`.
 
 ## Debug
 
 ```
 journalctl --user -u hyprstate.service -f       # daemon log
+journalctl -u hyprstate-powerd.service -f       # powerd log
 sudo tail -f /var/log/hyprstate-sleep.log       # sleep hook log
 ```
 
 ## Dependencies
 
-System: `hyprctl`, `playerctl`, `hyprlock` (via hypridle's `lock_cmd`), `pgrep`, `hypridle` (catches the logind Lock signal and runs hyprlock).
-Python: `dbus-next` (Fedora `python3-dbus-next`).
+System: `hyprctl`, `playerctl`, `hyprlock` (via hypridle's `lock_cmd`), `hypridle` (catches the logind Lock signal and runs hyprlock). Build: `cargo` / `rustc`.

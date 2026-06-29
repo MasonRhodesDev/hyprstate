@@ -14,11 +14,14 @@ selection (GPU_SPEC.md); hyprstate is the sole intended writer of
 
 ### Privilege boundary (V3)
 
-install.sh installs a **root-owned copy**: `sudo install -m 755 -o root -g root
-hyprstate.py /usr/local/libexec/hyprstate`; the system unit's ExecStart uses that
-copy. The dev symlink `/usr/local/bin/hyprstate` (user-writable target) remains
-for the *user* daemon + CLI only. Root never executes user-writable code; powerd
-changes require re-running install.sh (already the documented update flow).
+The package owns a **root-owned binary** at `%{_bindir}/hyprstate`
+(`/usr/bin/hyprstate`, root:root, not user-writable); the system unit's
+ExecStart runs it directly. The same binary serves the *user* daemon + CLI —
+one file, root-owned, so root never executes user-writable code. This replaces
+the Python-era dev symlink + `/usr/local/libexec` copy (the symlink targeted a
+user-writable file, which is why a separate root-owned copy was needed); under
+the RPM/PKGBUILD that concern is moot. powerd code updates ship as a package
+update (`dnf`/`pacman`), which restarts the unit via the systemd scriptlets.
 
 ### D-Bus interface
 
@@ -75,8 +78,8 @@ signal ProfileApplied(s);  property ActiveProfile(s, emits-changes)
 
 The own-allow MUST appear only in the root policy (a wheel/default own-allow
 lets any local user squat the name pre-boot; Type=dbus would even report the
-unit as started). install.sh asserts `systemctl is-active hyprstate-powerd`
-post-install so a malformed policy fails loudly. Additionally ship
+unit as started). A malformed policy should fail loudly post-install
+(`systemctl is-active hyprstate-powerd`). Additionally ship
 `/usr/share/dbus-1/system-services/org.hyprstate.Power1.service` with
 `SystemdService=hyprstate-powerd.service` (V11c) — bus activation closes the
 boot race for early callers.
@@ -105,7 +108,7 @@ boot race for early callers.
 ### Unit
 
 Type=dbus, BusName=org.hyprstate.Power1,
-ExecStart=/usr/local/libexec/hyprstate powerd, StateDirectory=hyprstate,
+ExecStart=/usr/bin/hyprstate powerd, StateDirectory=hyprstate,
 ProtectSystem=strict, **ProtectHome=yes** (viable now — binary no longer in
 $HOME, V3), **no ProtectKernelTunables** (would remount /sys ro),
 NoNewPrivileges, PrivateTmp, PrivateNetwork,
@@ -232,10 +235,12 @@ section.
   power status --waybar`, exec-if, json, interval 5, signal 9, on-click
   `hyprstate power cycle; pkill -SIGRTMIN+9 waybar`), before battery.
 - `dot_config/waybar/style.css`: per-profile + unavailable classes.
-- hyprstate repo additionally ships: `hyprstate-powerd.service`,
-  `org.hyprstate.Power1.conf`, `org.hyprstate.Power1.service` (bus activation);
-  install.sh installs all three + the libexec copy, daemon-reloads, enables,
-  and asserts is-active. uninstall mirrors.
+- hyprstate ships (from `dist/`, installed by the RPM spec / Arch PKGBUILD):
+  `hyprstate-powerd.service`, `org.hyprstate.Power1.conf`,
+  `org.hyprstate.Power1.service` (bus activation), plus systemd presets. The
+  package scriptlets daemon-reload, enable, and restart the units; packaging
+  asserts the powerd unit's bus policy is well-formed (a malformed policy would
+  let the Type=dbus unit report started without owning the name).
 
 ## Known accepted limitations
 
@@ -244,4 +249,5 @@ section.
 - Charge thresholds / kbd backlight: EC/QMK, future.
 - Waybar applied-state lag ≤2 s after click (poller tick); optimistic
   SIGRTMIN+9 refresh covers display.
-- powerd code updates require rerunning install.sh (root-owned copy, V3).
+- powerd code updates ship as a package update (`dnf`/`pacman`); the systemd
+  scriptlets restart the root-owned unit (V3).

@@ -461,13 +461,13 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                         ctx.power_override = None;
                         ctx.power_override_base = None;
                     }
-                    Some(w) => match crate::pure::power::PowerProfile::from_str(w) {
-                        Some(p) if ctx.power_override == Some(p) => {} // own echo
-                        Some(p) => {
+                    Some(w) => match w.parse::<crate::pure::power::PowerProfile>() {
+                        Ok(p) if ctx.power_override == Some(p) => {} // own echo
+                        Ok(p) => {
                             ctx.power_override = Some(p);
                             ctx.power_override_base = None; // stamped at next check
                         }
-                        None => warn!("power-override: unknown profile {w:?} — ignoring"),
+                        Err(_) => warn!("power-override: unknown profile {w:?} — ignoring"),
                     },
                 }
             }

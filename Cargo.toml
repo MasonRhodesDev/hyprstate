@@ -16,6 +16,9 @@ edition = "2024"
 license = "MIT"
 description = "Hyprland session/power state machine: lid, monitors, profiles, GPU selection, powerd"
 repository = "https://github.com/MasonRhodesDev/hyprstate"
+# Shipped as a packaged binary (RPM/AUR), never `cargo publish`ed to crates.io.
+# Also lets cargo-deny exempt the hyprstate-fsm path dependency.
+publish = false
 
 [dependencies]
 hyprstate-fsm = { path = "crates/hyprstate-fsm" }

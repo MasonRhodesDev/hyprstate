@@ -31,13 +31,29 @@ impl PowerProfile {
             PowerProfile::Performance => "performance",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+/// The string was not one of `power-saver | balanced | performance`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsePowerProfileError;
+
+impl std::fmt::Display for ParsePowerProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expected one of power-saver, balanced, performance")
+    }
+}
+
+impl std::error::Error for ParsePowerProfileError {}
+
+impl std::str::FromStr for PowerProfile {
+    type Err = ParsePowerProfileError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "power-saver" => Some(PowerProfile::PowerSaver),
-            "balanced" => Some(PowerProfile::Balanced),
-            "performance" => Some(PowerProfile::Performance),
-            _ => None,
+            "power-saver" => Ok(PowerProfile::PowerSaver),
+            "balanced" => Ok(PowerProfile::Balanced),
+            "performance" => Ok(PowerProfile::Performance),
+            _ => Err(ParsePowerProfileError),
         }
     }
 }
@@ -194,9 +210,9 @@ pub fn parse_power_policy(text: &str) -> (PowerPolicy, u8, Vec<String>) {
                 continue;
             }
         };
-        match PowerProfile::from_str(val) {
-            Some(p) => *slot = p,
-            None => warnings.push(format!(
+        match val.parse::<PowerProfile>() {
+            Ok(p) => *slot = p,
+            Err(_) => warnings.push(format!(
                 "{key} must be one of power-saver|balanced|performance, got {val:?} — using {}",
                 slot.as_str()
             )),

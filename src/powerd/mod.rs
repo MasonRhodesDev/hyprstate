@@ -52,7 +52,7 @@ impl Power1 {
         profile: String,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> Result<HashMap<String, String>, PowerdError> {
-        let Some(parsed) = PowerProfile::from_str(&profile) else {
+        let Ok(parsed) = profile.parse::<PowerProfile>() else {
             return Err(PowerdError::InvalidProfile(format!(
                 "profile must be one of power-saver|balanced|performance, got {profile:?}"
             )));

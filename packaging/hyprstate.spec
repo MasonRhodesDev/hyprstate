@@ -4,7 +4,7 @@
 %bcond_with check
 
 Name:           hyprstate
-Version:        2.0.0
+Version:        2.0.1
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -84,6 +84,11 @@ install -Dpm0644 dist/90-hyprstate.user.preset %{buildroot}%{_userpresetdir}/90-
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Mon Jun 29 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.0.1-1
+- Pin discrete-GPU runtime PM in dgpu mode (SetDgpuAwake) to prevent the
+  Framework 16 D3cold/DCN resume wedge
+- Drop the Python-era install.sh; packaged install only (RPM / PKGBUILD)
+
 * Fri Jun 12 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.0.0-1
 - Rust rewrite (v2): single binary, RPM-owned root paths replace the
   symlink dev install and the libexec privilege-boundary copy

@@ -385,7 +385,8 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             .map(|p| p.gpu)
             .unwrap_or(GpuPref::Auto);
         let (mode, _) = resolve_session_gpu_mode(gpu_pref);
-        fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode)).await;
+        fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode))
+            .await;
     }
 
     while let Some(ev) = rx.recv().await {
@@ -529,7 +530,8 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             let chosen = select_profile(&signature, &profiles);
             let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
             let mode = gpu_drift_check(&mut ctx, &fx, label, gpu_pref);
-            fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode)).await;
+            fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode))
+                .await;
         }
 
         // Power policy evaluation on its (debounced/derived) inputs.

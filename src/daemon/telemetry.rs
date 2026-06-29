@@ -47,7 +47,8 @@ pub struct TelemetryEmitter {
 
 impl TelemetryEmitter {
     pub fn new() -> Self {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
+        let runtime_dir =
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
         let sock_path = PathBuf::from(runtime_dir).join("hyprstate-telemetry.sock");
         Self {
             sock_path,

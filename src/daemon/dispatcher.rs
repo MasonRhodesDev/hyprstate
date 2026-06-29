@@ -4,10 +4,10 @@
 //! Routing invariants ported from v1 (hyprstate.py dispatcher):
 //! - RECONCILE (configreloaded) re-asserts the current states only — it
 //!   never feeds desired_state — and ingests .active.conf first.
-//! - MONITORS_CHANGED: profile apply -> breadcrumb -> gpu drift -> power
-//!   policy -> continue (never feeds the main FSM).
+//! - MONITORS_CHANGED: profile apply -> breadcrumb -> gpu drift -> dgpu
+//!   runtime-PM pin -> power policy -> continue (never feeds the main FSM).
 //! - gpu drift advice on AC/platform/gpu-override events happens in
-//!   fall-through, NOT via RECONCILE.
+//!   fall-through, NOT via RECONCILE; the dgpu pin rides the same gate.
 //! - power policy fall-through gate: BatteryLowChanged flips,
 //!   PowerOverrideChanged, PowerAcSettled.
 
@@ -17,12 +17,13 @@ use tracing::{debug, info, warn};
 use super::ctx::Context;
 use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
-use super::gpu_drift::gpu_drift_check;
+use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::power_policy::power_policy_check;
 use super::telemetry::{FrameCtx, TelemetryEmitter, build_frame};
 use crate::pure::fsm::{
     EventKind, ScreenState, State, desired_screen_state, desired_state, world_state,
 };
+use crate::pure::gpu::dgpu_runtime_pm_pinned;
 use crate::pure::power::{battery_low_step, profile_from_platform_value};
 use crate::pure::profiles::{EdpPolicy, GpuPref, select_profile};
 use crate::sysio::hyprctl;
@@ -215,7 +216,8 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
     // drift computation is about to use.
     let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
     fx.write_gpu_breadcrumb(chosen.map(|p| p.gpu));
-    gpu_drift_check(ctx, fx, "monitors changed", gpu_pref);
+    let mode = gpu_drift_check(ctx, fx, "monitors changed", gpu_pref);
+    fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
     // Docked-ness (ext_mon_count) is a power-policy input.
     power_policy_check(ctx, fx).await;
 }
@@ -371,6 +373,21 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         on_enter_screen(prev, new, Entry::Fresh, &mut ctx, &fx).await;
     }
 
+    // Initial dgpu runtime-PM pin. dgpu mode must block D3cold from login
+    // onward — the FW16 DCN wedge bites during the no-display-yet window
+    // before the compositor brings the dGPU's output up, so we can't wait for
+    // the first MONITORS_CHANGED. Independent of gpu_actual (mode resolves
+    // from the override/profile/platform inputs alone).
+    {
+        let signature = hyprctl::monitor_signature().await;
+        let profiles = load_profiles();
+        let gpu_pref = select_profile(&signature, &profiles)
+            .map(|p| p.gpu)
+            .unwrap_or(GpuPref::Auto);
+        let (mode, _) = resolve_session_gpu_mode(gpu_pref);
+        fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode)).await;
+    }
+
     while let Some(ev) = rx.recv().await {
         let kind = ev.kind();
         let label = ev.label();
@@ -486,6 +503,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     ctx.powerd_available = true;
                     ctx.powerd_warned = false;
                     ctx.power_applied = None; // force a re-apply
+                    ctx.dgpu_pinned = None; // re-push the dgpu pin too
                 }
                 ctx.on_ac_settled = ctx.on_ac;
             }
@@ -510,7 +528,8 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             let profiles = load_profiles();
             let chosen = select_profile(&signature, &profiles);
             let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
-            gpu_drift_check(&mut ctx, &fx, label, gpu_pref);
+            let mode = gpu_drift_check(&mut ctx, &fx, label, gpu_pref);
+            fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode)).await;
         }
 
         // Power policy evaluation on its (debounced/derived) inputs.

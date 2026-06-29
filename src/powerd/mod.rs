@@ -78,6 +78,18 @@ impl Power1 {
         Ok(results)
     }
 
+    /// Pin (`awake=true`) or release the discrete GPU's runtime PM. The
+    /// daemon pushes `true` whenever the resolved GPU mode is `dgpu` so the
+    /// active-renderer dGPU never autosuspends to D3cold (the FW16 DCN resume
+    /// wedge). Persisted + re-applied on resume, like the power profile. No
+    /// validation needed (the arg is a bool); never errors.
+    async fn set_dgpu_awake(&self, awake: bool) -> HashMap<String, String> {
+        let results = knobs::apply_dgpu_runtime_pm(awake);
+        knobs::persist_dgpu_pin(awake);
+        info!("set_dgpu_awake({awake}): {results:?}");
+        results
+    }
+
     /// Persisted active profile.
     fn get_profile(&self) -> String {
         self.active_profile_value().as_str().to_string()
@@ -128,6 +140,14 @@ pub async fn run(session_bus: bool) -> anyhow::Result<()> {
         knobs::powerd_apply(active, aspm_writable)
     );
 
+    // Initial apply of the persisted dgpu pin (the daemon re-pushes on its
+    // own startup, but this re-asserts across a bare powerd restart).
+    let dgpu_pin = knobs::persisted_dgpu_pin();
+    info!(
+        "startup dgpu-pin {dgpu_pin}: {:?}",
+        knobs::apply_dgpu_runtime_pm(dgpu_pin)
+    );
+
     // Re-apply on resume: firmware can reset EPP/boost across s2idle.
     let iface_ref = conn
         .object_server()
@@ -142,6 +162,12 @@ pub async fn run(session_bus: bool) -> anyhow::Result<()> {
                         let active = iface_ref.get().await.active_profile_value();
                         info!("resume: re-applying {}", active.as_str());
                         knobs::powerd_apply(active, aspm_writable);
+                        // The dGPU may have D3cold-resumed across s2idle and
+                        // the kernel can reset power/control — re-assert the
+                        // pin so dgpu mode stays wedge-proof.
+                        let pin = knobs::persisted_dgpu_pin();
+                        info!("resume: re-applying dgpu-pin {pin}");
+                        knobs::apply_dgpu_runtime_pm(pin);
                     }
                 }
             }

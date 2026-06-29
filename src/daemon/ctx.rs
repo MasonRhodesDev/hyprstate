@@ -39,6 +39,9 @@ pub struct Context {
     pub gpu_actual_pending: bool,
     pub gpu_last_notified: Option<String>,
     pub gpu_last_notify_at: Option<Instant>,
+    /// Last dgpu runtime-PM pin pushed to powerd (idempotence). None = never
+    /// pushed; reset on PowerdAppeared so it re-pushes after powerd restarts.
+    pub dgpu_pinned: Option<bool>,
 
     // ---- power policy ----
     pub on_ac_settled: bool,
@@ -83,6 +86,7 @@ impl Default for Context {
             gpu_actual_pending: true,
             gpu_last_notified: None,
             gpu_last_notify_at: None,
+            dgpu_pinned: None,
             on_ac_settled: true,
             battery_percent: Some(100.0),
             low_battery: false,

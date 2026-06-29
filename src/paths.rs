@@ -124,6 +124,10 @@ pub const TOUCHPAD_I2C_CLIENT: &str = "i2c-PIXA3854:00";
 pub const POWERD_BUS: &str = "org.hyprstate.Power1";
 pub const POWERD_PATH: &str = "/org/hyprstate/Power1";
 pub const POWERD_STATE_FILE: &str = "/var/lib/hyprstate/profile";
+/// Persisted discrete-GPU runtime-PM pin (`on`|`auto`), pushed by the daemon
+/// when the resolved GPU mode is `dgpu`. powerd re-applies it on resume (the
+/// FW16 DCN D3cold wedge). tmp+rename atomic; missing → `auto`.
+pub const POWERD_DGPU_PIN_FILE: &str = "/var/lib/hyprstate/dgpu-pin";
 pub const PLATFORM_PROFILE_CHOICES_PATH: &str = "/sys/firmware/acpi/platform_profile_choices";
 pub const CPUFREQ_DIR: &str = "/sys/devices/system/cpu/cpufreq";
 pub const ASPM_POLICY_PATH: &str = "/sys/module/pcie_aspm/parameters/policy";

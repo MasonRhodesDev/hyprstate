@@ -221,6 +221,65 @@ fn gpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
     }
 }
 
+/// Pin (`awake=true` → `power/control=on`) or release (`auto`) discrete-GPU
+/// runtime PM. The daemon pushes `on` whenever the resolved GPU mode is
+/// `dgpu`: on Framework 16 a D3cold autosuspend/resume can wedge the discrete
+/// display engine (`amdgpu: [drm] Cannot find any crtc or sizes`) until a cold
+/// boot, so the card the session renders on must never drop to D3cold. Every
+/// other mode pushes `auto` so an idle dGPU still suspends for battery.
+///
+/// Mechanism only; the dgpu-vs-other decision lives in `pure::gpu`. Discovery
+/// guards mirror `gpu_rows` (≥2 cards + unambiguous integrated). Unlike the
+/// dpm knob, `power/control` is the autosuspend gate itself — reading or
+/// writing it does NOT wake a suspended card — so no runtime_status guard.
+pub fn apply_dgpu_runtime_pm(awake: bool) -> HashMap<String, String> {
+    let mut res = HashMap::new();
+    let snap = gpu_snapshot();
+    let integrated = if snap.cards.len() >= 2 {
+        integrated_card(&snap.cards)
+    } else {
+        None
+    };
+    let Some(integrated) = integrated else {
+        res.insert("runtime_pm".into(), "skipped-ambiguous".into());
+        return res;
+    };
+    let value = if awake { "on" } else { "auto" };
+    for (i, c) in snap.cards.iter().enumerate() {
+        if i == integrated {
+            continue;
+        }
+        let label = format!("runtime_pm:{}", pci_key(&c.path));
+        let knob = Path::new("/sys/class/drm")
+            .join(&c.card)
+            .join("device/power/control");
+        res.insert(label, knob_write(&knob, value));
+    }
+    res
+}
+
+/// Persisted dgpu pin; missing/invalid → false (`auto`, the kernel default).
+pub fn persisted_dgpu_pin() -> bool {
+    fs::read_to_string(paths::POWERD_DGPU_PIN_FILE)
+        .ok()
+        .is_some_and(|s| s.trim() == "on")
+}
+
+pub fn persist_dgpu_pin(awake: bool) {
+    let state = Path::new(paths::POWERD_DGPU_PIN_FILE);
+    let result = (|| -> std::io::Result<()> {
+        if let Some(parent) = state.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = state.with_extension("tmp");
+        fs::write(&tmp, if awake { "on\n" } else { "auto\n" })?;
+        fs::rename(&tmp, state)
+    })();
+    if let Err(e) = result {
+        warn!("dgpu-pin persist failed: {e}");
+    }
+}
+
 /// The currently-selected ASPM policy is the bracket-annotated word.
 fn aspm_current(opts: &str) -> Option<String> {
     opts.split_whitespace()
@@ -352,6 +411,11 @@ pub fn knob_snapshot() -> HashMap<String, String> {
                 }
             }
             Err(_) => {}
+        }
+        // power/control is safe to read on a suspended card (it's the
+        // autosuspend gate, not a register access) — surfaces the dgpu pin.
+        if let Ok(v) = fs::read_to_string(dev.join("power/control")) {
+            out.insert(format!("runtime_pm:{}", pci_key(&c.path)), v.trim().to_string());
         }
     }
     out

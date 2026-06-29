@@ -1,7 +1,9 @@
 # RPM spec for hyprstate (Rust v2). Built in COPR from a local SRPM
 # produced by packaging/build-srpm.sh (source tarball from the git tag +
 # vendored cargo deps as Source1 — no rust-*-devel packages needed).
-%bcond_with check
+# %check runs by default (cargo test over both workspace members). Disable for
+# a one-off build with --without check; COPR builds run the suite.
+%bcond_without check
 
 Name:           hyprstate
 Version:        2.0.1
@@ -61,6 +63,10 @@ install -Dpm0644 dist/90-hyprstate.user.preset %{buildroot}%{_userpresetdir}/90-
 %post
 %systemd_post hyprstate-powerd.service
 %systemd_user_post hyprstate.service
+# Load the freshly-installed udev rule and D-Bus policy now, so the USB-wake
+# rule and powerd's name ownership work without waiting for a reboot.
+%udev_rules_update
+systemctl reload dbus-broker.service >/dev/null 2>&1 || systemctl reload dbus.service >/dev/null 2>&1 || :
 if [ $1 -eq 1 ]; then
     # First install only: take exclusive ownership of platform_profile.
     # %systemd_post presets only the named unit, so the conflicting daemons
@@ -76,6 +82,7 @@ fi
 %postun
 %systemd_postun_with_restart hyprstate-powerd.service
 %systemd_user_postun_with_restart hyprstate.service
+%udev_rules_update
 
 %files
 %license LICENSE LICENSE.dependencies

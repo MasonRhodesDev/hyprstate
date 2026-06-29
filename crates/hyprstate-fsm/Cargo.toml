@@ -5,6 +5,8 @@ edition = "2024"
 license = "MIT"
 description = "Pure, I/O-free state machine + policy layer for hyprstate (shared by the daemon and the GUI)."
 repository = "https://github.com/MasonRhodesDev/hyprstate"
+# Internal crate, consumed via path by the daemon and the GUI; not published.
+publish = false
 
 [dependencies]
 # serde so the daemon can emit FSM state over telemetry and the GUI can render

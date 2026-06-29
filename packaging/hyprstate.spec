@@ -61,6 +61,13 @@ install -Dpm0644 dist/90-hyprstate.user.preset %{buildroot}%{_userpresetdir}/90-
 %post
 %systemd_post hyprstate-powerd.service
 %systemd_user_post hyprstate.service
+if [ $1 -eq 1 ]; then
+    # First install only: take exclusive ownership of platform_profile.
+    # %systemd_post presets only the named unit, so the conflicting daemons
+    # must be disabled explicitly or systemd may pick the wrong owner at boot
+    # (both Conflicts= each other and would otherwise both be WantedBy multi-user).
+    systemctl --quiet disable --now power-profiles-daemon.service tuned.service tlp.service >/dev/null 2>&1 || :
+fi
 
 %preun
 %systemd_preun hyprstate-powerd.service

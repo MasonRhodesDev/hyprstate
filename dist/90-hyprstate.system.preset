@@ -1,1 +1,6 @@
 enable hyprstate-powerd.service
+# hyprstate is the exclusive owner of platform_profile (POWER_SPEC.md); the
+# powerd unit Conflicts= these, so a preset-all must not leave them enabled.
+disable power-profiles-daemon.service
+disable tuned.service
+disable tlp.service

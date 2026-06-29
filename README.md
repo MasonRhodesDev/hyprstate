@@ -50,6 +50,11 @@ sudo systemctl enable --now hyprstate-powerd     # root effector
 systemctl --user enable --now hyprstate          # session daemon
 ```
 
+hyprstate's powerd is the **exclusive owner of `platform_profile`** — its unit
+`Conflicts=` `power-profiles-daemon`, `tuned`, and `tlp`. Install disables those
+on first install (RPM `%post`; Arch `.install` hook) so the boot-time owner is
+deterministic. Don't re-enable them alongside hyprstate.
+
 Migrating off the old git-symlink / `install.sh` dev install: run
 `packaging/migrate-from-devinstall.sh` once (it removes the `/usr/local`
 symlink, the libexec copy, and the `/etc` drop-ins that would shadow the

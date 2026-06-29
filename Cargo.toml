@@ -3,7 +3,10 @@
 # Slint/femtovg dependency tree never enters this crate's `cargo vendor` tarball
 # or the RPM/PKGBUILD build. It path-depends on hyprstate-fsm instead.
 members = [".", "crates/hyprstate-fsm"]
-default-members = ["."]
+# Both members are default so `cargo build/test` (and the RPM %check, which
+# uses %cargo_test) exercise the pure FSM/policy crate too — not just the
+# binary. The GUI lives in its own repo and is intentionally not a member.
+default-members = [".", "crates/hyprstate-fsm"]
 resolver = "3"
 
 [package]

@@ -1,0 +1,10 @@
+# rpmlint filters for hyprstate. Lets CI gate on rpmlint without tripping over
+# domain vocabulary and our deliberate vendored-source layout.
+
+# Domain terms rpmlint's dictionary doesn't know (Hyprland, the powerd daemon,
+# sysfs, systemd, hotplugged hubs, *.conf). Not real defects.
+addFilter("spelling-error")
+
+# Source1 is the cargo-vendor tarball produced by build-srpm.sh, not a URL —
+# intentional (offline, reproducible RPM build).
+addFilter("invalid-url Source1")

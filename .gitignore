@@ -1,4 +1,13 @@
+/target
+# cargo vendor tree (regenerated for the SRPM build; never committed — a
+# shadow copy of every dependency would bypass Cargo.lock review)
+/vendor/
+# local packaging build artifacts
+*.tar.gz
+*.tar.xz
+*.src.rpm
+*.rpm
+# legacy Python leftovers
 __pycache__/
 *.pyc
 *.pyo
-/target

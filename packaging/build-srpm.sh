@@ -21,8 +21,16 @@ COPR_PROJECT="${COPR_PROJECT:-hyprstate}"
 
 VER=$(sed -n 's/^Version:[[:space:]]*//p' "$SPEC")
 CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)
-if [ "$VER" != "$CARGO_VER" ]; then
-    echo "ERROR: spec Version ($VER) != Cargo.toml version ($CARGO_VER)" >&2
+PKGBUILD_VER=$(sed -n 's/^pkgver=//p' "$REPO/packaging/PKGBUILD")
+# Cargo.lock's own entry for this package (guards a stale lock).
+LOCK_VER=$(awk '/^name = "hyprstate"$/{getline; gsub(/version = "|"/,""); print; exit}' "$REPO/Cargo.lock")
+mismatch=""
+[ "$CARGO_VER" = "$VER" ] || mismatch="$mismatch\n  Cargo.toml=$CARGO_VER"
+[ "$PKGBUILD_VER" = "$VER" ] || mismatch="$mismatch\n  PKGBUILD pkgver=$PKGBUILD_VER"
+[ "$LOCK_VER" = "$VER" ] || mismatch="$mismatch\n  Cargo.lock=$LOCK_VER"
+if [ -n "$mismatch" ]; then
+    echo "ERROR: version mismatch (spec Version=$VER):$(printf "$mismatch")" >&2
+    echo "Bump spec, Cargo.toml, PKGBUILD pkgver, and Cargo.lock together." >&2
     exit 1
 fi
 
@@ -51,7 +59,9 @@ tar -cJf "$SOURCES/hyprstate-$VER-vendor.tar.xz" -C "$VENDOR_DIR/src" vendor
 echo "==> building SRPM"
 SRPM=$(rpmbuild -bs "$SPEC" | sed -n 's/^Wrote: //p')
 echo "    $SRPM"
-rpmlint "$SRPM" || true
+# Gating: a clean tree should pass (domain-term/spelling noise filtered by the
+# rpmlintrc). Failures here are real spec defects worth stopping for.
+rpmlint --rpmlintrc "$REPO/packaging/hyprstate.rpmlintrc" "$SRPM"
 
 if [ "${1:-}" = "--copr" ]; then
     echo "==> submitting to COPR project $COPR_PROJECT"

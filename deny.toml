@@ -1,0 +1,37 @@
+# cargo-deny configuration — supply-chain gate for a root-privileged daemon.
+# Run locally with `cargo deny check`; CI runs it on PRs, pushes, and weekly.
+
+[advisories]
+version = 2
+yanked = "deny"
+# Add RUSTSEC IDs here (with a justifying comment) only if an advisory is
+# confirmed not to affect us and a fix isn't yet available.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive set actually present in the tree (see `cargo metadata`). The one
+# `... OR LGPL-2.1-or-later` dep is satisfied by its MIT/Apache alternative, so
+# LGPL is intentionally NOT allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -44,8 +44,11 @@ pub fn resolve_session_gpu_mode(profile_gpu: GpuPref) -> (GpuMode, GpuModeSource
         pref => Some(pref.as_str().to_string()),
     };
     let platform = sysfs::read_first_word(paths::platform_profile_path());
-    let (mode, source, _warnings) =
-        resolve_gpu_mode(override_word.as_deref(), overlay.as_deref(), platform.as_deref());
+    let (mode, source, _warnings) = resolve_gpu_mode(
+        override_word.as_deref(),
+        overlay.as_deref(),
+        platform.as_deref(),
+    );
     (mode, source)
 }
 

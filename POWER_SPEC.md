@@ -25,8 +25,9 @@ changes require re-running install.sh (already the documented update flow).
 ```
 Bus: system. Name: org.hyprstate.Power1. Path: /org/hyprstate/Power1.
 ApplyProfile(s) -> a{ss}   # profile ∈ {power-saver,balanced,performance}, else D-Bus error
+SetDgpuAwake(b) -> a{ss}   # pin (true) / release (false) discrete-GPU runtime PM
 GetProfile() -> s          # persisted active profile
-GetKnobs() -> a{ss}        # read-only live snapshot
+GetKnobs() -> a{ss}        # read-only live snapshot (incl. runtime_pm:<pci>)
 signal ProfileApplied(s);  property ActiveProfile(s, emits-changes)
 ```
 
@@ -38,11 +39,26 @@ signal ProfileApplied(s);  property ActiveProfile(s, emits-changes)
   latest-request slot; superseded waiters return `{"coalesced":
   "superseded-by:<profile>"}`; only first and latest apply. Per-row work is
   read-before-write idempotent.
+- **Discrete-GPU runtime-PM pin (`SetDgpuAwake`)**: writes `power/control` =
+  `on` (pin, block D3cold autosuspend) / `auto` (release, kernel default) to
+  every discrete (non-integrated) card; same discovery guards as the dpm rows
+  (≥2 cards + unambiguous integrated, else `skipped-ambiguous`). The
+  dgpu-vs-other *decision* is policy and lives in the user daemon
+  (`pure::gpu::dgpu_runtime_pm_pinned` — only `dgpu` mode pins); powerd is pure
+  mechanism. Rationale: on Framework 16 a dGPU D3cold resume can leave the
+  display engine wedged (`amdgpu: [drm] Cannot find any crtc or sizes`) until a
+  cold boot, and dgpu mode keeps that card the active renderer, so it must
+  never autosuspend. Unlike the dpm knob, `power/control` is the autosuspend
+  gate itself — reading/writing it never wakes a suspended card, so no
+  runtime_status guard. Persisted to `/var/lib/hyprstate/dgpu-pin` (`on|auto`,
+  tmp+rename atomic, missing → `auto`); re-applied at startup and on resume.
 - **Persisted profile (V4)**: `/var/lib/hyprstate/profile`, tmp+rename atomic;
   read validated against the profile whitelist; invalid/missing → `balanced` +
   warning; the knob matrix is never indexed with an unvalidated string.
 - **Resume**: own PrepareForSleep(false) subscription → re-apply persisted
-  profile through the same idempotent path (V20a: not an amplification vector).
+  profile through the same idempotent path (V20a: not an amplification vector),
+  then re-apply the persisted dgpu pin (a D3cold resume across s2idle can reset
+  `power/control`, and the pin is exactly what keeps dgpu mode wedge-proof).
 
 ### Bus policy — verbatim (V2)
 

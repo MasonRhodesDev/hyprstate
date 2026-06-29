@@ -12,6 +12,8 @@ use zbus::proxy;
 pub trait Powerd {
     fn apply_profile(&self, profile: &str) -> zbus::Result<HashMap<String, String>>;
 
+    fn set_dgpu_awake(&self, awake: bool) -> zbus::Result<HashMap<String, String>>;
+
     fn get_profile(&self) -> zbus::Result<String>;
 
     fn get_knobs(&self) -> zbus::Result<HashMap<String, String>>;

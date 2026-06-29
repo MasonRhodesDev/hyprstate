@@ -130,6 +130,18 @@ pub fn devnode(card: &GpuCard) -> String {
     format!("/dev/dri/{}", card.card)
 }
 
+/// Whether the discrete GPU's runtime PM must be pinned awake
+/// (`power/control=on`, blocking D3cold autosuspend) for this mode. Only
+/// `dgpu` mode pins it: on Framework 16 a D3cold resume can leave the
+/// discrete display engine wedged (`amdgpu: [drm] Cannot find any crtc or
+/// sizes`) until a cold boot, and dgpu mode keeps the card the active
+/// renderer deliberately, so it must never autosuspend. Every other mode
+/// (`auto`/`igpu`/`off`) leaves runtime PM at `auto` so the idle dGPU still
+/// suspends for battery.
+pub fn dgpu_runtime_pm_pinned(mode: GpuMode) -> bool {
+    matches!(mode, GpuMode::Dgpu)
+}
+
 /// pci-0000:03:00.0 from .../pci-0000:03:00.0-card — the stable per-card
 /// key used in the state-file snapshot and powerd's dpm row labels.
 pub fn pci_key(path: &str) -> &str {
@@ -444,6 +456,14 @@ mod tests {
         );
         assert_eq!(devices, None);
         assert_eq!(reason, "bailed-transient");
+    }
+
+    #[test]
+    fn test_dgpu_runtime_pm_pinned_only_in_dgpu_mode() {
+        assert!(dgpu_runtime_pm_pinned(GpuMode::Dgpu));
+        assert!(!dgpu_runtime_pm_pinned(GpuMode::Auto));
+        assert!(!dgpu_runtime_pm_pinned(GpuMode::Igpu));
+        assert!(!dgpu_runtime_pm_pinned(GpuMode::Off));
     }
 
     #[test]

@@ -382,6 +382,43 @@ impl Effectors {
         }
     }
 
+    /// Pin (`awake=true`) or release the discrete GPU's runtime PM via powerd.
+    /// `awake` should be `pure::gpu::dgpu_runtime_pm_pinned(mode)`: dgpu mode
+    /// must block D3cold (the FW16 DCN resume wedge). Idempotent on
+    /// `ctx.dgpu_pinned`; deferred while powerd is unavailable (re-pushed when
+    /// PowerdAppeared resets the marker).
+    pub async fn sync_dgpu_pin(&self, ctx: &mut Context, awake: bool) {
+        if ctx.dgpu_pinned == Some(awake) || !ctx.powerd_available {
+            return;
+        }
+        if self.shadow {
+            info!("[shadow] GPU: would set dgpu pin awake={awake}");
+            ctx.dgpu_pinned = Some(awake);
+            return;
+        }
+        match self.powerd.set_dgpu_awake(awake).await {
+            Ok(results) => {
+                ctx.dgpu_pinned = Some(awake);
+                let interesting: std::collections::BTreeMap<_, _> = results
+                    .iter()
+                    .filter(|(_, v)| *v != "unchanged" && *v != "skipped-missing")
+                    .collect();
+                if interesting.is_empty() {
+                    info!("GPU: dgpu pin awake={awake} (all unchanged)");
+                } else {
+                    info!("GPU: dgpu pin awake={awake} ({interesting:?})");
+                }
+            }
+            Err(e) => {
+                ctx.powerd_available = false; // NameOwnerChanged re-enables
+                if !ctx.powerd_warned {
+                    ctx.powerd_warned = true;
+                    warn!("powerd unavailable ({e}) — dgpu pin deferred");
+                }
+            }
+        }
+    }
+
     /// Delete the override file and update ctx SYNCHRONOUSLY — the poller
     /// echo of the deletion must arrive as a no-op.
     pub fn clear_power_override(&self, ctx: &mut Context) {

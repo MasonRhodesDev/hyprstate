@@ -415,7 +415,10 @@ pub fn knob_snapshot() -> HashMap<String, String> {
         // power/control is safe to read on a suspended card (it's the
         // autosuspend gate, not a register access) — surfaces the dgpu pin.
         if let Ok(v) = fs::read_to_string(dev.join("power/control")) {
-            out.insert(format!("runtime_pm:{}", pci_key(&c.path)), v.trim().to_string());
+            out.insert(
+                format!("runtime_pm:{}", pci_key(&c.path)),
+                v.trim().to_string(),
+            );
         }
     }
     out

@@ -1,0 +1,17 @@
+# hyprstate is the exclusive owner of platform_profile (POWER_SPEC.md). The
+# powerd unit Conflicts= power-profiles-daemon/tuned/tlp; disable them so
+# systemd can't pick the wrong owner at boot. Arch does not auto-apply presets,
+# so enabling hyprstate-powerd is left to the user (`systemctl enable --now
+# hyprstate-powerd`; `systemctl --user enable --now hyprstate`).
+
+_disable_conflicts() {
+    systemctl --quiet disable --now power-profiles-daemon.service tuned.service tlp.service >/dev/null 2>&1 || true
+}
+
+post_install() {
+    _disable_conflicts
+}
+
+post_upgrade() {
+    _disable_conflicts
+}

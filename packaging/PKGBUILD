@@ -13,6 +13,7 @@ pkgdesc="Hyprland session/power state machine (lid, monitors, profiles, GPU, pow
 arch=('x86_64')
 url="https://github.com/MasonRhodesDev/hyprstate"
 license=('MIT')
+install="$pkgname.install"
 depends=('systemd' 'dbus')
 makedepends=('cargo')
 optdepends=(

@@ -30,6 +30,10 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace's own crates (hyprstate-fsm) are path deps with no version —
+# that's a "wildcard" to cargo-deny. Exempt local path deps; still catch a
+# real `foo = "*"` registry wildcard.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

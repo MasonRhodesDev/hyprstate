@@ -8,10 +8,19 @@ _disable_conflicts() {
     systemctl --quiet disable --now power-profiles-daemon.service tuned.service tlp.service >/dev/null 2>&1 || true
 }
 
+# Load the freshly-installed udev rule and D-Bus policy now, so USB-wake and
+# powerd's name ownership work without waiting for a reboot.
+_reload_rules() {
+    udevadm control --reload >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=usb --action=add >/dev/null 2>&1 || true
+    systemctl reload dbus-broker.service >/dev/null 2>&1 || systemctl reload dbus.service >/dev/null 2>&1 || true
+}
+
 post_install() {
+    _reload_rules
     _disable_conflicts
 }
 
 post_upgrade() {
-    _disable_conflicts
+    _reload_rules
 }

@@ -16,7 +16,7 @@ use std::sync::Mutex as StdMutex;
 
 use futures_util::StreamExt;
 use tokio::sync::Mutex as AsyncMutex;
-use tracing::{info, warn};
+use tracing::info;
 use zbus::object_server::SignalEmitter;
 
 use crate::dbus::logind::LogindManagerProxy;
@@ -153,30 +153,26 @@ pub async fn run(session_bus: bool) -> anyhow::Result<()> {
         .object_server()
         .interface::<_, Power1>(paths::POWERD_PATH)
         .await?;
-    match LogindManagerProxy::new(&conn).await {
-        Ok(logind) => match logind.receive_prepare_for_sleep().await {
-            Ok(mut stream) => {
-                while let Some(signal) = stream.next().await {
-                    let Ok(args) = signal.args() else { continue };
-                    if !args.start {
-                        let active = iface_ref.get().await.active_profile_value();
-                        info!("resume: re-applying {}", active.as_str());
-                        knobs::powerd_apply(active, aspm_writable);
-                        // The dGPU may have D3cold-resumed across s2idle and
-                        // the kernel can reset power/control — re-assert the
-                        // pin so dgpu mode stays wedge-proof.
-                        let pin = knobs::persisted_dgpu_pin();
-                        info!("resume: re-applying dgpu-pin {pin}");
-                        knobs::apply_dgpu_runtime_pm(pin);
-                    }
-                }
-            }
-            Err(e) => warn!("PrepareForSleep subscription failed: {e}"),
-        },
-        Err(e) => warn!("PrepareForSleep subscription failed: {e}"),
+    // A failed subscription (or a dropped stream) must NOT be silently
+    // survived: powerd would stay alive serving the bus but never re-apply on
+    // resume, defeating the firmware/D3cold reset mitigation. Return an error
+    // instead so Restart=on-failure brings us back and re-subscribes.
+    let logind = LogindManagerProxy::new(&conn).await?;
+    let mut stream = logind.receive_prepare_for_sleep().await?;
+    while let Some(signal) = stream.next().await {
+        let Ok(args) = signal.args() else { continue };
+        if !args.start {
+            let active = iface_ref.get().await.active_profile_value();
+            info!("resume: re-applying {}", active.as_str());
+            knobs::powerd_apply(active, aspm_writable);
+            // The dGPU may have D3cold-resumed across s2idle and the kernel can
+            // reset power/control — re-assert the pin so dgpu mode stays
+            // wedge-proof.
+            let pin = knobs::persisted_dgpu_pin();
+            info!("resume: re-applying dgpu-pin {pin}");
+            knobs::apply_dgpu_runtime_pm(pin);
+        }
     }
 
-    // Signal stream ended (or never started) — stay alive serving the bus.
-    std::future::pending::<()>().await;
-    Ok(())
+    anyhow::bail!("PrepareForSleep stream ended — restarting to re-subscribe");
 }

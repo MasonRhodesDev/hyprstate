@@ -3,6 +3,9 @@ Description=hyprstate powerd: root power-profile effector (org.hyprstate.Power1)
 Documentation=https://github.com/MasonRhodesDev/hyprstate
 # Mutually exclusive with other platform_profile owners.
 Conflicts=power-profiles-daemon.service tuned.service tlp.service
+# powerd subscribes to logind's PrepareForSleep for the resume re-apply.
+Wants=systemd-logind.service
+After=systemd-logind.service
 
 [Service]
 Type=dbus
@@ -14,7 +17,11 @@ RestartSec=2
 # Hardening. Deliberately ABSENT: ProtectKernelTunables (it remounts /sys
 # read-only, and writing /sys is this service's entire purpose).
 ProtectSystem=strict
-ReadWritePaths=/sys
+# Only the knob subtrees powerd actually writes, not all of /sys. /sys/devices
+# is required because /sys/class/drm/cardN (the GPU dpm + power/control knobs)
+# and /sys/devices/system/cpu/cpufreq resolve there; the `-` prefix tolerates a
+# subtree missing on other hardware (chezmoi-shared config, single-GPU, etc).
+ReadWritePaths=/sys/devices -/sys/firmware/acpi/platform_profile -/sys/module/pcie_aspm/parameters/policy
 ProtectHome=yes
 NoNewPrivileges=yes
 PrivateTmp=yes

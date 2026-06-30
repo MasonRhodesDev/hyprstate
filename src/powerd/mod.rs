@@ -21,6 +21,7 @@ use tracing::info;
 use zbus::object_server::SignalEmitter;
 
 use crate::dbus::logind::LogindManagerProxy;
+use crate::dbus::polkit;
 use crate::paths;
 use crate::pure::power::PowerProfile;
 
@@ -30,6 +31,7 @@ enum PowerdError {
     #[zbus(error)]
     ZBus(zbus::Error),
     InvalidProfile(String),
+    NotAuthorized(String),
 }
 
 struct Power1 {
@@ -45,14 +47,35 @@ impl Power1 {
     }
 }
 
+/// Gate a privileged method on an active local session via polkit. The user
+/// daemon (running in the active graphical session) is authorized without a
+/// prompt; inactive/remote callers are denied (fail-closed).
+async fn authorize(
+    conn: &zbus::Connection,
+    header: &zbus::message::Header<'_>,
+) -> Result<(), PowerdError> {
+    let sender = header.sender().map(|s| s.as_str()).unwrap_or("");
+    if polkit::caller_authorized(conn, sender).await {
+        Ok(())
+    } else {
+        Err(PowerdError::NotAuthorized(format!(
+            "caller {sender:?} not authorized for {} (active local session required)",
+            polkit::ACTION_ID
+        )))
+    }
+}
+
 #[zbus::interface(name = "org.hyprstate.Power1")]
 impl Power1 {
     /// Apply a profile's knob whitelist. Coalesced under a click storm.
     async fn apply_profile(
         &self,
         profile: String,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> Result<HashMap<String, String>, PowerdError> {
+        authorize(conn, &header).await?;
         let Ok(parsed) = profile.parse::<PowerProfile>() else {
             return Err(PowerdError::InvalidProfile(format!(
                 "profile must be one of power-saver|balanced|performance, got {profile:?}"
@@ -84,11 +107,17 @@ impl Power1 {
     /// active-renderer dGPU never autosuspends to D3cold (the FW16 DCN resume
     /// wedge). Persisted + re-applied on resume, like the power profile. No
     /// validation needed (the arg is a bool); never errors.
-    async fn set_dgpu_awake(&self, awake: bool) -> HashMap<String, String> {
+    async fn set_dgpu_awake(
+        &self,
+        awake: bool,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> Result<HashMap<String, String>, PowerdError> {
+        authorize(conn, &header).await?;
         let results = knobs::apply_dgpu_runtime_pm(awake);
         knobs::persist_dgpu_pin(awake);
         info!("set_dgpu_awake({awake}): {results:?}");
-        results
+        Ok(results)
     }
 
     /// Persisted active profile.

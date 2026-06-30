@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>hyprstate</vendor>
+  <vendor_url>https://github.com/MasonRhodesDev/hyprstate</vendor_url>
+
+  <action id="org.hyprstate.power1.manage">
+    <description>Manage the system power profile and discrete-GPU runtime power</description>
+    <message>Authentication is required to change the power profile</message>
+    <!-- Power control belongs to whoever is physically at the machine: the
+         active local session is allowed outright (no prompt); inactive and
+         remote sessions are denied. powerd calls CheckAuthorization with
+         flags=0, so a "denied" verdict simply fails the call. -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

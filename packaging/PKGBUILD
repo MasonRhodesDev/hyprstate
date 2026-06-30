@@ -14,7 +14,7 @@ arch=('x86_64')
 url="https://github.com/MasonRhodesDev/hyprstate"
 license=('MIT')
 install="$pkgname.install"
-depends=('systemd' 'dbus')
+depends=('systemd' 'dbus' 'polkit')
 makedepends=('cargo')
 optdepends=(
   'playerctl: media auto-pause on deferred lid close'
@@ -52,6 +52,7 @@ package() {
   install -Dm644 dist/hyprstate-powerd.service "$pkgdir/usr/lib/systemd/system/hyprstate-powerd.service"
   install -Dm644 dist/org.hyprstate.Power1.conf "$pkgdir/usr/share/dbus-1/system.d/org.hyprstate.Power1.conf"
   install -Dm644 dist/org.hyprstate.Power1.service "$pkgdir/usr/share/dbus-1/system-services/org.hyprstate.Power1.service"
+  install -Dm644 dist/org.hyprstate.Power1.policy "$pkgdir/usr/share/polkit-1/actions/org.hyprstate.Power1.policy"
   install -Dm644 dist/60-hyprstate-usb-wake.rules "$pkgdir/usr/lib/udev/rules.d/60-hyprstate-usb-wake.rules"
   install -Dm755 dist/sleep-hook-wrapper.sh "$pkgdir/usr/lib/systemd/system-sleep/hyprstate"
   install -Dm644 dist/90-hyprstate.system.preset "$pkgdir/usr/lib/systemd/system-preset/90-hyprstate.preset"

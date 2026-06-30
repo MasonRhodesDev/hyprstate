@@ -18,6 +18,8 @@ BuildRequires:  cargo-rpm-macros >= 24
 BuildRequires:  systemd-rpm-macros
 Requires:       systemd
 Requires:       dbus-common
+# powerd authorizes callers via polkit (org.hyprstate.power1.manage).
+Requires:       polkit
 %{?systemd_requires}
 # Runtime conflicts with other platform_profile owners are handled by the
 # powerd unit's Conflicts= line, NOT an RPM-level Conflicts: (p-p-d ships in
@@ -50,6 +52,7 @@ install -Dpm0644 dist/hyprstate.service %{buildroot}%{_userunitdir}/hyprstate.se
 install -Dpm0644 dist/hyprstate-powerd.service %{buildroot}%{_unitdir}/hyprstate-powerd.service
 install -Dpm0644 dist/org.hyprstate.Power1.conf %{buildroot}%{_datadir}/dbus-1/system.d/org.hyprstate.Power1.conf
 install -Dpm0644 dist/org.hyprstate.Power1.service %{buildroot}%{_datadir}/dbus-1/system-services/org.hyprstate.Power1.service
+install -Dpm0644 dist/org.hyprstate.Power1.policy %{buildroot}%{_datadir}/polkit-1/actions/org.hyprstate.Power1.policy
 install -Dpm0644 dist/60-hyprstate-usb-wake.rules %{buildroot}%{_udevrulesdir}/60-hyprstate-usb-wake.rules
 install -Dpm0755 dist/sleep-hook-wrapper.sh %{buildroot}%{_prefix}/lib/systemd/system-sleep/hyprstate
 install -Dpm0644 dist/90-hyprstate.system.preset %{buildroot}%{_presetdir}/90-hyprstate.preset
@@ -94,6 +97,7 @@ fi
 %{_userpresetdir}/90-hyprstate.preset
 %{_datadir}/dbus-1/system.d/org.hyprstate.Power1.conf
 %{_datadir}/dbus-1/system-services/org.hyprstate.Power1.service
+%{_datadir}/polkit-1/actions/org.hyprstate.Power1.policy
 %{_udevrulesdir}/60-hyprstate-usb-wake.rules
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 

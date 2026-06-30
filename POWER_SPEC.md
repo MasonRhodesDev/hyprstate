@@ -64,22 +64,33 @@ signal ProfileApplied(s);  property ActiveProfile(s, emits-changes)
   then re-apply the persisted dgpu pin (a D3cold resume across s2idle can reset
   `power/control`, and the pin is exactly what keeps dgpu mode wedge-proof).
 
-### Bus policy — verbatim (V2)
+### Bus policy + authorization (V2; polkit)
 
-`/etc/dbus-1/system.d/org.hyprstate.Power1.conf`:
+`/usr/share/dbus-1/system.d/org.hyprstate.Power1.conf`:
 
 ```xml
 <busconfig>
   <policy user="root"><allow own="org.hyprstate.Power1"/></policy>
-  <policy group="wheel">
+  <policy context="default">
     <allow send_destination="org.hyprstate.Power1"/>
   </policy>
 </busconfig>
 ```
 
-The own-allow MUST appear only in the root policy (a wheel/default own-allow
+The own-allow MUST appear only in the root policy (a default/group own-allow
 lets any local user squat the name pre-boot; Type=dbus would even report the
-unit as started). A malformed policy should fail loudly post-install
+unit as started). **Reachability is no longer the security boundary** —
+*any* user may send; powerd authorizes each privileged method (`ApplyProfile`,
+`SetDgpuAwake`) via **polkit**. It ships
+`/usr/share/polkit-1/actions/org.hyprstate.Power1.policy` defining action
+`org.hyprstate.power1.manage` with `allow_active=yes` / `allow_inactive=no` /
+`allow_any=no`, and calls `CheckAuthorization` (subject = the caller's
+`system-bus-name`, flags=0) for each call — **fail-closed**: an unreachable or
+erroring polkitd denies. Power control thus belongs to the active local session
+(whoever is at the machine), not to every member of a group. This replaced the
+old `group=wheel` send-grant, which both over-shared (every sudoer) and
+under-served (a non-wheel session user silently got AccessDenied). `polkit` is
+a package dependency. A malformed bus policy should fail loudly post-install
 (`systemctl is-active hyprstate-powerd`). Additionally ship
 `/usr/share/dbus-1/system-services/org.hyprstate.Power1.service` with
 `SystemdService=hyprstate-powerd.service` (V11c) — bus activation closes the

@@ -109,6 +109,17 @@ async fn run_cmd(cmd: &str, args: &[&str]) {
     }
 }
 
+/// True only when the error means powerd isn't on the bus, as opposed to powerd
+/// being present and returning a method error (e.g. polkit NotAuthorized). Only
+/// genuine absence should latch `powerd_available=false`, since the recovery
+/// path (NameOwnerChanged) never re-fires for a powerd that never left.
+fn powerd_absent(e: &zbus::Error) -> bool {
+    matches!(e, zbus::Error::MethodError(name, _, _)
+        if matches!(name.as_str(),
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+            | "org.freedesktop.DBus.Error.NameHasNoOwner"))
+}
+
 pub struct Effectors {
     pub shadow: bool,
     pub worker: mpsc::Sender<Cmd>,
@@ -372,7 +383,7 @@ impl Effectors {
                     info!("POWER: applied {} ({interesting:?})", profile.as_str());
                 }
             }
-            Err(e) => {
+            Err(e) if powerd_absent(&e) => {
                 ctx.powerd_available = false; // NameOwnerChanged re-enables
                 if !ctx.powerd_warned {
                     ctx.powerd_warned = true;
@@ -382,6 +393,10 @@ impl Effectors {
                     );
                 }
             }
+            // powerd is present but refused (e.g. polkit NotAuthorized): warn,
+            // but do NOT latch powerd_available=false — NameOwnerChanged won't
+            // re-fire for a powerd that never left, so the latch would stick.
+            Err(e) => warn!("powerd ApplyProfile failed ({e})"),
         }
     }
 
@@ -412,13 +427,14 @@ impl Effectors {
                     info!("GPU: dgpu pin awake={awake} ({interesting:?})");
                 }
             }
-            Err(e) => {
+            Err(e) if powerd_absent(&e) => {
                 ctx.powerd_available = false; // NameOwnerChanged re-enables
                 if !ctx.powerd_warned {
                     ctx.powerd_warned = true;
                     warn!("powerd unavailable ({e}) — dgpu pin deferred");
                 }
             }
+            Err(e) => warn!("powerd SetDgpuAwake failed ({e})"),
         }
     }
 

@@ -38,10 +38,11 @@ signal ProfileApplied(s);  property ActiveProfile(s, emits-changes)
   Per-row results (`written|unchanged|skipped-missing|skipped-suspended|
   skipped-unsupported|skipped-ambiguous|error:<msg>`) are informational; an
   all-skipped apply is still success (VM/desktop case, V20b).
-- **Coalescing (V14)**: calls arriving while an apply is in flight update a
-  latest-request slot; superseded waiters return `{"coalesced":
-  "superseded-by:<profile>"}`; only first and latest apply. Per-row work is
-  read-before-write idempotent.
+- **Coalescing (V14)**: every call records itself as the latest request, then
+  serializes on the apply lock; on acquiring it, a call whose profile is no
+  longer the latest no-ops and returns `{"coalesced":
+  "superseded-by:<profile>"}`. Under a burst only the final requested profile
+  is applied. Per-row work is read-before-write idempotent.
 - **Discrete-GPU runtime-PM pin (`SetDgpuAwake`)**: writes `power/control` =
   `on` (pin, block D3cold autosuspend) / `auto` (release, kernel default) to
   every discrete (non-integrated) card; same discovery guards as the dpm rows

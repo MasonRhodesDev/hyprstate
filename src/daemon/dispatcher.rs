@@ -222,6 +222,20 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
     power_policy_check(ctx, fx).await;
 }
 
+/// Resolve the session's GPU mode from the live monitor signature + matching
+/// profile and push the dgpu runtime-PM pin. Shared by startup and the
+/// PowerdAppeared path (where the pin belief was reset and the hardware state
+/// must be re-asserted through the freshly-available powerd).
+async fn resync_dgpu_pin(ctx: &mut Context, fx: &Effectors) {
+    let signature = hyprctl::monitor_signature().await;
+    let profiles = load_profiles();
+    let gpu_pref = select_profile(&signature, &profiles)
+        .map(|p| p.gpu)
+        .unwrap_or(GpuPref::Auto);
+    let (mode, _) = resolve_session_gpu_mode(gpu_pref);
+    fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
+}
+
 /// Diff a reconciler snapshot against ctx; repair, route repairs back into
 /// the machines, and re-assert the eDP/DPMS invariants.
 async fn handle_reconcile_tick(
@@ -378,16 +392,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     // before the compositor brings the dGPU's output up, so we can't wait for
     // the first MONITORS_CHANGED. Independent of gpu_actual (mode resolves
     // from the override/profile/platform inputs alone).
-    {
-        let signature = hyprctl::monitor_signature().await;
-        let profiles = load_profiles();
-        let gpu_pref = select_profile(&signature, &profiles)
-            .map(|p| p.gpu)
-            .unwrap_or(GpuPref::Auto);
-        let (mode, _) = resolve_session_gpu_mode(gpu_pref);
-        fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode))
-            .await;
-    }
+    resync_dgpu_pin(&mut ctx, &fx).await;
 
     while let Some(ev) = rx.recv().await {
         let kind = ev.kind();
@@ -505,6 +510,9 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     ctx.powerd_warned = false;
                     ctx.power_applied = None; // force a re-apply
                     ctx.dgpu_pinned = None; // re-push the dgpu pin too
+                    // Actively re-assert the pin through the now-available
+                    // powerd (don't wait for the next monitors/override event).
+                    resync_dgpu_pin(&mut ctx, &fx).await;
                 }
                 ctx.on_ac_settled = ctx.on_ac;
             }

@@ -4,10 +4,11 @@
 //!
 //! Success semantics: ApplyProfile success = the call completed. Per-row
 //! results (written|unchanged|skipped-*|error:<msg>) are informational; an
-//! all-skipped apply is still success (VM/desktop case). Calls arriving
-//! while an apply is in flight update a latest-request slot; superseded
-//! waiters return {"coalesced": "superseded-by:<profile>"}; only first and
-//! latest apply.
+//! all-skipped apply is still success (VM/desktop case). Coalescing: every
+//! call records itself as the latest request, then serializes on the apply
+//! lock; on acquiring it, a call whose profile is no longer the latest no-ops
+//! and returns {"coalesced": "superseded-by:<profile>"}. So under a burst only
+//! the final requested profile is actually applied; the rest fall through.
 
 pub mod knobs;
 

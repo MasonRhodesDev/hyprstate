@@ -100,11 +100,36 @@ fn status() -> i32 {
         ),
     }
 
-    if let (Some(actual), Some(desired)) = (actual, desired) {
+    // Primary render GPU = first AQ device's card (e.g. /dev/dri/card1 ->
+    // card1). Captured before the sync check moves `actual`.
+    let primary_card = actual
+        .as_ref()
+        .and_then(|l| l.first())
+        .and_then(|d| d.rsplit('/').next())
+        .map(str::to_string);
+
+    if let (Some(actual), Some(desired)) = (&actual, &desired) {
         if desired == actual {
             println!("sync   : in sync");
         } else {
             println!("sync   : MISMATCH — relog to apply");
+        }
+    }
+
+    // Per-output routing: which GPU drives each display, and whether it's on
+    // the cross-GPU copy path (rendered on the primary, then copied to another
+    // GPU for scanout — the source of multi-GPU tearing/lag at high pixel
+    // rates). A display on the primary's own card is render-local (no copy).
+    let outputs = sysfs::connected_outputs();
+    if !outputs.is_empty() {
+        println!("outputs:");
+        for (connector, card) in outputs {
+            let tag = match &primary_card {
+                Some(p) if *p == card => "render-local (no copy)".to_string(),
+                Some(p) => format!("COPY PATH {card}->{p}"),
+                None => "render GPU unknown".to_string(),
+            };
+            println!("         {connector:<8} {card}  {tag}");
         }
     }
     0

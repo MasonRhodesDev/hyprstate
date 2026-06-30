@@ -54,6 +54,33 @@ fn card_connectors(card: &str) -> (u32, u32) {
     (external, edp)
 }
 
+/// Every connected, non-writeback output as `(connector, card)` — e.g.
+/// `("DP-1", "card1")`. Drives `gpu status`'s per-output view: which GPU each
+/// display hangs off, hence whether it's on the cross-GPU copy path.
+pub fn connected_outputs() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir("/sys/class/drm") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `cardN-<connector>`; the bare `cardN` device and `renderD*` have no
+        // '-' and are skipped, as is `*-Writeback-*`.
+        let Some((card, connector)) = name.split_once('-') else {
+            continue;
+        };
+        if !card.starts_with("card") || name.contains("-Writeback-") {
+            continue;
+        }
+        if matches!(fs::read_to_string(entry.path().join("status")), Ok(s) if s.trim() == "connected")
+        {
+            out.push((connector.to_string(), card.to_string()));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Lid state without logind (D-Bus is unavailable at `gpu select` time).
 pub fn lid_closed_sysfs() -> bool {
     let Ok(entries) = fs::read_dir(paths::LID_STATE_GLOB_DIR) else {

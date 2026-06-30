@@ -515,6 +515,17 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         // drift across suspend and must not read as a user adjustment.
         if kind == EventKind::Resumed {
             fx.brightness_rearm(&mut ctx);
+            // Re-read the world before the FSMs evaluate this Resumed event:
+            // lid, monitors, inhibitors, and lock can all have changed while
+            // the daemon was frozen. Without this, evaluate_fsms runs against
+            // stale ctx and can flash a spurious COUNTDOWN / eDP-off / DPMS-off
+            // before the next reconcile tick repairs it.
+            if let Some(snap) =
+                super::sources::build_reconcile_snapshot(&fx.manager_uncached, ctx.ext_mon_count)
+                    .await
+            {
+                handle_reconcile_tick(snap, &mut ctx, &fx, &mut telem).await;
+            }
         }
 
         // GPU drift advice on power/override changes (NOT via RECONCILE).

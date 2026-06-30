@@ -114,6 +114,9 @@ pub struct Effectors {
     pub worker: mpsc::Sender<Cmd>,
     pub queue: mpsc::Sender<Event>,
     pub manager: LogindManagerProxy<'static>,
+    /// Uncached logind proxy for the on-resume world re-read (the cached
+    /// `manager` can hand back pre-suspend property values).
+    pub manager_uncached: LogindManagerProxy<'static>,
     pub session: Option<LogindSessionProxy<'static>>,
     pub powerd: PowerdProxy<'static>,
     pub locked_rx: watch::Receiver<bool>,

@@ -211,35 +211,47 @@ pub async fn reconcile_snapshot_task(
 ) {
     loop {
         tokio::time::sleep(paths::RECONCILE_INTERVAL).await;
-        let lid = match manager.lid_closed().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("reconciler snapshot failed: {e}");
-                continue;
-            }
+        let Some(snap) = build_reconcile_snapshot(&manager, ext_prev).await else {
+            continue;
         };
-        let ext = hyprctl::ext_monitor_count(ext_prev).await;
-        ext_prev = ext;
-        let logind_inh = logind_real_inhibitor_active(&manager)
-            .await
-            .unwrap_or(false);
-        let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
-        let locked = hyprctl::hyprlock_running().await;
-        let on_ac = on_ac_sysfs();
-        let edp_disabled = hyprctl::edp_is_disabled().await;
-        let snap = ReconcileSnapshot {
-            lid_closed: lid,
-            ext_mon_count: ext,
-            logind_inhibitor: logind_inh,
-            wayland_inhibitor: wayland_inh,
-            locked,
-            on_ac,
-            edp_disabled,
-        };
+        ext_prev = snap.ext_mon_count;
         if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {
             return;
         }
     }
+}
+
+/// Read the whole world once (uncached `manager`). `None` if the lid read
+/// fails (logind hiccup) — the caller skips this round. Shared by the periodic
+/// reconciler and the on-resume refresh: across suspend, lid / monitors /
+/// inhibitors / lock can all change while the daemon is frozen, so the resume
+/// path re-reads before the FSMs run rather than evaluating against stale ctx.
+pub async fn build_reconcile_snapshot(
+    manager: &LogindManagerProxy<'static>,
+    ext_prev: u32,
+) -> Option<ReconcileSnapshot> {
+    let lid = match manager.lid_closed().await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("reconciler snapshot failed: {e}");
+            return None;
+        }
+    };
+    let ext = hyprctl::ext_monitor_count(ext_prev).await;
+    let logind_inh = logind_real_inhibitor_active(manager).await.unwrap_or(false);
+    let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
+    let locked = hyprctl::hyprlock_running().await;
+    let on_ac = on_ac_sysfs();
+    let edp_disabled = hyprctl::edp_is_disabled().await;
+    Some(ReconcileSnapshot {
+        lid_closed: lid,
+        ext_mon_count: ext,
+        logind_inhibitor: logind_inh,
+        wayland_inhibitor: wayland_inh,
+        locked,
+        on_ac,
+        edp_disabled,
+    })
 }
 
 /// on_ac from /sys/class/power_supply/A*/online — UPower fallback. None on

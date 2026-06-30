@@ -202,6 +202,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         worker: worker_tx,
         queue: tx.clone(),
         manager: manager.clone(),
+        manager_uncached: manager_uncached.clone(),
         session: session.clone(),
         powerd: PowerdProxy::new(&conn).await?,
         locked_rx,

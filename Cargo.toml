@@ -11,7 +11,7 @@ resolver = "3"
 
 [package]
 name = "hyprstate"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2024"
 license = "MIT"
 description = "Hyprland session/power state machine: lid, monitors, profiles, GPU selection, powerd"

@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.0.1
+Version:        2.0.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -98,6 +98,9 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Fri Jul 03 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.0.2-1
+- Standardized packaging release: shared CI, arch-repo + COPR pipeline
+
 * Mon Jun 29 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.0.1-1
 - Pin discrete-GPU runtime PM in dgpu mode (SetDgpuAwake) to prevent the
   Framework 16 D3cold/DCN resume wedge

@@ -10,33 +10,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  arch:
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/arch-package.yml@main
+
   rpm:
-    name: SRPM → RPM (%check) → rpmlint
-    runs-on: ubuntu-latest
-    container: fedora:latest
-    steps:
-      - name: Install build tooling
-        run: >-
-          dnf -y install git rust cargo cargo-rpm-macros systemd-rpm-macros
-          rpm-build rpmlint rpmdevtools xz
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Trust the checkout (container runs as root)
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Build SRPM from HEAD
-        run: ./packaging/build-srpm.sh --head
-
-      - name: Rebuild binary RPM (runs %check — the full test suite)
-        run: |
-          srpm=$(ls ~/rpmbuild/SRPMS/hyprstate-*.src.rpm | head -1)
-          rpmbuild --rebuild "$srpm"
-
-      - name: rpmlint (gating)
-        run: |
-          rpmlint --rpmlintrc packaging/hyprstate.rpmlintrc \
-            ~/rpmbuild/SRPMS/hyprstate-*.src.rpm \
-            ~/rpmbuild/RPMS/*/hyprstate-*.rpm
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rpm-check.yml@main
+    with:
+      spec-name: hyprstate

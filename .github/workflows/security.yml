@@ -13,14 +13,5 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  cargo-deny:
-    name: cargo-deny (advisories · licenses · bans · sources)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check
-          # Don't fail the whole job on advisory warnings for unmaintained
-          # crates; do fail on vulnerabilities, license, ban, and source errors.
-          arguments: --all-features
+  security:
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/security.yml@main

@@ -6,12 +6,13 @@
 #   1. Bump Cargo.toml version + spec Version (+ %changelog) + PKGBUILD
 #      pkgver — one commit.
 #   2. git tag vX.Y.Z && git push --tags
-#   3. ./packaging/build-srpm.sh [--copr]        # Fedora
-#   4. cd packaging && updpkgsums && makepkg     # Arch (or push to AUR with
-#      a regenerated .SRCINFO)
+#   CI does the rest (see README "Releasing"): the release workflow builds
+#   and publishes the Arch package, and COPR rebuilds the SRPM off its
+#   GitHub webhook via .copr/Makefile (which runs this script with --head).
 #
-# --head builds from HEAD instead of the tag (local testing only — never
-# submit a --head build).
+# This script stays fully usable locally:
+#   --head builds from HEAD instead of the tag (testing only — never
+#   submit a --head build); --copr does a manual COPR submit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

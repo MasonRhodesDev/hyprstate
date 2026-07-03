@@ -9,34 +9,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  lint-test:
-    name: fmt · clippy · test · build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust (stable + rustfmt + clippy)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Gates, cheapest first. -D warnings is scoped to the clippy invocation
-      # (the workspace crates) — NOT a global RUSTFLAGS, which would also fail
-      # on warnings emitted while compiling third-party dependencies.
-      - name: rustfmt
-        run: cargo fmt --all --check
-
-      - name: clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: test
-        run: cargo test --workspace --locked
-
-      - name: build (release)
-        run: cargo build --workspace --locked --release
+  ci:
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rust-ci.yml@main

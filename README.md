@@ -39,13 +39,28 @@ Packaged install only (Fedora COPR / Arch). The binary is built with `cargo
 build --release`; the units, dbus policy, udev rule, sleep hook, and presets
 are installed from `dist/` by the spec / PKGBUILD.
 
+**Arch** — add the `[mason]` repo to `/etc/pacman.conf`, then install:
+
+```ini
+[mason]
+SigLevel = Optional TrustAll
+Server = https://masonrhodesdev.github.io/arch-repo/x86_64
 ```
-# Fedora
-sudo dnf copr enable <fas>/hyprstate && sudo dnf install hyprstate
 
-# Arch
-cd packaging && makepkg -si        # or paru -S hyprstate
+```sh
+sudo pacman -Sy hyprstate
+```
 
+**Fedora**
+
+```sh
+sudo dnf copr enable solaris765/hyprstate
+sudo dnf install hyprstate
+```
+
+Then enable the units:
+
+```sh
 sudo systemctl enable --now hyprstate-powerd     # root effector
 systemctl --user enable --now hyprstate          # session daemon
 ```
@@ -58,8 +73,28 @@ deterministic. Don't re-enable them alongside hyprstate.
 Migrating off the old git-symlink / `install.sh` dev install: run
 `packaging/migrate-from-devinstall.sh` once (it removes the `/usr/local`
 symlink, the libexec copy, and the `/etc` drop-ins that would shadow the
-packaged files), then install the package. The release flow (tag → SRPM → COPR,
-plus Arch) is documented at the top of `packaging/build-srpm.sh`.
+packaged files), then install the package.
+
+## Releasing
+
+1. Bump the version — `Cargo.toml` (source of truth), `Cargo.lock`, spec
+   `Version` (+ `%changelog`), PKGBUILD `pkgver` — in one commit.
+2. `git tag vX.Y.Z && git push --tags`
+
+The tag push triggers the release workflow (a thin caller of
+[packaging-workflows](https://github.com/MasonRhodesDev/packaging-workflows)),
+which does the rest automatically:
+
+- builds the Arch package and attaches it to the tag's GitHub Release,
+- pings [arch-repo](https://github.com/MasonRhodesDev/arch-repo) to republish
+  the `[mason]` pacman database (otherwise it picks the release up on its
+  scheduled run),
+- COPR rebuilds the SRPM off its GitHub webhook via `.copr/Makefile`, which
+  runs `packaging/build-srpm.sh`.
+
+`packaging/build-srpm.sh` remains fully functional for local use: `--head`
+builds an SRPM from HEAD for testing, and `--copr` is still available for a
+manual COPR submit if the webhook path is ever unavailable.
 
 ## Debug
 

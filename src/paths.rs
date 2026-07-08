@@ -79,8 +79,14 @@ pub fn profiles_dir() -> PathBuf {
     hypr_config("profiles")
 }
 
-pub fn active_profile_link() -> PathBuf {
-    profiles_dir().join(".active.conf")
+/// Hyprland's Lua config entrypoint. Its existence means this machine's
+/// config has migrated off hyprlang (`profile save` then defaults to Lua).
+pub fn hyprland_lua_config() -> PathBuf {
+    hypr_config("hyprland.lua")
+}
+
+pub fn active_profile_link(format: hyprstate_fsm::profiles::ProfileFormat) -> PathBuf {
+    profiles_dir().join(format!(".active.{}", format.ext()))
 }
 
 // ---- power policy (user side) ----

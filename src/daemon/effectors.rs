@@ -244,10 +244,12 @@ impl Effectors {
 
     // ---- monitor profiles ----
 
-    /// Repoint .active.conf, reload, fire hooks, update ctx. Idempotent.
+    /// Repoint the active-profile symlink, reload, fire hooks, update ctx.
+    /// Idempotent.
     pub fn apply_profile(&self, profile: &Profile, ctx: &mut Context) {
-        let target = paths::profiles_dir().join(format!("{}.conf", profile.name));
-        let link = paths::active_profile_link();
+        let target =
+            paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
+        let link = paths::active_profile_link(profile.format);
         let already = link.is_symlink()
             && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok()
             && ctx.current_profile.as_deref() == Some(profile.name.as_str());
@@ -287,7 +289,7 @@ impl Effectors {
         }
     }
 
-    /// Sync ctx with an out-of-band .active.conf repoint (`profile switch`).
+    /// Sync ctx with an out-of-band .active.* repoint (`profile switch`).
     /// Returns true when ingested. The daemon's own apply_profile updates
     /// ctx synchronously, so this only fires for external changes.
     pub fn ingest_active_profile(&self, ctx: &mut Context) -> bool {

@@ -710,7 +710,11 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
         )
         .unwrap();
         assert!(warnings.is_empty());
-        assert!(text.starts_with("-- Profile: desk — captured from the live layout (2026-07-07).\n--\n"));
+        assert!(
+            text.starts_with(
+                "-- Profile: desk — captured from the live layout (2026-07-07).\n--\n"
+            )
+        );
         assert!(text.contains("--@ match = desc:Dell A\n"));
         assert!(text.contains("--@ match = desc:Dell B\n"));
         assert!(text.contains("--@ edp = auto\n"));

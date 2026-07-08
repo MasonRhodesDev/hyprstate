@@ -141,11 +141,8 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 );
                 return 1;
             };
-            let target = paths::profiles_dir().join(format!(
-                "{}.{}",
-                profile.name,
-                profile.format.ext()
-            ));
+            let target =
+                paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
             if let Err(e) = repoint_active_profile(&target) {
                 eprintln!("symlink failed: {e}");
                 return 1;

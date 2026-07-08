@@ -247,11 +247,8 @@ impl Effectors {
     /// Repoint the active-profile symlink, reload, fire hooks, update ctx.
     /// Idempotent.
     pub fn apply_profile(&self, profile: &Profile, ctx: &mut Context) {
-        let target = paths::profiles_dir().join(format!(
-            "{}.{}",
-            profile.name,
-            profile.format.ext()
-        ));
+        let target =
+            paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
         let link = paths::active_profile_link(profile.format);
         let already = link.is_symlink()
             && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok()

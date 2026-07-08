@@ -84,6 +84,9 @@ enum Cmd {
         /// save: overwrite an existing profile
         #[arg(long)]
         force: bool,
+        /// save: profile dialect (default: lua iff ~/.config/hypr/hyprland.lua exists)
+        #[arg(long, value_parser = ["conf", "lua"])]
+        format: Option<String>,
     },
     /// systemctl + journalctl + gpu + power summary
     Status,
@@ -147,8 +150,9 @@ fn main() {
             gpu,
             priority,
             force,
+            format,
         } => {
-            use pure::profiles::{EdpPolicy, GpuPref};
+            use pure::profiles::{EdpPolicy, GpuPref, ProfileFormat};
             let save = cli::profile::SaveOpts {
                 edp: match edp.as_str() {
                     "enable" => EdpPolicy::Enable,
@@ -162,6 +166,10 @@ fn main() {
                 },
                 priority,
                 force,
+                format: format.as_deref().map(|f| match f {
+                    "lua" => ProfileFormat::Lua,
+                    _ => ProfileFormat::Conf,
+                }),
             };
             cli::profile::run(&action, name.as_deref(), &save)
         }

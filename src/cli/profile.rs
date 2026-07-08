@@ -11,7 +11,9 @@
 //! whatever tool you like, then snapshot the result).
 
 use crate::paths;
-use crate::pure::profiles::{EdpPolicy, GpuPref, match_in_signature, render_profile};
+use crate::pure::profiles::{
+    EdpPolicy, GpuPref, ProfileFormat, match_in_signature, render_profile, render_profile_lua,
+};
 use crate::sysio::profiles::{
     active_profile_name, load_profiles, monitor_signature, monitor_snapshot_all,
     repoint_active_profile,
@@ -22,6 +24,9 @@ pub struct SaveOpts {
     pub gpu: GpuPref,
     pub priority: Option<i64>,
     pub force: bool,
+    /// None = auto: Lua iff ~/.config/hypr/hyprland.lua exists (i.e. the
+    /// machine's Hyprland config has migrated).
+    pub format: Option<ProfileFormat>,
 }
 
 pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
@@ -43,15 +48,26 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 eprintln!("profile names are [A-Za-z0-9._-]+ and must not start with '.'");
                 return 2;
             }
-            let target = paths::profiles_dir().join(format!("{name}.conf"));
+            let format = save.format.unwrap_or_else(|| {
+                if paths::hyprland_lua_config().exists() {
+                    ProfileFormat::Lua
+                } else {
+                    ProfileFormat::Conf
+                }
+            });
+            let target = paths::profiles_dir().join(format!("{name}.{}", format.ext()));
             if target.exists() && !save.force {
                 eprintln!("profile {name} already exists — use --force to overwrite");
                 return 1;
             }
             let monitors = monitor_snapshot_all();
             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let render = match format {
+                ProfileFormat::Conf => render_profile,
+                ProfileFormat::Lua => render_profile_lua,
+            };
             let (text, warnings) =
-                match render_profile(name, &date, &monitors, save.edp, save.gpu, save.priority) {
+                match render(name, &date, &monitors, save.edp, save.gpu, save.priority) {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("capture failed: {e}");
@@ -69,7 +85,10 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 return 1;
             }
             println!("saved {}", target.display());
-            for line in text.lines().filter(|l| l.starts_with("#@ match")) {
+            for line in text
+                .lines()
+                .filter(|l| l.starts_with("#@ match") || l.starts_with("--@ match"))
+            {
                 println!("  {line}");
             }
             println!(
@@ -122,7 +141,11 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 );
                 return 1;
             };
-            let target = paths::profiles_dir().join(format!("{}.conf", profile.name));
+            let target = paths::profiles_dir().join(format!(
+                "{}.{}",
+                profile.name,
+                profile.format.ext()
+            ));
             if let Err(e) = repoint_active_profile(&target) {
                 eprintln!("symlink failed: {e}");
                 return 1;

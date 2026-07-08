@@ -43,9 +43,30 @@ impl GpuPref {
     }
 }
 
+/// Source dialect of a profile file. Hyprland executes the body (hyprlang
+/// text or Lua `hl.*` calls); hyprstate only reads the directive metadata,
+/// which is identical in both dialects modulo the comment leader
+/// (`#@` vs `--@`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileFormat {
+    #[default]
+    Conf,
+    Lua,
+}
+
+impl ProfileFormat {
+    pub fn ext(self) -> &'static str {
+        match self {
+            ProfileFormat::Conf => "conf",
+            ProfileFormat::Lua => "lua",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     pub name: String,
+    pub format: ProfileFormat,
     pub matches: Vec<String>,
     pub edp: EdpPolicy,
     pub gpu: GpuPref,
@@ -54,11 +75,15 @@ pub struct Profile {
     pub priority: i64,
 }
 
-/// Parse one `#@ key = value` line. Mirrors v1's directive regexes:
-/// profile keys are `[a-z]+` (NO hyphens — "battery-low" must not be a legal
-/// monitor-profile key); power.conf keys are `[a-z][a-z-]*`.
+/// Parse one `#@ key = value` (or Lua-dialect `--@ key = value`) line.
+/// Mirrors v1's directive regexes: profile keys are `[a-z]+` (NO hyphens —
+/// "battery-low" must not be a legal monitor-profile key); power.conf keys
+/// are `[a-z][a-z-]*`.
 pub fn parse_directive(line: &str, allow_hyphen: bool) -> Option<(&str, &str)> {
-    let rest = line.strip_prefix("#@")?.trim_start();
+    let rest = line
+        .strip_prefix("#@")
+        .or_else(|| line.strip_prefix("--@"))?
+        .trim_start();
     let eq = rest.find('=')?;
     let key = rest[..eq].trim_end();
     let val = rest[eq + 1..].trim();
@@ -75,7 +100,11 @@ pub fn parse_directive(line: &str, allow_hyphen: bool) -> Option<(&str, &str)> {
 /// Parse a profile body. `Err` = profile is malformed and must be skipped
 /// (no match directives, invalid edp/gpu/priority value). Warnings cover
 /// malformed/unknown directives that v1 logged but tolerated.
-pub fn parse_profile(name: &str, text: &str) -> Result<(Profile, Vec<String>), String> {
+pub fn parse_profile(
+    name: &str,
+    format: ProfileFormat,
+    text: &str,
+) -> Result<(Profile, Vec<String>), String> {
     let mut matches: Vec<String> = Vec::new();
     let mut hooks: Vec<String> = Vec::new();
     let mut edp = EdpPolicy::Auto;
@@ -84,11 +113,13 @@ pub fn parse_profile(name: &str, text: &str) -> Result<(Profile, Vec<String>), S
     let mut warnings: Vec<String> = Vec::new();
 
     for line in text.lines() {
-        if !line.starts_with("#@") {
+        if !(line.starts_with("#@") || line.starts_with("--@")) {
             // Stop scanning once the body begins. Directives must all sit in
             // the leading comment block — anything below passes through to
-            // Hyprland as-is.
-            if line.trim_start().starts_with('#') || line.trim().is_empty() {
+            // Hyprland as-is. Plain comments in either dialect (`#` / `--`)
+            // and blank lines don't end the block.
+            let t = line.trim_start();
+            if t.starts_with('#') || t.starts_with("--") || t.is_empty() {
                 continue;
             }
             break;
@@ -132,6 +163,7 @@ pub fn parse_profile(name: &str, text: &str) -> Result<(Profile, Vec<String>), S
     Ok((
         Profile {
             name: name.to_string(),
+            format,
             priority: priority.unwrap_or(matches.len() as i64),
             matches,
             edp,
@@ -206,29 +238,24 @@ fn selector(m: &MonitorSnapshot, warnings: &mut Vec<String>) -> String {
     format!("desc:{}", m.description)
 }
 
-/// Render the current layout as a profile body (the capture side of
-/// `profile save`). Conventions, all lifted from the hand-written profiles:
-/// - `#@ match` on EXTERNAL descriptions only, so the profile keeps matching
-///   when the lid closes and eDP leaves the signature; a layout with no
-///   externals matches on the eDP description (the laptop-only case).
-/// - Enabled monitors sorted left-to-right; disabled ones pinned `disable`.
-/// - Default priority (match count) is left implicit unless overridden.
-pub fn render_profile(
-    name: &str,
-    date: &str,
-    monitors: &[MonitorSnapshot],
-    edp: EdpPolicy,
-    gpu: GpuPref,
-    priority: Option<i64>,
-) -> Result<(String, Vec<String>), String> {
+/// Shared capture prep for both renderers: enabled monitors sorted
+/// left-to-right, disabled monitors, and the `match` description set
+/// (EXTERNAL descriptions only, so the profile keeps matching when the lid
+/// closes and eDP leaves the signature; a layout with no externals matches
+/// on the eDP description — the laptop-only case).
+struct CaptureLayout<'a> {
+    enabled: Vec<&'a MonitorSnapshot>,
+    disabled: Vec<&'a MonitorSnapshot>,
+    match_descs: Vec<&'a str>,
+}
+
+fn capture_layout(monitors: &[MonitorSnapshot]) -> Result<CaptureLayout<'_>, String> {
     let mut enabled: Vec<&MonitorSnapshot> = monitors.iter().filter(|m| !m.disabled).collect();
     if enabled.is_empty() {
         return Err("no enabled monitors to capture".into());
     }
     enabled.sort_by_key(|m| (m.x, m.y));
     let disabled: Vec<&MonitorSnapshot> = monitors.iter().filter(|m| m.disabled).collect();
-
-    let mut warnings = Vec::new();
     let externals: Vec<&&MonitorSnapshot> = enabled
         .iter()
         .filter(|m| !m.name.starts_with("eDP"))
@@ -238,24 +265,63 @@ pub fn render_profile(
     } else {
         externals.iter().map(|m| m.description.as_str()).collect()
     };
+    Ok(CaptureLayout {
+        enabled,
+        disabled,
+        match_descs,
+    })
+}
+
+/// The `#@`/`--@` directive header shared by both renderers.
+fn render_directives(
+    leader: &str,
+    match_descs: &[&str],
+    edp: EdpPolicy,
+    gpu: GpuPref,
+    priority: Option<i64>,
+) -> String {
+    let mut out = String::new();
+    for desc in match_descs {
+        out.push_str(&format!("{leader}@ match = desc:{desc}\n"));
+    }
+    out.push_str(&format!("{leader}@ edp = {}\n", edp.as_str()));
+    if gpu != GpuPref::Auto {
+        out.push_str(&format!("{leader}@ gpu = {}\n", gpu.as_str()));
+    }
+    if let Some(p) = priority {
+        out.push_str(&format!("{leader}@ priority = {p}\n"));
+    }
+    out
+}
+
+/// Render the current layout as a hyprlang profile body (the capture side of
+/// `profile save`). Default priority (match count) is left implicit unless
+/// overridden; disabled monitors are pinned `disable`.
+pub fn render_profile(
+    name: &str,
+    date: &str,
+    monitors: &[MonitorSnapshot],
+    edp: EdpPolicy,
+    gpu: GpuPref,
+    priority: Option<i64>,
+) -> Result<(String, Vec<String>), String> {
+    let layout = capture_layout(monitors)?;
+    let mut warnings = Vec::new();
 
     let mut out = String::new();
     out.push_str(&format!(
         "# Profile: {name} — captured from the live layout ({date}).\n#\n"
     ));
-    for desc in &match_descs {
-        out.push_str(&format!("#@ match = desc:{desc}\n"));
-    }
-    out.push_str(&format!("#@ edp = {}\n", edp.as_str()));
-    if gpu != GpuPref::Auto {
-        out.push_str(&format!("#@ gpu = {}\n", gpu.as_str()));
-    }
-    if let Some(p) = priority {
-        out.push_str(&format!("#@ priority = {p}\n"));
-    }
+    out.push_str(&render_directives(
+        "#",
+        &layout.match_descs,
+        edp,
+        gpu,
+        priority,
+    ));
     out.push('\n');
 
-    for m in &enabled {
+    for m in &layout.enabled {
         let mut line = format!(
             "monitor = {},{}x{}@{},{}x{},{}",
             selector(m, &mut warnings),
@@ -272,7 +338,7 @@ pub fn render_profile(
         out.push_str(&line);
         out.push('\n');
     }
-    for m in &disabled {
+    for m in &layout.disabled {
         out.push_str(&format!(
             "monitor = {},disable\n",
             selector(m, &mut warnings)
@@ -286,12 +352,73 @@ pub fn render_profile(
     Ok((out, warnings))
 }
 
+/// Render the current layout as a Lua profile body (`hl.monitor` calls with
+/// `--@` directive metadata). Hyprland executes the body via the config's
+/// `dofile` of `.active.lua`; hyprstate itself only ever reads the header.
+pub fn render_profile_lua(
+    name: &str,
+    date: &str,
+    monitors: &[MonitorSnapshot],
+    edp: EdpPolicy,
+    gpu: GpuPref,
+    priority: Option<i64>,
+) -> Result<(String, Vec<String>), String> {
+    let layout = capture_layout(monitors)?;
+    let mut warnings = Vec::new();
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "-- Profile: {name} — captured from the live layout ({date}).\n--\n"
+    ));
+    out.push_str(&render_directives(
+        "--",
+        &layout.match_descs,
+        edp,
+        gpu,
+        priority,
+    ));
+    out.push('\n');
+
+    // Field shapes per Hyprland's Lua bindings (LuaBindingsConfigRules.cpp
+    // MONITOR_FIELDS): mode/position/scale are strings (scale is
+    // "auto"/number-as-string), transform is an int, disabled a bool.
+    for m in &layout.enabled {
+        let mut line = format!(
+            "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\"",
+            selector(m, &mut warnings),
+            m.width,
+            m.height,
+            fmt_num(m.refresh),
+            m.x,
+            m.y,
+            fmt_num(m.scale)
+        );
+        if m.transform != 0 {
+            line.push_str(&format!(", transform = {}", m.transform));
+        }
+        line.push_str(" })\n");
+        out.push_str(&line);
+    }
+    for m in &layout.disabled {
+        out.push_str(&format!(
+            "hl.monitor({{ output = \"{}\", disabled = true }})\n",
+            selector(m, &mut warnings)
+        ));
+    }
+
+    out.push_str(
+        "\n-- Add workspace pinning if desired, e.g.:\n\
+         -- hl.workspace_rule({ workspace = \"1\", monitor = \"desc:...\", default = true })\n",
+    );
+    Ok((out, warnings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(name: &str, text: &str) -> Result<(Profile, Vec<String>), String> {
-        parse_profile(name, text)
+        parse_profile(name, ProfileFormat::Conf, text)
     }
 
     #[test]
@@ -352,6 +479,42 @@ mod tests {
         assert_eq!(warnings.len(), 2);
     }
 
+    /// Lua-dialect `--@` directives parse identically to `#@`, and plain
+    /// Lua comments (`--`) don't terminate the leading directive block.
+    #[test]
+    fn test_parse_profile_lua_dialect() {
+        let (prof, warnings) = parse_profile(
+            "desk",
+            ProfileFormat::Lua,
+            "-- Profile: desk — hand-written.\n\
+             --\n\
+             --@ match = desc:Dell U2723QE\n\
+             --@ edp = disable\n\
+             --@ gpu = dgpu\n\
+             --@ priority = 10\n\
+             \n\
+             hl.monitor({ output = \"desc:Dell U2723QE\", mode = \"3840x2160@60\", position = \"0x0\", scale = 1.5 })\n\
+             --@ edp = enable\n",
+        )
+        .unwrap();
+        assert_eq!(prof.format, ProfileFormat::Lua);
+        assert_eq!(prof.matches, vec!["desc:Dell U2723QE"]);
+        assert_eq!(prof.edp, EdpPolicy::Disable); // post-body directive ignored
+        assert_eq!(prof.gpu, GpuPref::Dgpu);
+        assert_eq!(prof.priority, 10);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_directive_lua_leader() {
+        assert_eq!(
+            parse_directive("--@ match = desc:X", false),
+            Some(("match", "desc:X"))
+        );
+        assert_eq!(parse_directive("--@match=x", false), Some(("match", "x")));
+        assert!(parse_directive("-- match = x", false).is_none());
+    }
+
     /// Hyphenated keys are only legal with allow_hyphen (the power.conf
     /// dialect) — "battery-low" must not parse as a profile directive key.
     #[test]
@@ -369,6 +532,7 @@ mod tests {
     fn prof(name: &str, matches: &[&str], priority: Option<i64>) -> Profile {
         Profile {
             name: name.to_string(),
+            format: ProfileFormat::Conf,
             priority: priority.unwrap_or(matches.len() as i64),
             matches: matches.iter().map(|s| s.to_string()).collect(),
             edp: EdpPolicy::Auto,
@@ -474,7 +638,7 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
 ";
         assert_eq!(text, expected);
         // Round-trip: the rendered profile must parse and self-match.
-        let (profile, _) = parse_profile("desk", &text).unwrap();
+        let (profile, _) = parse_profile("desk", ProfileFormat::Conf, &text).unwrap();
         assert_eq!(profile.priority, 2); // implicit = match count
         let signature = sig(&["Dell A", "Dell B", "BOE 0x0BC9"]);
         assert!(
@@ -520,9 +684,48 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
         assert!(text.contains("#@ priority = 99\n"));
         assert!(text.contains("monitor = desc:Dell A,3840x2160@60,0x0,1,transform,1\n"));
         assert!(text.contains("monitor = eDP-2,disable\n"));
-        let (profile, _) = parse_profile("pivot", &text).unwrap();
+        let (profile, _) = parse_profile("pivot", ProfileFormat::Conf, &text).unwrap();
         assert_eq!(profile.priority, 99);
         assert_eq!(profile.gpu, GpuPref::Dgpu);
+    }
+
+    /// The Lua renderer mirrors the .conf conventions and round-trips
+    /// through the Lua-dialect parser.
+    #[test]
+    fn test_render_profile_lua() {
+        let mut rotated = mon("DP-1", "Dell A", 3440, 60.0, 1.5, false);
+        rotated.transform = 3;
+        let monitors = vec![
+            mon("DP-3", "Dell B", 0, 144.0, 1.0, false),
+            rotated,
+            mon("eDP-2", "BOE 0x0BC9", 5000, 165.0, 1.25, true),
+        ];
+        let (text, warnings) = render_profile_lua(
+            "desk",
+            "2026-07-07",
+            &monitors,
+            EdpPolicy::Auto,
+            GpuPref::Dgpu,
+            None,
+        )
+        .unwrap();
+        assert!(warnings.is_empty());
+        assert!(text.starts_with("-- Profile: desk — captured from the live layout (2026-07-07).\n--\n"));
+        assert!(text.contains("--@ match = desc:Dell A\n"));
+        assert!(text.contains("--@ match = desc:Dell B\n"));
+        assert!(text.contains("--@ edp = auto\n"));
+        assert!(text.contains("--@ gpu = dgpu\n"));
+        assert!(text.contains(
+            "hl.monitor({ output = \"desc:Dell B\", mode = \"3840x2160@144\", position = \"0x0\", scale = \"1\" })\n"
+        ));
+        assert!(text.contains(
+            "hl.monitor({ output = \"desc:Dell A\", mode = \"3840x2160@60\", position = \"3440x0\", scale = \"1.5\", transform = 3 })\n"
+        ));
+        assert!(text.contains("hl.monitor({ output = \"eDP-2\", disabled = true })\n"));
+        let (profile, _) = parse_profile("desk", ProfileFormat::Lua, &text).unwrap();
+        assert_eq!(profile.format, ProfileFormat::Lua);
+        assert_eq!(profile.gpu, GpuPref::Dgpu);
+        assert_eq!(profile.priority, 2);
     }
 
     #[test]

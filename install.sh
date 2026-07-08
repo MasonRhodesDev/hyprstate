@@ -1,6 +1,7 @@
 #!/bin/bash
 # Idempotent installer for hyprstate.
-# Symlinks the binary + sleep hook into system paths, drops the systemd user unit.
+# Symlinks the user-facing binary, installs root-owned copies of everything
+# root executes (sleep hook, powerd libexec), drops the systemd user unit.
 # Migrates from predecessor names (hypr-power, hypr-fsm) if found.
 set -euo pipefail
 
@@ -12,14 +13,35 @@ USER_UNIT_DIR="$HOME/.config/systemd/user"
 echo "Source: $SRC"
 
 # ---- 1. system-level: binary symlink + sleep hook + udev rule (one sudo prompt) ----
+# The /usr/local/bin symlink serves the USER daemon + CLI only. The sleep
+# hook runs as root, so it is a root-owned COPY (execing the libexec copy
+# from 1b) — root must never execute user-writable code (POWER_SPEC V3).
 chmod +x "$SRC/hyprstate.py" "$SRC/system-sleep-hook.sh"
 sudo ln -sfn "$SRC/hyprstate.py" "$BIN_TARGET"
-sudo ln -sfn "$SRC/system-sleep-hook.sh" "$HOOK_TARGET"
+sudo install -m 755 -o root -g root "$SRC/system-sleep-hook.sh" "$HOOK_TARGET"
 sudo install -m 644 "$SRC/60-hyprstate-usb-wake.rules" /etc/udev/rules.d/60-hyprstate-usb-wake.rules
 sudo udevadm control --reload-rules
 echo "  -> $BIN_TARGET"
 echo "  -> $HOOK_TARGET"
 echo "  -> /etc/udev/rules.d/60-hyprstate-usb-wake.rules"
+
+# ---- 1b. powerd: root-owned COPY + system unit + bus policy + activation ----
+# powerd runs as root; it must execute a root-owned copy, never the
+# user-writable dev symlink above. Updating powerd = rerun this script.
+sudo install -D -m 755 -o root -g root "$SRC/hyprstate.py" /usr/local/libexec/hyprstate
+sudo install -m 644 "$SRC/hyprstate-powerd.service" /etc/systemd/system/hyprstate-powerd.service
+sudo install -m 644 "$SRC/org.hyprstate.Power1.conf" /etc/dbus-1/system.d/org.hyprstate.Power1.conf
+sudo install -m 644 "$SRC/org.hyprstate.Power1.service" /usr/share/dbus-1/system-services/org.hyprstate.Power1.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hyprstate-powerd.service
+sleep 1
+if ! systemctl is-active --quiet hyprstate-powerd.service; then
+    echo "ERROR: hyprstate-powerd failed to start (bus policy? unit?)" >&2
+    systemctl status hyprstate-powerd.service --no-pager >&2 || true
+    exit 1
+fi
+echo "  -> /usr/local/libexec/hyprstate (root-owned copy)"
+echo "  -> hyprstate-powerd.service (active)"
 
 # ---- 2. user-level: systemd unit ----
 mkdir -p "$USER_UNIT_DIR"

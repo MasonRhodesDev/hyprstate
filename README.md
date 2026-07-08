@@ -13,6 +13,46 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 - **DPMS-off when locked + inhibitor.** With an active screen (`LID_OPEN` or `DOCKED`) and the session locked while an inhibitor is held, screens DPMS-off after 30s. Reverses on unlock or inhibitor release.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
 
+## Architecture
+
+All event sources feed one channel; the FSM is a pure function of accumulated world state, and effectors are the only code that touches the system.
+
+```mermaid
+flowchart TD
+    subgraph sources["Event sources"]
+        hypr["Hyprland IPC"]
+        logind["logind"]
+        upower["UPower"]
+        poll["Pollers"]
+    end
+
+    hypr -->|".socket2.sock: monitoraddedv2 / monitorremoved / configreloaded"| chan
+    logind -->|"org.freedesktop.login1 lid + Lock signals, holds handle-lid-switch:block inhibitor"| chan
+    upower -->|"AC / battery state"| chan
+    poll -->|"sysfs + hypridle log polling"| chan
+
+    chan["single mpsc Event channel"] --> disp["Dispatcher: updates Context / WorldInputs"]
+    disp --> fsm["hyprstate-fsm crate: pure Moore-style world_state recompute, no edge table"]
+    fsm -->|"desired state"| eff
+
+    subgraph eff["Effectors"]
+        mon["hyprctl reload / eDP-2 toggle"]
+        media["playerctl --all-players pause"]
+        dpms["DPMS on/off"]
+        sd["logind Session.Lock() / Manager.Suspend()"]
+        pwr["power client"]
+    end
+
+    recon["5s reconciler loop"] -->|"re-asserts eDP invariant"| mon
+    pwr -->|"D-Bus org.hyprstate.Power1 ApplyProfile"| powerd["hyprstate powerd — root daemon"]
+    powerd -->|"sysfs writes"| knobs["platform_profile / EPP / ASPM / dpm knobs"]
+
+    subgraph wake["Out-of-band wake path"]
+        hook["sleep-hook pre/post via systemd-suspend"] -->|"/sys/.../power/wakeup"| usb["USB hub / keyboard / mouse wakeup flags"]
+        udev["udev USB-wake rule"] --> usb
+    end
+```
+
 ## Layout
 
 ```
@@ -97,6 +137,10 @@ builds an SRPM from HEAD for testing, and `--copr` is still available for a
 manual COPR submit if the webhook path is ever unavailable.
 
 ## Debug
+
+`hyprstate status` shows unit health plus the recent STATE / PROFILE / POWER transition log:
+
+![hyprstate status output: green systemd unit header followed by STATE transitions (SUSPENDING to COUNTDOWN to DOCKED), a PROFILE switch from dual-4k to ultrawide-only, and POWER applied balanced](.github/screenshots/status.png)
 
 ```
 journalctl --user -u hyprstate.service -f       # daemon log

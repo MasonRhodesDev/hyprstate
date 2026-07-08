@@ -48,15 +48,22 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Cmd::SetEdp { on } => {
-                let disabled = hyprctl::edp_is_disabled().await;
+                // None = no eDP panel on this machine (desktop). Treat as a
+                // no-op: there is nothing to (re-)enable, and reloading here
+                // self-sustains — reload -> configreloaded -> RECONCILE ->
+                // SetEdp -> reload (observed at ~35 reloads/s once a reload
+                // storm primed it on the Lua config, 2026-07-07).
+                let Some(disabled) = hyprctl::edp_is_disabled().await else {
+                    continue;
+                };
                 if on {
-                    if disabled == Some(false) {
+                    if !disabled {
                         continue;
                     }
                     info!("re-enabling {} via hyprctl reload", hyprctl::EDP_MONITOR);
                     run_cmd("hyprctl", &["reload"]).await;
                 } else {
-                    if disabled == Some(true) {
+                    if disabled {
                         continue;
                     }
                     info!("disabling {}", hyprctl::EDP_MONITOR);

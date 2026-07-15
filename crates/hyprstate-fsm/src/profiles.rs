@@ -413,6 +413,39 @@ pub fn render_profile_lua(
     Ok((out, warnings))
 }
 
+/// hyprctl argv that force-disables `monitor` at runtime, per config dialect.
+/// hyprlang: a `keyword` config override. Lua: the compositor rejects
+/// `keyword` outright ("Use eval.") — and with exit code 0 — so evaluate an
+/// `hl.monitor` rule instead; it replaces the rule for that output and
+/// applies within a frame. Either form is wiped by the next config reload.
+pub fn edp_disable_args(format: ProfileFormat, monitor: &str) -> Vec<String> {
+    match format {
+        ProfileFormat::Conf => vec![
+            "keyword".into(),
+            "monitor".into(),
+            format!("{monitor},disable"),
+        ],
+        ProfileFormat::Lua => vec![
+            "eval".into(),
+            format!("hl.monitor({{ output = \"{monitor}\", disabled = true }})"),
+        ],
+    }
+}
+
+/// hyprctl argv for a dpms flip, per config dialect. Under the Lua config
+/// `dispatch` evaluates its argument as `hl.dispatch(<text>)`, so the classic
+/// `dpms on/off` string form is a Lua syntax error there.
+pub fn dpms_args(format: ProfileFormat, on: bool) -> Vec<String> {
+    let action = if on { "on" } else { "off" };
+    match format {
+        ProfileFormat::Conf => vec!["dispatch".into(), "dpms".into(), action.into()],
+        ProfileFormat::Lua => vec![
+            "dispatch".into(),
+            format!("hl.dsp.dpms({{ action = \"{action}\" }})"),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,6 +763,41 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
         assert_eq!(profile.format, ProfileFormat::Lua);
         assert_eq!(profile.gpu, GpuPref::Dgpu);
         assert_eq!(profile.priority, 2);
+    }
+
+    #[test]
+    fn test_edp_disable_args_dialects() {
+        assert_eq!(
+            edp_disable_args(ProfileFormat::Conf, "eDP-2"),
+            ["keyword", "monitor", "eDP-2,disable"]
+        );
+        assert_eq!(
+            edp_disable_args(ProfileFormat::Lua, "eDP-2"),
+            [
+                "eval",
+                "hl.monitor({ output = \"eDP-2\", disabled = true })"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_dpms_args_dialects() {
+        assert_eq!(
+            dpms_args(ProfileFormat::Conf, true),
+            ["dispatch", "dpms", "on"]
+        );
+        assert_eq!(
+            dpms_args(ProfileFormat::Conf, false),
+            ["dispatch", "dpms", "off"]
+        );
+        assert_eq!(
+            dpms_args(ProfileFormat::Lua, true),
+            ["dispatch", "hl.dsp.dpms({ action = \"on\" })"]
+        );
+        assert_eq!(
+            dpms_args(ProfileFormat::Lua, false),
+            ["dispatch", "hl.dsp.dpms({ action = \"off\" })"]
+        );
     }
 
     #[test]

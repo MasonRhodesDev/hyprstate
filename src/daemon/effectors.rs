@@ -22,7 +22,9 @@ use crate::dbus::logind::{LogindManagerProxy, LogindSessionProxy};
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
 use crate::pure::power::PowerProfile;
-use crate::pure::profiles::{EdpPolicy, GpuPref, Profile};
+use crate::pure::profiles::{
+    EdpPolicy, GpuPref, Profile, ProfileFormat, dpms_args, edp_disable_args,
+};
 use crate::sysio::hyprctl;
 
 /// Serialized subprocess effects (ordering between reload and keyword
@@ -56,28 +58,32 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 let Some(disabled) = hyprctl::edp_is_disabled().await else {
                     continue;
                 };
+                // Marker before the live flip: a reload racing in between
+                // still re-derives the desired state from the marker.
+                sync_edp_marker(on);
                 if on {
                     if !disabled {
                         continue;
                     }
                     info!("re-enabling {} via hyprctl reload", hyprctl::EDP_MONITOR);
-                    run_cmd("hyprctl", &["reload"]).await;
+                    hyprctl::hyprctl_ok(&["reload"]).await;
                 } else {
                     if disabled {
                         continue;
                     }
                     info!("disabling {}", hyprctl::EDP_MONITOR);
-                    let arg = format!("{},disable", hyprctl::EDP_MONITOR);
-                    run_cmd("hyprctl", &["keyword", "monitor", &arg]).await;
+                    let args = edp_disable_args(config_dialect(), hyprctl::EDP_MONITOR);
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    hyprctl::hyprctl_ok(&args).await;
                 }
             }
-            Cmd::Reload => run_cmd("hyprctl", &["reload"]).await,
+            Cmd::Reload => {
+                hyprctl::hyprctl_ok(&["reload"]).await;
+            }
             Cmd::Dpms(on) => {
-                run_cmd(
-                    "hyprctl",
-                    &["dispatch", "dpms", if on { "on" } else { "off" }],
-                )
-                .await
+                let args = dpms_args(config_dialect(), on);
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                hyprctl::hyprctl_ok(&args).await;
             }
             Cmd::PauseMedia => run_cmd("playerctl", &["--all-players", "pause"]).await,
             Cmd::Notify { summary, body, tag } => {
@@ -99,6 +105,40 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 }
             }
         }
+    }
+}
+
+/// The active Hyprland config dialect, resolved per-call with the same
+/// predicate as `profile save`: hyprland.lua's existence means the Lua
+/// parser owns the session (and `keyword`/string dispatchers are rejected).
+fn config_dialect() -> ProfileFormat {
+    if paths::hyprland_lua_config().exists() {
+        ProfileFormat::Lua
+    } else {
+        ProfileFormat::Conf
+    }
+}
+
+/// Keep the edp-off marker (read by hyprland.lua after the profile dofile)
+/// in sync with the resolved policy, so any config reload converges to the
+/// daemon's desired eDP state instead of re-enabling the panel. Present =
+/// forced off; removed when the panel should be on (absence is the fail-safe
+/// boot default). Idempotent.
+fn sync_edp_marker(on: bool) {
+    let file = paths::edp_off_marker();
+    let result = if on {
+        match fs::remove_file(&file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        if let Some(parent) = file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&file, "")
+    };
+    if let Err(e) = result {
+        warn!("edp-off marker sync failed: {e}");
     }
 }
 

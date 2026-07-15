@@ -89,6 +89,15 @@ pub fn active_profile_link(format: hyprstate_fsm::profiles::ProfileFormat) -> Pa
     profiles_dir().join(format!(".active.{}", format.ext()))
 }
 
+/// Marker the daemon maintains with the resolved eDP policy: present = panel
+/// forced off. hyprland.lua checks it after the profile dofile so any config
+/// reload converges to the daemon's desired state instead of re-enabling the
+/// panel. Runtime state (deliberately not chezmoi-managed); absence = enabled,
+/// the fail-safe boot default.
+pub fn edp_off_marker() -> PathBuf {
+    hypr_config("edp-off")
+}
+
 // ---- power policy (user side) ----
 
 pub fn power_conf_file() -> PathBuf {

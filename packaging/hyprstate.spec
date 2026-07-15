@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.1.1
+Version:        2.1.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -98,6 +98,14 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Wed Jul 15 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.2-1
+- Fix eDP disable and dpms effectors under the Hyprland Lua config (keyword
+  is legacy-only; use eval / hl.dsp.dpms per dialect)
+- Require the literal 'ok' hyprctl reply for mutations (exit code alone
+  misses Lua-mode keyword rejection)
+- Declarative eDP state marker (~/.config/hypr/edp-off) so config reloads
+  converge instead of re-enabling the panel
+
 * Fri Jul 03 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.0.2-1
 - Standardized packaging release: shared CI, arch-repo + COPR pipeline
 

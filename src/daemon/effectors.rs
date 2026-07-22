@@ -24,6 +24,7 @@ use crate::paths;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
     EdpPolicy, GpuPref, Profile, ProfileFormat, dpms_args, edp_disable_args,
+    move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
 
@@ -37,6 +38,13 @@ pub enum Cmd {
     },
     Reload,
     Dpms(bool),
+    /// Re-home workspaces stranded on the disabled eDP onto an external
+    /// monitor. Hyprland's `CMonitor::onDisconnect` evacuates workspaces
+    /// only to a monitor that was enabled at disable time, and never
+    /// retroactively re-homes them when an external returns — so an undock
+    /// flap pins them to the dead panel. Cheap no-op when nothing is
+    /// stranded.
+    RehomeEdpWorkspaces,
     PauseMedia,
     Notify {
         summary: String,
@@ -84,6 +92,27 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 let args = dpms_args(config_dialect(), on);
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 hyprctl::hyprctl_ok(&args).await;
+            }
+            Cmd::RehomeEdpWorkspaces => {
+                let stranded = hyprctl::workspaces_on_monitor(hyprctl::EDP_MONITOR).await;
+                if stranded.is_empty() {
+                    continue;
+                }
+                let Some(dest) = hyprctl::first_external_monitor().await else {
+                    // No external to receive them (racing an undock) — leave
+                    // them put; a later dock change retries.
+                    continue;
+                };
+                let dialect = config_dialect();
+                for ws in stranded {
+                    info!(
+                        "re-homing stranded workspace {ws}: {} -> {dest}",
+                        hyprctl::EDP_MONITOR
+                    );
+                    let args = move_workspace_to_monitor_args(dialect, ws, &dest);
+                    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                    hyprctl::hyprctl_ok(&args).await;
+                }
             }
             Cmd::PauseMedia => run_cmd("playerctl", &["--all-players", "pause"]).await,
             Cmd::Notify { summary, body, tag } => {
@@ -191,6 +220,14 @@ impl Effectors {
 
     pub fn dpms(&self, on: bool) {
         self.send_cmd(Cmd::Dpms(on));
+    }
+
+    /// Repair workspaces stranded on the disabled eDP (see `Cmd::
+    /// RehomeEdpWorkspaces`). Safe to call on every dock change: the worker
+    /// no-ops when nothing is on the eDP. Only meaningful while the eDP is
+    /// meant to be off and an external is present — callers gate on that.
+    pub fn rehome_edp_workspaces(&self) {
+        self.send_cmd(Cmd::RehomeEdpWorkspaces);
     }
 
     pub fn pause_media(&self) {

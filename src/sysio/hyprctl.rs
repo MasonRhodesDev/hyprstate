@@ -91,6 +91,37 @@ pub async fn edp_is_disabled() -> Option<bool> {
         .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
 }
 
+/// IDs of the (regular) workspaces currently assigned to `monitor`. Used to
+/// find workspaces stranded on a disabled eDP. Special workspaces (negative
+/// ids) are excluded — they are monitor-local overlays, not switchable
+/// targets. Empty on hyprctl failure or when none match.
+pub async fn workspaces_on_monitor(monitor: &str) -> Vec<i64> {
+    match hyprctl_json(&["workspaces", "-j"]).await {
+        Some(workspaces) => workspaces
+            .iter()
+            .filter(|w| w.get("monitor").and_then(|m| m.as_str()) == Some(monitor))
+            .filter_map(|w| w.get("id").and_then(|i| i.as_i64()))
+            .filter(|id| *id > 0)
+            .collect(),
+        None => {
+            warn!("workspaces_on_monitor({monitor}) failed");
+            Vec::new()
+        }
+    }
+}
+
+/// Name of the first enabled non-eDP (external) monitor, or None when only
+/// the eDP — or nothing — is enabled. Plain `monitors` (not `monitors all`)
+/// lists enabled outputs only, which is exactly the set that can receive a
+/// re-homed workspace.
+pub async fn first_external_monitor() -> Option<String> {
+    let monitors = hyprctl_json(&["-j", "monitors"]).await?;
+    monitors.iter().find_map(|m| {
+        let name = m.get("name").and_then(|n| n.as_str())?;
+        (!name.starts_with("eDP")).then(|| name.to_string())
+    })
+}
+
 pub async fn hyprlock_running() -> bool {
     Command::new("pgrep")
         .args(["-x", "hyprlock"])

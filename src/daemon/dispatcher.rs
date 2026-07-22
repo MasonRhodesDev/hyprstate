@@ -220,6 +220,20 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
     fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
     // Docked-ness (ext_mon_count) is a power-policy input.
     power_policy_check(ctx, fx).await;
+
+    // A dock topology change is both when Hyprland strands eDP workspaces
+    // (disable with no enabled backup during an undock flap) and when they
+    // become re-homeable (an external is back). Hyprland never re-homes them
+    // itself once stranded, so repair here whenever the eDP is meant to be
+    // off and an external exists to receive them.
+    let edp_should_be_off = match ctx.edp_policy {
+        EdpPolicy::Disable => true,
+        EdpPolicy::Enable => false,
+        EdpPolicy::Auto => ctx.state != State::LidOpen,
+    };
+    if edp_should_be_off && ctx.ext_mon_count > 0 {
+        fx.rehome_edp_workspaces();
+    }
 }
 
 /// Diff a reconciler snapshot against ctx; repair, route repairs back into

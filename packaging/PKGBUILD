@@ -7,7 +7,7 @@
 # `makepkg --printsrcinfo > .SRCINFO` on every change).
 
 pkgname=hyprstate
-pkgver=2.1.2
+pkgver=2.1.3
 pkgrel=1
 pkgdesc="Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)"
 arch=('x86_64')

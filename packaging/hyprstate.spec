@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.1.2
+Version:        2.1.3
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -98,6 +98,12 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Wed Jul 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.3-1
+- Re-home workspaces stranded on the disabled eDP: Hyprland only evacuates a
+  disabled monitor's workspaces to a monitor enabled at disable time and never
+  re-homes them when an external returns, so an undock flap pinned them to the
+  dead panel. The daemon now moves them to an external on dock changes.
+
 * Wed Jul 15 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.2-1
 - Fix eDP disable and dpms effectors under the Hyprland Lua config (keyword
   is legacy-only; use eval / hl.dsp.dpms per dialect)

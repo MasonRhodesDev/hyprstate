@@ -446,6 +446,34 @@ pub fn dpms_args(format: ProfileFormat, on: bool) -> Vec<String> {
     }
 }
 
+/// hyprctl argv to move workspace `ws` onto `monitor`, per config dialect.
+/// Same `dispatch`-evaluates-Lua caveat as `dpms_args`: the classic
+/// `moveworkspacetomonitor <ws> <mon>` string form is a Lua syntax error
+/// under the Lua config, so emit the `hl.dsp.workspace.move` call there.
+///
+/// Used to repair workspaces Hyprland strands on the eDP: `CMonitor::
+/// onDisconnect` only evacuates workspaces to a monitor that was *enabled at
+/// the instant of disable* (BACKUPMON), and nothing retroactively re-homes
+/// them when an external returns — so an undock flap that briefly drops the
+/// external count to zero pins them to the disabled panel permanently.
+pub fn move_workspace_to_monitor_args(
+    format: ProfileFormat,
+    ws: i64,
+    monitor: &str,
+) -> Vec<String> {
+    match format {
+        ProfileFormat::Conf => vec![
+            "dispatch".into(),
+            "moveworkspacetomonitor".into(),
+            format!("{ws} {monitor}"),
+        ],
+        ProfileFormat::Lua => vec![
+            "dispatch".into(),
+            format!("hl.dsp.workspace.move({{ workspace = {ws}, monitor = \"{monitor}\" }})"),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,6 +825,21 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
         assert_eq!(
             dpms_args(ProfileFormat::Lua, false),
             ["dispatch", "hl.dsp.dpms({ action = \"off\" })"]
+        );
+    }
+
+    #[test]
+    fn test_move_workspace_to_monitor_args_dialects() {
+        assert_eq!(
+            move_workspace_to_monitor_args(ProfileFormat::Conf, 2, "DP-1"),
+            ["dispatch", "moveworkspacetomonitor", "2 DP-1"]
+        );
+        assert_eq!(
+            move_workspace_to_monitor_args(ProfileFormat::Lua, 2, "DP-1"),
+            [
+                "dispatch",
+                "hl.dsp.workspace.move({ workspace = 2, monitor = \"DP-1\" })"
+            ]
         );
     }
 

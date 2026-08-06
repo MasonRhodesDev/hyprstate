@@ -3,18 +3,59 @@
 //! (sync — CLI use; the daemon gets async variants in its own module).
 
 use std::fs;
-use std::path::Path;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use crate::paths;
-use crate::pure::profiles::{Profile, ProfileFormat, parse_profile};
+use crate::pure::profiles::ProfileFormat;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TomlProfile {
+    pub inner: monitor_profiles::Profile,
+    pub format: ProfileFormat,
+}
+
+impl Deref for TomlProfile {
+    type Target = monitor_profiles::Profile;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+pub fn config_dialect() -> ProfileFormat {
+    #[cfg(test)]
+    return ProfileFormat::Conf;
+
+    #[cfg(not(test))]
+    if paths::hyprland_lua_config().exists() {
+        ProfileFormat::Lua
+    } else {
+        ProfileFormat::Conf
+    }
+}
 
 /// Read every *.conf and *.lua in the profiles dir (excluding the
 /// `.active.*` symlinks and any leading-dot file). When a stem exists in
 /// both dialects (the migration window), the .lua profile wins. Malformed
 /// profiles are logged to stderr and skipped; parse warnings are logged but
 /// tolerated.
-pub fn load_profiles() -> Vec<Profile> {
+pub fn load_profiles() -> Vec<TomlProfile> {
     load_profiles_from(&paths::profiles_dir())
+}
+
+pub fn load_toml_profiles_from(
+    dir: &Path,
+) -> (Vec<TomlProfile>, Vec<monitor_profiles::Diagnostic>) {
+    let format = config_dialect();
+    let (profiles, diagnostics) = monitor_profiles::load_dir(dir);
+    (
+        profiles
+            .into_iter()
+            .map(|inner| TomlProfile { inner, format })
+            .collect(),
+        diagnostics,
+    )
 }
 
 fn format_of(path: &Path) -> Option<ProfileFormat> {
@@ -25,7 +66,24 @@ fn format_of(path: &Path) -> Option<ProfileFormat> {
     }
 }
 
-pub fn load_profiles_from(dir: &Path) -> Vec<Profile> {
+pub fn load_profiles_from(dir: &Path) -> Vec<TomlProfile> {
+    let (toml_profiles, diagnostics) = load_toml_profiles_from(dir);
+    for diagnostic in diagnostics {
+        eprintln!("WARNING {}: {}", diagnostic.source, diagnostic.message);
+    }
+    if !toml_profiles.is_empty() {
+        for profile in &toml_profiles {
+            if let Err(e) = render_to_dir(dir, profile) {
+                eprintln!("WARNING rendering {}: {e}", profile.name);
+            }
+        }
+        return toml_profiles;
+    }
+
+    load_legacy_profiles_from(dir)
+}
+
+fn load_legacy_profiles_from(dir: &Path) -> Vec<TomlProfile> {
     let mut paths: Vec<_> = match fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()
@@ -41,7 +99,7 @@ pub fn load_profiles_from(dir: &Path) -> Vec<Profile> {
     };
     paths.sort();
 
-    let mut profiles: Vec<Profile> = Vec::new();
+    let mut profiles: Vec<TomlProfile> = Vec::new();
     for path in paths {
         let name = path
             .file_stem()
@@ -52,13 +110,14 @@ pub fn load_profiles_from(dir: &Path) -> Vec<Profile> {
             eprintln!("WARNING skipping unreadable profile {}", path.display());
             continue;
         };
-        match parse_profile(&name, format, &text) {
-            Ok((profile, warnings)) => {
+        match monitor_profiles::legacy::to_profile(&name, &text) {
+            Ok((inner, warnings)) => {
                 for w in warnings {
                     eprintln!("WARNING {}: {w}", path.display());
                 }
                 // .conf sorts before .lua per stem, so a same-stem .lua
                 // simply displaces its .conf twin here.
+                let profile = TomlProfile { inner, format };
                 if let Some(prev) = profiles
                     .iter_mut()
                     .find(|p| p.name == profile.name && p.format != profile.format)
@@ -72,6 +131,43 @@ pub fn load_profiles_from(dir: &Path) -> Vec<Profile> {
         }
     }
     profiles
+}
+
+fn render_to_dir(dir: &Path, profile: &TomlProfile) -> std::io::Result<()> {
+    let (content, warnings) = match profile.format {
+        ProfileFormat::Conf => monitor_profiles::render::render_conf(profile),
+        ProfileFormat::Lua => monitor_profiles::render::render_lua(profile),
+    };
+    for warning in warnings {
+        eprintln!("WARNING {}: {warning}", profile.name);
+    }
+    write_if_changed_atomic(
+        &dir.join(format!("{}.{}", profile.name, profile.format.ext())),
+        &content,
+    )
+}
+
+pub fn write_if_changed_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    if fs::read_to_string(path).is_ok_and(|current| current == content) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp = PathBuf::from(path);
+    let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+    tmp.set_extension(format!("{extension}.tmp-{}", std::process::id()));
+    fs::write(&tmp, content)?;
+    fs::rename(tmp, path)
+}
+
+pub fn select_profile<'a>(
+    signature: &[String],
+    profiles: &'a [TomlProfile],
+) -> Option<&'a TomlProfile> {
+    let inner = profiles.iter().map(|p| p.inner.clone()).collect::<Vec<_>>();
+    let selected = monitor_profiles::select(signature, &inner)?;
+    profiles.iter().find(|p| p.name == selected.name)
 }
 
 /// Name (stem) of the profile the active symlink points at. `.active.lua`
@@ -230,6 +326,43 @@ mod tests {
         assert_eq!(twin.edp, crate::pure::profiles::EdpPolicy::Disable);
         let solo = profiles.iter().find(|p| p.name == "solo").unwrap();
         assert_eq!(solo.format, ProfileFormat::Lua);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn toml_displaces_legacy_twin() {
+        let dir = std::env::temp_dir().join(format!("hyprstate-test-toml-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.conf"), "#@ match = legacy\n").unwrap();
+        fs::write(dir.join("a.toml"), "match = [\"toml\"]\n").unwrap();
+        let profiles = load_profiles_from(&dir);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].matches, ["toml"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_toml_set_falls_back_to_legacy() {
+        let dir =
+            std::env::temp_dir().join(format!("hyprstate-test-fallback-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.conf"), "#@ match = legacy\n").unwrap();
+        let profiles = load_profiles_from(&dir);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].matches, ["legacy"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rendered_file_carries_generated_header() {
+        let dir =
+            std::env::temp_dir().join(format!("hyprstate-test-header-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.toml"), "match = [\"A\"]\n").unwrap();
+        let profiles = load_profiles_from(&dir);
+        let rendered =
+            fs::read_to_string(dir.join(format!("a.{}", profiles[0].format.ext()))).unwrap();
+        assert!(rendered.contains("Do not edit"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

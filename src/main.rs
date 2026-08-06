@@ -69,7 +69,7 @@ enum Cmd {
     },
     /// Monitor profiles (save captures the live layout as a new profile)
     Profile {
-        #[arg(value_parser = ["list", "current", "switch", "save"])]
+        #[arg(value_parser = ["list", "current", "switch", "save", "migrate", "verify"])]
         action: String,
         name: Option<String>,
         /// save: eDP policy directive for the captured profile
@@ -84,6 +84,9 @@ enum Cmd {
         /// save: overwrite an existing profile
         #[arg(long)]
         force: bool,
+        /// migrate: report conversions without writing TOML files
+        #[arg(long)]
+        dry_run: bool,
         /// save: profile dialect (default: lua iff ~/.config/hypr/hyprland.lua exists)
         #[arg(long, value_parser = ["conf", "lua"])]
         format: Option<String>,
@@ -150,6 +153,7 @@ fn main() {
             gpu,
             priority,
             force,
+            dry_run,
             format,
         } => {
             use pure::profiles::{EdpPolicy, GpuPref, ProfileFormat};
@@ -166,6 +170,7 @@ fn main() {
                 },
                 priority,
                 force,
+                dry_run,
                 format: format.as_deref().map(|f| match f {
                     "lua" => ProfileFormat::Lua,
                     _ => ProfileFormat::Conf,

@@ -535,7 +535,7 @@ dependencies = [
 [[package]]
 name = "monitor-profiles"
 version = "0.1.0"
-source = "git+https://github.com/MasonRhodesDev/monitor-profiles?rev=16cd415#16cd415e2d9c02579e4922d81e6e79a950cc3505"
+source = "git+https://github.com/MasonRhodesDev/monitor-profiles?rev=2ff4617#2ff4617e7a7c6ff4d0722c1146cfb434dc7c68b5"
 dependencies = [
  "serde",
  "toml",

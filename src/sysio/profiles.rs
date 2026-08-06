@@ -41,7 +41,31 @@ pub fn config_dialect() -> ProfileFormat {
 /// profiles are logged to stderr and skipped; parse warnings are logged but
 /// tolerated.
 pub fn load_profiles() -> Vec<TomlProfile> {
-    load_profiles_from(&paths::profiles_dir())
+    load_profiles_merged(&paths::profiles_dir(), paths::system_profiles_dir())
+}
+
+pub fn load_profiles_merged(user_dir: &Path, system_dir: &Path) -> Vec<TomlProfile> {
+    let mut profiles = load_profiles_from(user_dir);
+
+    // Profiles shared with the greeter live in the system directory. A
+    // same-named user profile wins, so a per-user override never requires
+    // editing /etc. Their Hyprland config is rendered into the *user*
+    // directory: /etc is not ours to write, and the active-profile symlink
+    // lives beside the user's profiles anyway.
+    let (system, diagnostics) = load_toml_profiles_from(system_dir);
+    for diagnostic in diagnostics {
+        eprintln!("WARNING {}: {}", diagnostic.source, diagnostic.message);
+    }
+    for profile in system {
+        if profiles.iter().any(|p| p.name == profile.name) {
+            continue;
+        }
+        if let Err(e) = render_to_dir(user_dir, &profile) {
+            eprintln!("WARNING rendering {}: {e}", profile.name);
+        }
+        profiles.push(profile);
+    }
+    profiles
 }
 
 pub fn load_toml_profiles_from(
@@ -291,6 +315,56 @@ pub fn monitor_signature() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_profile(dir: &Path, name: &str, output: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join(format!("{name}.toml")),
+            format!(
+                "match = [\"{output}\"]\n\n[[monitor]]\noutput = \"{output}\"\nmode = \"1920x1080@60\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// The system directory is what the greeter reads, so the session must
+    /// see the same profiles from it -- and a same-named user profile must
+    /// still win, so a per-user override never means editing /etc.
+    #[test]
+    fn system_profiles_merge_and_user_wins_on_name() {
+        let base = std::env::temp_dir().join(format!("hyprstate-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (user, system) = (base.join("user"), base.join("system"));
+        write_profile(&user, "desk", "DP-1");
+        write_profile(&system, "desk", "HDMI-A-1");
+        write_profile(&system, "shared-only", "DP-9");
+
+        let profiles = load_profiles_merged(&user, &system);
+        let mut names: Vec<_> = profiles.iter().map(|p| p.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["desk", "shared-only"]);
+
+        let desk = profiles.iter().find(|p| p.name == "desk").unwrap();
+        assert_eq!(
+            desk.monitors[0].output, "DP-1",
+            "the user's profile must win over the system one"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// An absent system directory is the normal case on a machine that ships
+    /// no profiles: it must not warn, and must not disturb user profiles.
+    #[test]
+    fn absent_system_dir_is_harmless() {
+        let base = std::env::temp_dir().join(format!("hyprstate-nosys-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let user = base.join("user");
+        write_profile(&user, "solo", "DP-1");
+        let profiles = load_profiles_merged(&user, &base.join("nonexistent"));
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "solo");
+        let _ = fs::remove_dir_all(&base);
+    }
 
     /// Port of test_hyprstate.py's load_profiles io test (deferred from M1).
     #[test]

@@ -56,6 +56,8 @@ package() {
   install -Dm755 dist/sleep-hook-wrapper.sh "$pkgdir/usr/lib/systemd/system-sleep/hyprstate"
   install -Dm644 dist/90-hyprstate.system.preset "$pkgdir/usr/lib/systemd/system-preset/90-hyprstate.preset"
   install -Dm644 dist/90-hyprstate.user.preset "$pkgdir/usr/lib/systemd/user-preset/90-hyprstate.preset"
+  # Shared monitor-profile directory (see hyprstate.install for the group).
+  install -dm2775 "$pkgdir/etc/monitor-profiles"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 POWER_SPEC.md "$pkgdir/usr/share/doc/$pkgname/POWER_SPEC.md"

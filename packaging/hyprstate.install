@@ -16,11 +16,26 @@ _reload_rules() {
     systemctl reload dbus-broker.service >/dev/null 2>&1 || systemctl reload dbus.service >/dev/null 2>&1 || true
 }
 
+# Shared monitor-profile group: /etc/monitor-profiles is group-writable so a
+# desktop user can edit layouts without root. No username is baked in -- the
+# admin adds whoever should have access (`gpasswd -a <user> monitor-profiles`).
+# vigil ships the same group and directory; whichever installs first wins and
+# the other is a no-op.
+_monitor_profiles_group() {
+    getent group monitor-profiles >/dev/null || groupadd -r monitor-profiles || true
+    if [ -d /etc/monitor-profiles ]; then
+        chgrp monitor-profiles /etc/monitor-profiles >/dev/null 2>&1 || true
+        chmod 2775 /etc/monitor-profiles >/dev/null 2>&1 || true
+    fi
+}
+
 post_install() {
+    _monitor_profiles_group
     _reload_rules
     _disable_conflicts
 }
 
 post_upgrade() {
+    _monitor_profiles_group
     _reload_rules
 }

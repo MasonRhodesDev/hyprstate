@@ -6,7 +6,7 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 
 - **Lid switch.** Holds a logind `handle-lid-switch:block` inhibitor so logind doesn't suspend on lid close. The FSM decides instead.
 - **eDP-2 enable/disable.** Disabled when lid closed, re-enabled (via `hyprctl reload`) when lid opens. Hard invariant — re-asserted by a 5s reconciler and on `configreloaded` events.
-- **Monitor profiles.** Auto-applies a profile based on the set of currently-connected monitors. Profiles live as `.conf` snippets in `~/.config/hypr/profiles/` with `#@` directive comments for match signature, hooks, and eDP policy.
+- **Monitor profiles.** Auto-applies a profile based on the set of currently-connected monitors. Profiles are neutral TOML ([monitor-profiles](https://github.com/MasonRhodesDev/monitor-profiles)) read from `~/.config/hypr/profiles/` and the shared `/etc/monitor-profiles/`, with the Hyprland config rendered from them. Legacy `.conf`/`.lua` profiles still load; `hyprstate profile migrate` converts them.
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
 - **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for `LockedHint=true`.
@@ -71,7 +71,36 @@ hyprstate status                  # systemctl + journalctl + gpu + power summary
 hyprstate power set|get|cycle|status [--waybar]
 hyprstate gpu select|check|status # GPU-primary selection (see GPU_SPEC.md)
 hyprstate profile list|current|switch|save [NAME]
+hyprstate profile migrate [NAME]  # legacy .conf/.lua -> neutral TOML
+hyprstate profile verify [NAME]   # prove a conversion preserved the layout
 ```
+
+## Shared monitor profiles
+
+Layouts live in two places and are read from both:
+
+| Directory | Who reads it |
+|---|---|
+| `/etc/monitor-profiles/` | this daemon **and the greeter** ([vigil](https://github.com/MasonRhodesDev/vigil)) |
+| `~/.config/hypr/profiles/` | this daemon only; a same-named profile wins |
+
+Putting a profile in the system directory is what makes the login screen
+arrange monitors the way the session will, instead of falling back to the
+order the kernel happens to report them in. The package creates it as
+`2775 root:monitor-profiles`, so editing layouts needs group membership
+rather than root:
+
+```sh
+sudo gpasswd -a "$USER" monitor-profiles   # re-login for it to take effect
+```
+
+No username is baked into the packaging — the admin decides who is in the
+group. An absent directory is not an error; it just means no shared profiles.
+
+`profile migrate` converts legacy `.conf`/`.lua` profiles to TOML and refuses
+any conversion that would yield zero monitors; `profile verify` re-parses both
+forms and reports any drift. Both are pure file operations and do not touch
+the running compositor.
 
 ## Install
 

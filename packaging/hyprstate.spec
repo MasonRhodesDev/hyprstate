@@ -16,6 +16,8 @@ Source1:        %{name}-%{version}-vendor.tar.xz
 
 BuildRequires:  cargo-rpm-macros >= 24
 BuildRequires:  systemd-rpm-macros
+# groupadd in %pre for the shared monitor-profiles group.
+Requires(pre):  shadow-utils
 Requires:       systemd
 Requires:       dbus-common
 %{?systemd_requires}
@@ -52,13 +54,23 @@ install -Dpm0644 dist/org.hyprstate.Power1.conf %{buildroot}%{_datadir}/dbus-1/s
 install -Dpm0644 dist/org.hyprstate.Power1.service %{buildroot}%{_datadir}/dbus-1/system-services/org.hyprstate.Power1.service
 install -Dpm0644 dist/60-hyprstate-usb-wake.rules %{buildroot}%{_udevrulesdir}/60-hyprstate-usb-wake.rules
 install -Dpm0755 dist/sleep-hook-wrapper.sh %{buildroot}%{_prefix}/lib/systemd/system-sleep/hyprstate
+%dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 install -Dpm0644 dist/90-hyprstate.system.preset %{buildroot}%{_presetdir}/90-hyprstate.preset
 install -Dpm0644 dist/90-hyprstate.user.preset %{buildroot}%{_userpresetdir}/90-hyprstate.preset
+install -d -m2775 %{buildroot}%{_sysconfdir}/monitor-profiles
 
 %if %{with check}
 %check
 %cargo_test
 %endif
+
+%pre
+# Shared monitor-profile group. The directory below is group-writable so a
+# desktop user can edit layouts without root, and no username is ever baked
+# in: the admin adds whoever should be able to. vigil creates the same group
+# and co-owns the directory with identical attributes, so either package may
+# be installed alone or both together.
+getent group monitor-profiles >/dev/null || groupadd -r monitor-profiles || :
 
 %post
 %systemd_post hyprstate-powerd.service

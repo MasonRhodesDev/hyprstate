@@ -91,6 +91,33 @@ pub async fn edp_is_disabled() -> Option<bool> {
         .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
 }
 
+/// Whether any ENABLED output is currently DPMS off; None when
+/// undeterminable. Disabled outputs are excluded: a disabled eDP reports
+/// dpmsStatus false forever and would look like a permanent blank.
+pub async fn any_enabled_monitor_dpms_off() -> Option<bool> {
+    let monitors = hyprctl_json(&["-j", "monitors"]).await?;
+    Some(monitors.iter().any(|m| {
+        !m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false)
+            && !m
+                .get("dpmsStatus")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(true)
+    }))
+}
+
+/// Current cursor position; None when undeterminable. Reads fine while the
+/// outputs are DPMS off — input keeps flowing to the compositor even when
+/// nothing is lit, which is what makes this a usable presence signal.
+pub async fn cursor_pos() -> Option<(i64, i64)> {
+    let out = Command::new("hyprctl")
+        .args(["-j", "cursorpos"])
+        .output()
+        .await
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((v.get("x")?.as_i64()?, v.get("y")?.as_i64()?))
+}
+
 /// IDs of the (regular) workspaces currently assigned to `monitor`. Used to
 /// find workspaces stranded on a disabled eDP. Special workspaces (negative
 /// ids) are excluded — they are monitor-local overlays, not switchable

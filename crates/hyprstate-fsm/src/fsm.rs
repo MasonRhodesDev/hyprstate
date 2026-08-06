@@ -160,6 +160,53 @@ pub fn desired_screen_state(
     (target != screen).then_some(target)
 }
 
+/// Inputs of the stuck-DPMS backstop (see `dpms_stuck_off`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StuckScreenInputs {
+    /// Reality: at least one ENABLED output reports DPMS off.
+    pub dpms_off: bool,
+    pub locked: bool,
+    /// Positive evidence a human is present: the cursor moved between
+    /// reconciler passes. Required before repairing a *locked* dark session,
+    /// so an ordinary idle blank is not undone seconds after hypridle made it.
+    pub cursor_moved: bool,
+}
+
+/// Whether an observed DPMS-off state is *unowned* and must be repaired.
+///
+/// hypridle, not hyprstate, does the ordinary idle blank, so SCREEN_ACTIVE +
+/// DPMS off is normally legitimate and must be left alone (v1 fired dpms(on)
+/// on every config reload and fought hypridle for exactly this reason). This
+/// backstop exists because hypridle can *lose* its wake: `CHypridle::
+/// onInhibit` recreates the idle-notify listeners when the systemd idle
+/// inhibit count returns to 0, clearing `isIdled` without ever running
+/// `on-resume`, and `CHypridle::onResumed` early-returns while any inhibit
+/// lock is held. Either path drops the `dpms on` permanently and never
+/// retries, leaving a live compositor driving dark panels that no amount of
+/// input will wake.
+///
+/// The guard is what keeps this from fighting a legitimate blank:
+/// - SCREEN_DIMMED means *we* own the off state — never repair it.
+/// - Only LidOpen/Docked are meant to be showing anything; a machine on its
+///   way to suspend stays dark.
+/// - Unlocked + dark is unambiguous: hypridle locks at 180s and blanks at
+///   240s, so it never blanks a session it has not already locked.
+/// - Locked + dark needs positive evidence a human is present, or every
+///   ordinary idle blank would be undone 5 seconds later.
+///
+/// Known gap: cursor movement is the only presence signal available without
+/// hyprstate becoming a Wayland client itself, so a keyboard-only wake of a
+/// *locked* session is not covered.
+pub fn dpms_stuck_off(main: State, screen: ScreenState, s: &StuckScreenInputs) -> bool {
+    if !s.dpms_off || screen == ScreenState::Dimmed {
+        return false;
+    }
+    if !matches!(main, State::LidOpen | State::Docked) {
+        return false;
+    }
+    !s.locked || s.cursor_moved
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +429,88 @@ mod tests {
             ),
             Some(ScreenState::Active)
         );
+    }
+
+    fn stuck(dpms_off: bool, locked: bool, cursor_moved: bool) -> StuckScreenInputs {
+        StuckScreenInputs {
+            dpms_off,
+            locked,
+            cursor_moved,
+        }
+    }
+
+    #[test]
+    fn test_stuck_dpms_ignores_screens_that_are_on() {
+        assert!(!dpms_stuck_off(
+            State::LidOpen,
+            ScreenState::Active,
+            &stuck(false, false, true)
+        ));
+    }
+
+    #[test]
+    fn test_stuck_dpms_never_fights_our_own_dim() {
+        // SCREEN_DIMMED is hyprstate's deliberate blank — repairing it would
+        // undo the state we just entered.
+        assert!(!dpms_stuck_off(
+            State::LidOpen,
+            ScreenState::Dimmed,
+            &stuck(true, true, true)
+        ));
+    }
+
+    #[test]
+    fn test_stuck_dpms_leaves_an_ordinary_idle_blank_alone() {
+        // hypridle blanked a locked session and the user is still away: no
+        // cursor movement, so nothing to repair.
+        assert!(!dpms_stuck_off(
+            State::Docked,
+            ScreenState::Active,
+            &stuck(true, true, false)
+        ));
+    }
+
+    #[test]
+    fn test_stuck_dpms_repairs_locked_session_once_user_returns() {
+        // The incident: hypridle dropped on-resume, the panels stayed dark,
+        // and input reached the compositor without waking anything.
+        assert!(dpms_stuck_off(
+            State::Docked,
+            ScreenState::Active,
+            &stuck(true, true, true)
+        ));
+    }
+
+    #[test]
+    fn test_stuck_dpms_repairs_unlocked_dark_session_without_cursor_proof() {
+        // hypridle locks at 180s before blanking at 240s, so it never blanks
+        // an unlocked session — unlocked + dark cannot be a legitimate blank.
+        assert!(dpms_stuck_off(
+            State::LidOpen,
+            ScreenState::Active,
+            &stuck(true, false, false)
+        ));
+    }
+
+    #[test]
+    fn test_stuck_dpms_stays_dark_on_the_way_to_suspend() {
+        for main in [State::Countdown, State::Deferred, State::Suspending] {
+            assert!(
+                !dpms_stuck_off(main, ScreenState::Active, &stuck(true, false, true)),
+                "{} must not wake screens",
+                main.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn test_stuck_dpms_repairs_during_dim_pending() {
+        // DimPending means our timer is armed but we have NOT blanked yet, so
+        // an observed blank is still hypridle's and still repairable.
+        assert!(dpms_stuck_off(
+            State::LidOpen,
+            ScreenState::DimPending,
+            &stuck(true, true, true)
+        ));
     }
 }

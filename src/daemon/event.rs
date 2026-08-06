@@ -54,6 +54,11 @@ pub struct ReconcileSnapshot {
     pub locked: bool,
     pub on_ac: Option<bool>,
     pub edp_disabled: Option<bool>,
+    /// Any enabled output reporting DPMS off (stuck-blank backstop).
+    pub dpms_off: Option<bool>,
+    /// Cursor position this pass; the dispatcher diffs it against the
+    /// previous one for a presence signal.
+    pub cursor_pos: Option<(i64, i64)>,
 }
 
 impl Event {

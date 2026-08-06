@@ -227,6 +227,8 @@ pub async fn reconcile_snapshot_task(
         let locked = hyprctl::hyprlock_running().await;
         let on_ac = on_ac_sysfs();
         let edp_disabled = hyprctl::edp_is_disabled().await;
+        let dpms_off = hyprctl::any_enabled_monitor_dpms_off().await;
+        let cursor_pos = hyprctl::cursor_pos().await;
         let snap = ReconcileSnapshot {
             lid_closed: lid,
             ext_mon_count: ext,
@@ -235,6 +237,8 @@ pub async fn reconcile_snapshot_task(
             locked,
             on_ac,
             edp_disabled,
+            dpms_off,
+            cursor_pos,
         };
         if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {
             return;

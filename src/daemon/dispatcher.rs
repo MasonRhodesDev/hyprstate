@@ -21,7 +21,8 @@ use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::power_policy::power_policy_check;
 use super::telemetry::{FrameCtx, TelemetryEmitter, build_frame};
 use crate::pure::fsm::{
-    EventKind, ScreenState, State, desired_screen_state, desired_state, world_state,
+    EventKind, ScreenState, State, StuckScreenInputs, desired_screen_state, desired_state,
+    dpms_stuck_off, world_state,
 };
 use crate::pure::gpu::dgpu_runtime_pm_pinned;
 use crate::pure::power::{battery_low_step, profile_from_platform_value};
@@ -352,6 +353,41 @@ async fn handle_reconcile_tick(
     // DPMS-DIMMED invariant: re-issue dpms off (idempotent).
     if ctx.screen_state == ScreenState::Dimmed {
         fx.dpms(false);
+        // Nothing below can apply, and a stale cursor sample must not later
+        // read as movement when we come back out of DIMMED.
+        ctx.last_cursor_pos = snap.cursor_pos;
+        return;
+    }
+
+    // STUCK-DPMS backstop: hypridle can lose its own wake (see
+    // `dpms_stuck_off`), leaving a live session driving dark panels that no
+    // input will recover. Repair only when the blank is provably unowned.
+    let cursor_moved = match (ctx.last_cursor_pos, snap.cursor_pos) {
+        (Some(prev), Some(now)) => prev != now,
+        // First sample (or hyprctl failed) proves nothing either way.
+        _ => false,
+    };
+    if snap.cursor_pos.is_some() {
+        ctx.last_cursor_pos = snap.cursor_pos;
+    }
+    if let Some(dpms_off) = snap.dpms_off {
+        let inputs = StuckScreenInputs {
+            dpms_off,
+            locked: ctx.locked,
+            cursor_moved,
+        };
+        if dpms_stuck_off(ctx.state, ctx.screen_state, &inputs) {
+            warn!(
+                "reconciler: state={} screen={} but an enabled output is DPMS off \
+                 (locked={}, cursor_moved={}) — re-asserting dpms on \
+                 (hypridle dropped its on-resume?)",
+                ctx.state.as_str(),
+                ctx.screen_state.as_str(),
+                ctx.locked,
+                cursor_moved,
+            );
+            fx.dpms(true);
+        }
     }
 }
 

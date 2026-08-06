@@ -218,7 +218,11 @@ pub async fn reconcile_snapshot_task(
                 continue;
             }
         };
-        let ext = hyprctl::ext_monitor_count(ext_prev).await;
+        // One monitors payload per pass: ext count, eDP state and the
+        // stuck-blank check all read the same JSON, and spawning hyprctl
+        // three times for it was three times the process churn for nothing.
+        let monitors = hyprctl::monitors().await;
+        let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), ext_prev);
         ext_prev = ext;
         let logind_inh = logind_real_inhibitor_active(&manager)
             .await
@@ -226,9 +230,18 @@ pub async fn reconcile_snapshot_task(
         let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
         let locked = hyprctl::hyprlock_running().await;
         let on_ac = on_ac_sysfs();
-        let edp_disabled = hyprctl::edp_is_disabled().await;
-        let dpms_off = hyprctl::any_enabled_monitor_dpms_off().await;
-        let cursor_pos = hyprctl::cursor_pos().await;
+        let edp_disabled = monitors.as_deref().and_then(hyprctl::edp_is_disabled_in);
+        let dpms_off = monitors
+            .as_deref()
+            .map(hyprctl::any_enabled_monitor_dpms_off_in);
+        // The cursor is only ever needed to decide whether a *dark* session
+        // has a human in front of it. Asking for it while the screens are on
+        // is a subprocess per tick, forever, to answer a question nobody
+        // asked: sample it only when something is actually blank.
+        let cursor_pos = match dpms_off {
+            Some(true) => hyprctl::cursor_pos().await,
+            _ => None,
+        };
         let snap = ReconcileSnapshot {
             lid_closed: lid,
             ext_mon_count: ext,

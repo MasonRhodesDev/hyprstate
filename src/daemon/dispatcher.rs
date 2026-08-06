@@ -367,9 +367,11 @@ async fn handle_reconcile_tick(
         // First sample (or hyprctl failed) proves nothing either way.
         _ => false,
     };
-    if snap.cursor_pos.is_some() {
-        ctx.last_cursor_pos = snap.cursor_pos;
-    }
+    // The cursor is only sampled while something is dark, so drop the
+    // baseline as soon as it is not. Keeping it would let a position left
+    // over from an earlier dark episode read as movement on the first tick
+    // of the next one and undo an ordinary idle blank immediately.
+    ctx.last_cursor_pos = snap.cursor_pos;
     if let Some(dpms_off) = snap.dpms_off {
         let inputs = StuckScreenInputs {
             dpms_off,

@@ -165,12 +165,3 @@ pub async fn first_external_monitor() -> Option<String> {
         (!name.starts_with("eDP")).then(|| name.to_string())
     })
 }
-
-pub async fn hyprlock_running() -> bool {
-    Command::new("pgrep")
-        .args(["-x", "hyprlock"])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}

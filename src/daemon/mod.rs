@@ -157,7 +157,10 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     };
 
     // Session + UPower setup.
-    let session = sources::resolve_session(&conn, &manager).await;
+    let (session, session_uncached) = match sources::resolve_session(&conn, &manager).await {
+        Some((cached, uncached)) => (Some(cached), Some(uncached)),
+        None => (None, None),
+    };
     let upower = match UPowerProxy::new(&conn).await {
         Ok(up) => match up.on_battery().await {
             Ok(on_battery) => {
@@ -205,6 +208,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         session: session.clone(),
         powerd: PowerdProxy::new(&conn).await?,
         locked_rx,
+        locked_tx: locked_tx.clone(),
     };
 
     // Initial world snapshot.
@@ -242,14 +246,12 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         .await;
 
     ctx.locked = match &session {
-        Some(s) => match s.locked_hint().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("initial LockedHint read failed: {e}");
-                hyprctl::hyprlock_running().await
-            }
-        },
-        None => hyprctl::hyprlock_running().await,
+        Some(s) => s.locked_hint().await.unwrap_or_else(|e| {
+            warn!("initial LockedHint read failed: {e} — assuming unlocked");
+            false
+        }),
+        // resolve_session already warned that lock detection is disabled.
+        None => false,
     };
     let _ = locked_tx.send(ctx.locked);
 
@@ -261,6 +263,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     tokio::spawn(sources::reconcile_snapshot_task(
         tx.clone(),
         manager_uncached,
+        session_uncached,
         ctx.ext_mon_count,
     ));
     tokio::spawn(sources::lid_watcher(tx.clone(), manager.clone()));

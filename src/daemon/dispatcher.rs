@@ -285,12 +285,15 @@ async fn handle_reconcile_tick(
         ctx.wayland_inhibitor = snap.wayland_inhibitor;
         fsm_drift = true;
     }
-    if snap.locked != ctx.locked {
-        drift.push(format!(
-            "locked {}->{} (pgrep fallback)",
-            ctx.locked, snap.locked
-        ));
-        ctx.locked = snap.locked;
+    if let Some(locked) = snap.locked
+        && locked != ctx.locked
+    {
+        drift.push(format!("locked {}->{locked} (LockedHint)", ctx.locked));
+        ctx.locked = locked;
+        // Mirror into the watch channel: wait_for_lock reads it, and
+        // lock_watcher only sends on signal edges — which we evidently
+        // missed.
+        let _ = fx.locked_tx.send(locked);
         fsm_drift = true;
     }
     if let Some(on_ac) = snap.on_ac

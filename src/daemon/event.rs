@@ -51,7 +51,9 @@ pub struct ReconcileSnapshot {
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
     pub wayland_inhibitor: bool,
-    pub locked: bool,
+    /// LockedHint via an uncached session read; None = no session or the
+    /// read failed this pass.
+    pub locked: Option<bool>,
     pub on_ac: Option<bool>,
     pub edp_disabled: Option<bool>,
     /// Any enabled output reporting DPMS off (stuck-blank backstop).

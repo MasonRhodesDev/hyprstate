@@ -8,6 +8,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use zbus::Connection;
+use zbus::proxy::CacheProperties;
 
 use super::event::{Event, ReconcileSnapshot};
 use crate::dbus::logind::{LogindManagerProxy, LogindSessionProxy};
@@ -202,11 +203,12 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
 }
 
 /// Gather the world every RECONCILE_INTERVAL; the dispatcher diffs/repairs.
-/// `manager` must be an UNCACHED proxy: catching missed PropertiesChanged
-/// signals is this task's whole purpose.
+/// `manager` and `session` must be UNCACHED proxies: catching missed
+/// PropertiesChanged signals is this task's whole purpose.
 pub async fn reconcile_snapshot_task(
     tx: mpsc::Sender<Event>,
     manager: LogindManagerProxy<'static>,
+    session: Option<LogindSessionProxy<'static>>,
     mut ext_prev: u32,
 ) {
     loop {
@@ -218,15 +220,39 @@ pub async fn reconcile_snapshot_task(
                 continue;
             }
         };
-        let ext = hyprctl::ext_monitor_count(ext_prev).await;
+        // One monitors payload per pass: ext count, eDP state and the
+        // stuck-blank check all read the same JSON, and spawning hyprctl
+        // three times for it was three times the process churn for nothing.
+        let monitors = hyprctl::monitors().await;
+        let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), ext_prev);
         ext_prev = ext;
         let logind_inh = logind_real_inhibitor_active(&manager)
             .await
             .unwrap_or(false);
         let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
-        let locked = hyprctl::hyprlock_running().await;
+        let locked = match &session {
+            Some(s) => match s.locked_hint().await {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    warn!("reconciler LockedHint read failed: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
         let on_ac = on_ac_sysfs();
-        let edp_disabled = hyprctl::edp_is_disabled().await;
+        let edp_disabled = monitors.as_deref().and_then(hyprctl::edp_is_disabled_in);
+        let dpms_off = monitors
+            .as_deref()
+            .map(hyprctl::any_enabled_monitor_dpms_off_in);
+        // The cursor is only ever needed to decide whether a *dark* session
+        // has a human in front of it. Asking for it while the screens are on
+        // is a subprocess per tick, forever, to answer a question nobody
+        // asked: sample it only when something is actually blank.
+        let cursor_pos = match dpms_off {
+            Some(true) => hyprctl::cursor_pos().await,
+            _ => None,
+        };
         let snap = ReconcileSnapshot {
             lid_closed: lid,
             ext_mon_count: ext,
@@ -235,6 +261,8 @@ pub async fn reconcile_snapshot_task(
             locked,
             on_ac,
             edp_disabled,
+            dpms_off,
+            cursor_pos,
         };
         if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {
             return;
@@ -291,11 +319,13 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
 
 /// Resolve our graphical session: GetSessionByPID(0), falling back to
 /// ListSessions with v1's scoring (class=user +1, graphical type +2,
-/// active +4 / online +1).
+/// active +4 / online +1). Returns a (cached, uncached) proxy pair:
+/// lock_watcher needs the cached one (property-change streams are fed from
+/// the cache), the reconciler needs the uncached one (fresh reads).
 pub async fn resolve_session(
     conn: &Connection,
     manager: &LogindManagerProxy<'static>,
-) -> Option<LogindSessionProxy<'static>> {
+) -> Option<(LogindSessionProxy<'static>, LogindSessionProxy<'static>)> {
     let path = match manager.get_session_by_pid(0).await {
         Ok(p) => Some(p),
         Err(e) => {
@@ -351,9 +381,18 @@ pub async fn resolve_session(
         warn!("no logind session resolved — lock detection via LockedHint disabled");
         return None;
     };
-    let proxy = LogindSessionProxy::builder(conn)
+    let cached = LogindSessionProxy::builder(conn)
         .path(path.clone())
         .ok()?
+        .build()
+        .await
+        .ok()?;
+    // The reconciler must read fresh values, not the signal-fed cache —
+    // same reasoning as manager_uncached in daemon::run.
+    let uncached = LogindSessionProxy::builder(conn)
+        .path(path.clone())
+        .ok()?
+        .cache_properties(CacheProperties::No)
         .build()
         .await
         .ok()?;
@@ -361,7 +400,7 @@ pub async fn resolve_session(
         "subscribed to session {} for LockedHint changes",
         path.as_str()
     );
-    Some(proxy)
+    Some((cached, uncached))
 }
 
 pub async fn lock_watcher(

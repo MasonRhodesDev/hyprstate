@@ -28,6 +28,10 @@ pub struct Context {
     pub profile_debounce: Option<JoinHandle<()>>,
     pub power_debounce: Option<JoinHandle<()>>,
 
+    /// Cursor position at the previous reconciler pass; a change is the
+    /// presence signal for the stuck-DPMS backstop. None = not sampled yet.
+    pub last_cursor_pos: Option<(i64, i64)>,
+
     // ---- monitor-profile sub-state ----
     pub current_profile: Option<String>,
     pub edp_policy: EdpPolicy,
@@ -78,6 +82,7 @@ impl Default for Context {
             screen_state: ScreenState::Active,
             grace_timer: None,
             screen_timer: None,
+            last_cursor_pos: None,
             profile_debounce: None,
             power_debounce: None,
             current_profile: None,

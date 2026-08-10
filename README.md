@@ -10,7 +10,7 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
 - **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for `LockedHint=true`.
-- **DPMS-off when locked + inhibitor.** With an active screen (`LID_OPEN` or `DOCKED`) and the session locked while an inhibitor is held, screens DPMS-off after 30s. Reverses on unlock or inhibitor release.
+- **DPMS-off when locked + inhibitor.** With an active screen (`LID_OPEN` or `DOCKED`) and the session locked (any locker setting `LockedHint`) while an inhibitor is held, screens DPMS-off after 30s. Reverses on unlock or inhibitor release.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
 
 ## Architecture
@@ -27,7 +27,7 @@ flowchart TD
     end
 
     hypr -->|".socket2.sock: monitoraddedv2 / monitorremoved / configreloaded"| chan
-    logind -->|"org.freedesktop.login1 lid + Lock signals, holds handle-lid-switch:block inhibitor"| chan
+    logind -->|"org.freedesktop.login1 lid + LockedHint, holds handle-lid-switch:block inhibitor"| chan
     upower -->|"AC / battery state"| chan
     poll -->|"sysfs + hypridle log polling"| chan
 
@@ -150,4 +150,4 @@ sudo tail -f /var/log/hyprstate-sleep.log       # sleep hook log
 
 ## Dependencies
 
-System: `hyprctl`, `playerctl`, `hyprlock` (via hypridle's `lock_cmd`), `hypridle` (catches the logind Lock signal and runs hyprlock). Build: `cargo` / `rustc`.
+System: `hyprctl`, `playerctl`, any screen locker that sets logind's `LockedHint` (vigil-lock, hyprlock, swaylock, …) — hyprstate reads `LockedHint` exclusively and never checks for a locker process — and `hypridle` (wayland-inhibitor log polling). Build: `cargo` / `rustc`.

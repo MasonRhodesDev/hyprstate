@@ -193,6 +193,9 @@ pub struct Effectors {
     pub session: Option<LogindSessionProxy<'static>>,
     pub powerd: PowerdProxy<'static>,
     pub locked_rx: watch::Receiver<bool>,
+    /// Mirror for reconciler lock repairs — state, not an effect, so never
+    /// shadow-gated (same as lock_watcher's sends).
+    pub locked_tx: watch::Sender<bool>,
 }
 
 impl Effectors {

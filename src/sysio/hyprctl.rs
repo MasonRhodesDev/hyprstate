@@ -11,11 +11,18 @@ async fn hyprctl_json(args: &[&str]) -> Option<Vec<serde_json::Value>> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
+/// One `hyprctl -j monitors` payload. The reconciler needs three different
+/// facts from it every pass; fetching it once and deriving them is the
+/// difference between one subprocess per tick and three identical ones.
+pub async fn monitors() -> Option<Vec<serde_json::Value>> {
+    hyprctl_json(&["-j", "monitors"]).await
+}
+
 /// Connected non-eDP monitor count. Returns `prev` on hyprctl failure: a
 /// transient hyprctl error must not look like an undock (it would expire
 /// power overrides and flip profiles).
-pub async fn ext_monitor_count(prev: u32) -> u32 {
-    match hyprctl_json(&["-j", "monitors"]).await {
+pub fn ext_monitor_count_in(monitors: Option<&[serde_json::Value]>, prev: u32) -> u32 {
+    match monitors {
         Some(monitors) => monitors
             .iter()
             .filter(|m| {
@@ -30,6 +37,10 @@ pub async fn ext_monitor_count(prev: u32) -> u32 {
             prev
         }
     }
+}
+
+pub async fn ext_monitor_count(prev: u32) -> u32 {
+    ext_monitor_count_in(monitors().await.as_deref(), prev)
 }
 
 /// Snapshot of currently-connected monitor descriptions.
@@ -83,12 +94,45 @@ pub async fn hyprctl_ok(args: &[&str]) -> bool {
 }
 
 /// Whether the eDP panel is disabled; None when undeterminable.
+pub fn edp_is_disabled_in(monitors: &[serde_json::Value]) -> Option<bool> {
+    monitors
+        .iter()
+        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(EDP_MONITOR))
+        .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
+}
+
 pub async fn edp_is_disabled() -> Option<bool> {
     let monitors = hyprctl_json(&["monitors", "all", "-j"]).await?;
     monitors
         .iter()
         .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(EDP_MONITOR))
         .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
+}
+
+/// Whether any ENABLED output is currently DPMS off; None when
+/// undeterminable. Disabled outputs are excluded: a disabled eDP reports
+/// dpmsStatus false forever and would look like a permanent blank.
+pub fn any_enabled_monitor_dpms_off_in(monitors: &[serde_json::Value]) -> bool {
+    monitors.iter().any(|m| {
+        !m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false)
+            && !m
+                .get("dpmsStatus")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(true)
+    })
+}
+
+/// Current cursor position; None when undeterminable. Reads fine while the
+/// outputs are DPMS off — input keeps flowing to the compositor even when
+/// nothing is lit, which is what makes this a usable presence signal.
+pub async fn cursor_pos() -> Option<(i64, i64)> {
+    let out = Command::new("hyprctl")
+        .args(["-j", "cursorpos"])
+        .output()
+        .await
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some((v.get("x")?.as_i64()?, v.get("y")?.as_i64()?))
 }
 
 /// IDs of the (regular) workspaces currently assigned to `monitor`. Used to
@@ -120,13 +164,4 @@ pub async fn first_external_monitor() -> Option<String> {
         let name = m.get("name").and_then(|n| n.as_str())?;
         (!name.starts_with("eDP")).then(|| name.to_string())
     })
-}
-
-pub async fn hyprlock_running() -> bool {
-    Command::new("pgrep")
-        .args(["-x", "hyprlock"])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }

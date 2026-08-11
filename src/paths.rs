@@ -75,6 +75,18 @@ pub fn platform_profile_path() -> &'static Path {
 
 // ---- monitor profiles ----
 
+/// Machine-wide profile directory, shared with the greeter. This is the whole
+/// point of the neutral format: one layout definition applied on both sides of
+/// login, instead of the session and the login screen disagreeing about which
+/// monitor is where. Packaged as 2775 root:monitor-profiles so members of that
+/// group can edit layouts without root, and world-readable so the unprivileged
+/// greeter user can read them.
+pub const SYSTEM_PROFILES_DIR: &str = "/etc/monitor-profiles";
+
+pub fn system_profiles_dir() -> &'static Path {
+    Path::new(SYSTEM_PROFILES_DIR)
+}
+
 pub fn profiles_dir() -> PathBuf {
     hypr_config("profiles")
 }

@@ -5,43 +5,7 @@
 //! the io layer globs the profiles dir, feeds file contents in, and logs the
 //! returned warnings.
 
-/// `#@ edp = ...` policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum EdpPolicy {
-    #[default]
-    Auto,
-    Enable,
-    Disable,
-}
-
-impl EdpPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EdpPolicy::Auto => "auto",
-            EdpPolicy::Enable => "enable",
-            EdpPolicy::Disable => "disable",
-        }
-    }
-}
-
-/// `#@ gpu = ...` render-GPU preference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GpuPref {
-    #[default]
-    Auto,
-    Igpu,
-    Dgpu,
-}
-
-impl GpuPref {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            GpuPref::Auto => "auto",
-            GpuPref::Igpu => "igpu",
-            GpuPref::Dgpu => "dgpu",
-        }
-    }
-}
+pub use monitor_profiles::{EdpPolicy, GpuPref};
 
 /// Source dialect of a profile file. Hyprland executes the body (hyprlang
 /// text or Lua `hl.*` calls); hyprstate only reads the directive metadata,

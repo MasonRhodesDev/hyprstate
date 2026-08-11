@@ -23,8 +23,7 @@ use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
-    EdpPolicy, GpuPref, Profile, ProfileFormat, dpms_args, edp_disable_args,
-    move_workspace_to_monitor_args,
+    EdpPolicy, GpuPref, ProfileFormat, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
 
@@ -333,7 +332,7 @@ impl Effectors {
 
     /// Repoint the active-profile symlink, reload, fire hooks, update ctx.
     /// Idempotent.
-    pub fn apply_profile(&self, profile: &Profile, ctx: &mut Context) {
+    pub fn apply_profile(&self, profile: &crate::sysio::profiles::TomlProfile, ctx: &mut Context) {
         let target =
             paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
         let link = paths::active_profile_link(profile.format);

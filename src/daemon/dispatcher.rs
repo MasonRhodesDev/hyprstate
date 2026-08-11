@@ -26,9 +26,10 @@ use crate::pure::fsm::{
 };
 use crate::pure::gpu::dgpu_runtime_pm_pinned;
 use crate::pure::power::{battery_low_step, profile_from_platform_value};
-use crate::pure::profiles::{EdpPolicy, GpuPref, select_profile};
+use crate::pure::profiles::{EdpPolicy, GpuPref};
 use crate::sysio::hyprctl;
 use crate::sysio::profiles::load_profiles;
+use crate::sysio::profiles::select_profile;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Entry {

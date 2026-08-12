@@ -21,6 +21,7 @@ use super::event::Event;
 use crate::dbus::logind::{LogindManagerProxy, LogindSessionProxy};
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
+use crate::pure::fsm::edp_may_disable;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
     EdpPolicy, GpuPref, ProfileFormat, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
@@ -217,6 +218,15 @@ impl Effectors {
             EdpPolicy::Enable => true,
             EdpPolicy::Auto => on,
         };
+        // Guard every path, not just the one that bit: turning off the only
+        // output leaves the compositor with no monitors at all, and Hyprland
+        // crashes refocusing windows onto one that no longer exists. Countdown
+        // (lid close while undocked) is the path that reaches here with no
+        // external attached.
+        if !resolved && !edp_may_disable(ctx.ext_mon_count) {
+            warn!("keeping {} on: it is the only output", hyprctl::EDP_MONITOR);
+            return;
+        }
         self.send_cmd(Cmd::SetEdp { on: resolved });
     }
 

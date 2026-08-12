@@ -207,6 +207,21 @@ pub fn dpms_stuck_off(main: State, screen: ScreenState, s: &StuckScreenInputs) -
     !s.locked || s.cursor_moved
 }
 
+/// Whether the internal panel may be turned off.
+///
+/// Never when it is the only output. Countdown turns the panel off on lid
+/// close, which is right while docked and catastrophic while not: removing
+/// the last monitor leaves the compositor with none, and Hyprland segfaults
+/// refocusing windows onto a monitor that no longer exists (observed
+/// repeatedly, `CWorkspace::isVisibleNotCovered` via
+/// `CInputManager::refocusLastWindow` from a layer surface unmapping).
+///
+/// Nothing is lost by keeping it: the machine is seconds from suspending,
+/// and blanking is DPMS's job, not modesetting's.
+pub fn edp_may_disable(ext_mon_count: u32) -> bool {
+    ext_mon_count > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +444,20 @@ mod tests {
             ),
             Some(ScreenState::Active)
         );
+    }
+
+    #[test]
+    fn edp_stays_on_when_it_is_the_only_output() {
+        assert!(
+            !edp_may_disable(0),
+            "disabling the sole output leaves the compositor with no monitors"
+        );
+    }
+
+    #[test]
+    fn edp_may_disable_once_an_external_is_present() {
+        assert!(edp_may_disable(1));
+        assert!(edp_may_disable(3));
     }
 
     fn stuck(dpms_off: bool, locked: bool, cursor_moved: bool) -> StuckScreenInputs {

@@ -9,7 +9,7 @@ repository = "https://github.com/MasonRhodesDev/hyprstate"
 publish = false
 
 [dependencies]
-monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles", rev = "2ff4617", features = ["hyprland-render"] }
+monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles", rev = "d495f3b", features = ["hyprland-render"] }
 # serde so the daemon can emit FSM state over telemetry and the GUI can render
 # it from the same definitions — no hand-mirrored model to drift.
 serde = { version = "1", features = ["derive"] }

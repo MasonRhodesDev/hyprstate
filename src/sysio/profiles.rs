@@ -121,10 +121,17 @@ fn dir_has_legacy(dir: &Path) -> bool {
     };
     rd.flatten().any(|e| {
         let p = e.path();
-        format_of(&p).is_some()
-            && p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| !n.starts_with('.'))
+        if format_of(&p).is_none() {
+            return false;
+        }
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.'))
+        {
+            return false;
+        }
+        // Render artifacts carry "Do not edit"; only hand-edited dialects count.
+        fs::read_to_string(&p).is_ok_and(|t| !t.contains("Do not edit"))
     })
 }
 

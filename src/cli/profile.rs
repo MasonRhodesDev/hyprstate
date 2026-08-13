@@ -22,6 +22,7 @@ use crate::sysio::profiles::{
     active_profile_name, load_profiles, monitor_signature, monitor_snapshot_all,
     repoint_active_profile, write_if_changed_atomic,
 };
+use monitor_profiles::to_toml;
 
 pub struct SaveOpts {
     pub edp: EdpPolicy,
@@ -30,86 +31,9 @@ pub struct SaveOpts {
     pub force: bool,
     pub dry_run: bool,
     /// None = auto: Lua iff ~/.config/hypr/hyprland.lua exists (i.e. the
-    /// machine's Hyprland config has migrated).
+    /// machine's Hyprland config has migrated). Controls the *rendered*
+    /// dialect twin only — the source file is always `.toml`.
     pub format: Option<ProfileFormat>,
-}
-
-fn quote(value: &str) -> String {
-    serde_json::to_string(value).expect("serializing a string cannot fail")
-}
-
-fn format_number(value: f64) -> String {
-    let formatted = format!("{value:.2}");
-    formatted
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
-}
-
-pub fn to_toml(profile: &monitor_profiles::Profile) -> String {
-    let mut out = String::new();
-    if !profile.description.is_empty() {
-        out.push_str(&format!("description = {}\n", quote(&profile.description)));
-    }
-    out.push_str("match = [");
-    out.push_str(
-        &profile
-            .matches
-            .iter()
-            .map(|x| quote(x))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    out.push_str("]\n");
-    if profile.edp != EdpPolicy::Auto {
-        out.push_str(&format!("edp = {:?}\n", profile.edp.as_str()));
-    }
-    if profile.gpu != GpuPref::Auto {
-        out.push_str(&format!("gpu = {:?}\n", profile.gpu.as_str()));
-    }
-    if !profile.hooks.is_empty() {
-        out.push_str("hooks = [");
-        out.push_str(
-            &profile
-                .hooks
-                .iter()
-                .map(|x| quote(x))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        out.push_str("]\n");
-    }
-    if profile.priority != profile.matches.len() as i64 {
-        out.push_str(&format!("priority = {}\n", profile.priority));
-    }
-    for monitor in &profile.monitors {
-        out.push_str("\n[[monitor]]\n");
-        out.push_str(&format!("output = {}\n", quote(&monitor.output)));
-        if let Some(mode) = monitor.mode {
-            out.push_str(&format!("mode = {}\n", quote(&mode.to_string())));
-        }
-        if monitor.scale != 1.0 {
-            out.push_str(&format!("scale = {}\n", format_number(monitor.scale)));
-        }
-        if let Some((x, y)) = monitor.position {
-            out.push_str(&format!("position = [{x}, {y}]\n"));
-        }
-        if monitor.transform != 0 {
-            out.push_str(&format!("transform = {}\n", monitor.transform));
-        }
-        if !monitor.enabled {
-            out.push_str("enabled = false\n");
-        }
-    }
-    for workspace in &profile.workspaces {
-        out.push_str("\n[[workspace]]\n");
-        out.push_str(&format!("workspace = {}\n", quote(&workspace.workspace)));
-        out.push_str(&format!("monitor = {}\n", quote(&workspace.monitor)));
-        if workspace.default {
-            out.push_str("default = true\n");
-        }
-    }
-    out
 }
 
 fn difference<T: PartialEq + Debug>(

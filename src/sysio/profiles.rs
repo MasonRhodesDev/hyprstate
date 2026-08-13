@@ -95,66 +95,37 @@ pub fn load_profiles_from(dir: &Path) -> Vec<TomlProfile> {
     for diagnostic in diagnostics {
         eprintln!("WARNING {}: {}", diagnostic.source, diagnostic.message);
     }
-    if !toml_profiles.is_empty() {
-        for profile in &toml_profiles {
-            if let Err(e) = render_to_dir(dir, profile) {
-                eprintln!("WARNING rendering {}: {e}", profile.name);
-            }
+    if toml_profiles.is_empty() {
+        // Legacy .lua/.conf are no longer profile sources — migrate to TOML
+        // (`hyprstate profile migrate` or `monitor-profiles migrate`).
+        if dir_has_legacy(dir) {
+            eprintln!(
+                "WARNING {}: found legacy .conf/.lua profiles but no .toml; \
+                 run `hyprstate profile migrate` (TOML is the source of truth)",
+                dir.display()
+            );
         }
-        return toml_profiles;
+        return Vec::new();
     }
-
-    load_legacy_profiles_from(dir)
+    for profile in &toml_profiles {
+        if let Err(e) = render_to_dir(dir, profile) {
+            eprintln!("WARNING rendering {}: {e}", profile.name);
+        }
+    }
+    toml_profiles
 }
 
-fn load_legacy_profiles_from(dir: &Path) -> Vec<TomlProfile> {
-    let mut paths: Vec<_> = match fs::read_dir(dir) {
-        Ok(rd) => rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                format_of(p).is_some()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| !n.starts_with('.'))
-            })
-            .collect(),
-        Err(_) => return Vec::new(),
+fn dir_has_legacy(dir: &Path) -> bool {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return false;
     };
-    paths.sort();
-
-    let mut profiles: Vec<TomlProfile> = Vec::new();
-    for path in paths {
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let format = format_of(&path).expect("filtered above");
-        let Ok(text) = fs::read_to_string(&path) else {
-            eprintln!("WARNING skipping unreadable profile {}", path.display());
-            continue;
-        };
-        match monitor_profiles::legacy::to_profile(&name, &text) {
-            Ok((inner, warnings)) => {
-                for w in warnings {
-                    eprintln!("WARNING {}: {w}", path.display());
-                }
-                // .conf sorts before .lua per stem, so a same-stem .lua
-                // simply displaces its .conf twin here.
-                let profile = TomlProfile { inner, format };
-                if let Some(prev) = profiles
-                    .iter_mut()
-                    .find(|p| p.name == profile.name && p.format != profile.format)
-                {
-                    *prev = profile;
-                } else {
-                    profiles.push(profile);
-                }
-            }
-            Err(e) => eprintln!("WARNING skipping malformed profile {}: {e}", path.display()),
-        }
-    }
-    profiles
+    rd.flatten().any(|e| {
+        let p = e.path();
+        format_of(&p).is_some()
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| !n.starts_with('.'))
+    })
 }
 
 fn render_to_dir(dir: &Path, profile: &TomlProfile) -> std::io::Result<()> {
@@ -373,33 +344,26 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(".active.conf"), "#@ match = A\n").unwrap();
         fs::write(dir.join(".active.lua"), "--@ match = A\n").unwrap();
-        fs::write(dir.join("good.conf"), "#@ match = A\n").unwrap();
-        fs::write(dir.join("bad.conf"), "monitor = no directives\n").unwrap();
+        fs::write(dir.join("good.toml"), "match = [\"A\"]\n").unwrap();
+        fs::write(dir.join("bad.toml"), "no_matches_here = true\n").unwrap();
         fs::write(dir.join("notes.txt"), "ignored\n").unwrap();
         let profiles = load_profiles_from(&dir);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].name, "good");
-        assert_eq!(profiles[0].format, ProfileFormat::Conf);
         assert!(load_profiles_from(&dir.join("nope")).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Lua profiles load alongside .conf; a same-stem .lua displaces its
-    /// .conf twin (migration window), and pure-Lua profiles parse `--@`.
+    /// Legacy dialect files alone are not loaded; TOML is required.
     #[test]
-    fn test_load_profiles_lua_dialect_and_collision() {
+    fn test_load_profiles_ignores_legacy_only_dir() {
         let dir = std::env::temp_dir().join(format!("hyprstate-test-lua-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("twin.conf"), "#@ match = A\n#@ edp = enable\n").unwrap();
         fs::write(dir.join("twin.lua"), "--@ match = A\n--@ edp = disable\n").unwrap();
         fs::write(dir.join("solo.lua"), "--@ match = B\n").unwrap();
         let profiles = load_profiles_from(&dir);
-        assert_eq!(profiles.len(), 2);
-        let twin = profiles.iter().find(|p| p.name == "twin").unwrap();
-        assert_eq!(twin.format, ProfileFormat::Lua);
-        assert_eq!(twin.edp, crate::pure::profiles::EdpPolicy::Disable);
-        let solo = profiles.iter().find(|p| p.name == "solo").unwrap();
-        assert_eq!(solo.format, ProfileFormat::Lua);
+        assert!(profiles.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -416,14 +380,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_toml_set_falls_back_to_legacy() {
+    fn empty_toml_set_does_not_load_legacy() {
         let dir =
-            std::env::temp_dir().join(format!("hyprstate-test-fallback-{}", std::process::id()));
+            std::env::temp_dir().join(format!("hyprstate-test-nolegacy-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.conf"), "#@ match = legacy\n").unwrap();
         let profiles = load_profiles_from(&dir);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].matches, ["legacy"]);
+        assert!(profiles.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

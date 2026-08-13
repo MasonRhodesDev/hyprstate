@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.1.6
+Version:        2.1.7
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -110,6 +110,9 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Thu Aug 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.7-1
+- Ignore generated lua/conf when warning about unmigrated legacy.
+
 * Thu Aug 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.6-1
 - TOML-only profile sources; use monitor-profiles::to_toml (#18).
 

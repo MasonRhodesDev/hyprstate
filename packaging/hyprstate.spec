@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.1.4
+Version:        2.1.5
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -110,6 +110,9 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Thu Aug 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.5-1
+- Ship shared monitor-profiles integration (#13) and post-merge fixes to the reference machine.
+
 * Mon Aug 10 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.4-1
 - Lock detection now relies solely on logind LockedHint (locker-agnostic:
   vigil-lock, hyprlock, swaylock, ...). The old pgrep hyprlock check was dead

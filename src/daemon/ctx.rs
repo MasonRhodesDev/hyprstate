@@ -34,6 +34,8 @@ pub struct Context {
 
     // ---- monitor-profile sub-state ----
     pub current_profile: Option<String>,
+    /// Last applied profile body — same name with different TOML must re-apply.
+    pub active_profile_rev: Option<monitor_profiles::Profile>,
     pub edp_policy: EdpPolicy,
 
     // ---- gpu drift detection ----
@@ -86,6 +88,7 @@ impl Default for Context {
             profile_debounce: None,
             power_debounce: None,
             current_profile: None,
+            active_profile_rev: None,
             edp_policy: EdpPolicy::Auto,
             gpu_actual: None,
             gpu_actual_pending: true,

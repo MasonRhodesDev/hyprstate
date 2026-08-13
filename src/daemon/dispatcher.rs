@@ -207,11 +207,9 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
                 "PROFILE: no match for signature={sorted:?} (have {} profiles)",
                 profiles.len()
             );
+            ctx.active_profile_rev = None;
         }
-        Some(p) if ctx.current_profile.as_deref() != Some(p.name.as_str()) => {
-            fx.apply_profile(p, ctx);
-        }
-        Some(p) => debug!("PROFILE: signature change but {} still wins", p.name),
+        Some(p) => fx.apply_profile(p, ctx),
     }
     // Breadcrumb before drift check: "relog to apply" must be satisfiable
     // by one relog, so next-login select needs the same profile overlay the
@@ -481,6 +479,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             Event::MonitorsChanged => {
                 handle_monitors_changed(&mut ctx, &fx).await;
                 continue; // profile reconciliation does not feed the main FSM
+            }
+            Event::ProfilesChanged => {
+                info!("PROFILE: source directory changed — re-resolving");
+                fx.schedule_profile_reconcile(&mut ctx);
+                continue;
             }
 
             // ---- ctx updates that fall through to the FSMs ----

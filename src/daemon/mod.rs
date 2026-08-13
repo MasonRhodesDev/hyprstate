@@ -228,6 +228,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
             .find(|p| p.name == name)
         {
             ctx.edp_policy = p.edp;
+            ctx.active_profile_rev = Some(p.inner);
         }
         ctx.current_profile = Some(name);
     }

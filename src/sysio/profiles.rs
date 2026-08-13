@@ -44,6 +44,37 @@ pub fn load_profiles() -> Vec<TomlProfile> {
     load_profiles_merged(&paths::profiles_dir(), paths::system_profiles_dir())
 }
 
+/// Cheap change detector for the shared + user TOML dirs (poller input).
+/// Paths + mtime + length; content is compared after load via Profile Eq.
+pub fn profiles_source_fingerprint() -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    let user_dir = paths::profiles_dir();
+    for dir in [paths::system_profiles_dir(), user_dir.as_path()] {
+        dir.hash(&mut hasher);
+        let Ok(rd) = fs::read_dir(dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("toml"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            path.hash(&mut hasher);
+            if let Ok(meta) = fs::metadata(&path) {
+                meta.len().hash(&mut hasher);
+                if let Ok(modified) = meta.modified() {
+                    modified.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
 pub fn load_profiles_merged(user_dir: &Path, system_dir: &Path) -> Vec<TomlProfile> {
     let mut profiles = load_profiles_from(user_dir);
 

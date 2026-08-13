@@ -171,11 +171,13 @@ pub async fn inhibitor_poller(tx: mpsc::Sender<Event>, manager: LogindManagerPro
     }
 }
 
-/// Poll platform_profile + the gpu/power override files; queue on change.
+/// Poll platform_profile + the gpu/power override files + monitor-profile
+/// TOML dirs; queue on change.
 pub async fn mode_poller(tx: mpsc::Sender<Event>) {
     let mut last_platform = sysfs::read_first_word(paths::platform_profile_path());
     let mut last_gpu = sysfs::read_first_word(&paths::gpu_override_file());
     let mut last_power = sysfs::read_first_word(&paths::power_override_file());
+    let mut last_profiles = crate::sysio::profiles::profiles_source_fingerprint();
     loop {
         tokio::time::sleep(paths::INHIBIT_POLL).await;
         let cur = sysfs::read_first_word(paths::platform_profile_path());
@@ -196,6 +198,13 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
         if cur != last_power {
             last_power = cur.clone();
             if tx.send(Event::PowerOverrideChanged(cur)).await.is_err() {
+                return;
+            }
+        }
+        let cur = crate::sysio::profiles::profiles_source_fingerprint();
+        if cur != last_profiles {
+            last_profiles = cur;
+            if tx.send(Event::ProfilesChanged).await.is_err() {
                 return;
             }
         }

@@ -341,40 +341,54 @@ impl Effectors {
     // ---- monitor profiles ----
 
     /// Repoint the active-profile symlink, reload, fire hooks, update ctx.
-    /// Idempotent.
+    /// Idempotent on name+symlink **and** profile body — a TOML edit that
+    /// keeps the same name still forces a re-render reload (#19).
     pub fn apply_profile(&self, profile: &crate::sysio::profiles::TomlProfile, ctx: &mut Context) {
         let target =
             paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
         let link = paths::active_profile_link(profile.format);
-        let already = link.is_symlink()
-            && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok()
-            && ctx.current_profile.as_deref() == Some(profile.name.as_str());
-        if already {
+        let symlink_ok = link.is_symlink()
+            && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok();
+        let name_same = ctx.current_profile.as_deref() == Some(profile.name.as_str());
+        let body_same = ctx.active_profile_rev.as_ref() == Some(&profile.inner);
+        if symlink_ok && name_same && body_same {
             return;
         }
 
+        let reapply = name_same && !body_same;
         if self.shadow {
             info!(
-                "[shadow] PROFILE: {} -> {} (edp={}, hooks={}) — would repoint+reload",
+                "[shadow] PROFILE: {} -> {} (edp={}, hooks={}{}) — would repoint+reload",
                 ctx.current_profile.as_deref().unwrap_or("None"),
                 profile.name,
                 profile.edp.as_str(),
-                profile.hooks.len()
+                profile.hooks.len(),
+                if reapply { ", source changed" } else { "" }
             );
         } else {
             if let Err(e) = crate::sysio::profiles::repoint_active_profile(&target) {
                 warn!("apply_profile {}: symlink failed: {e}", profile.name);
                 return;
             }
-            info!(
-                "PROFILE: {} -> {} (edp={}, hooks={})",
-                ctx.current_profile.as_deref().unwrap_or("None"),
-                profile.name,
-                profile.edp.as_str(),
-                profile.hooks.len()
-            );
+            if reapply {
+                info!(
+                    "PROFILE: re-apply {} (source changed; edp={}, hooks={})",
+                    profile.name,
+                    profile.edp.as_str(),
+                    profile.hooks.len()
+                );
+            } else {
+                info!(
+                    "PROFILE: {} -> {} (edp={}, hooks={})",
+                    ctx.current_profile.as_deref().unwrap_or("None"),
+                    profile.name,
+                    profile.edp.as_str(),
+                    profile.hooks.len()
+                );
+            }
         }
         ctx.current_profile = Some(profile.name.clone());
+        ctx.active_profile_rev = Some(profile.inner.clone());
         ctx.edp_policy = profile.edp;
 
         if !self.shadow {
@@ -395,17 +409,16 @@ impl Effectors {
         if ctx.current_profile.as_deref() == Some(name.as_str()) {
             return false;
         }
-        let edp = crate::sysio::profiles::load_profiles()
-            .into_iter()
-            .find(|p| p.name == name)
-            .map(|p| p.edp)
-            .unwrap_or(EdpPolicy::Auto);
+        let profiles = crate::sysio::profiles::load_profiles();
+        let matched = profiles.into_iter().find(|p| p.name == name);
+        let edp = matched.as_ref().map(|p| p.edp).unwrap_or(EdpPolicy::Auto);
         info!(
             "PROFILE: ingested external switch {} -> {name} (edp={})",
             ctx.current_profile.as_deref().unwrap_or("None"),
             edp.as_str()
         );
         ctx.current_profile = Some(name);
+        ctx.active_profile_rev = matched.map(|p| p.inner);
         ctx.edp_policy = edp;
         true
     }

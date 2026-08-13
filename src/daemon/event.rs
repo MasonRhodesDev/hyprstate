@@ -14,6 +14,8 @@ pub enum Event {
     ConfigReloaded,
     /// Debounced monitor-set change -> profile/gpu/power reconciliation.
     MonitorsChanged,
+    /// `/etc/monitor-profiles` or the user profiles dir changed on disk.
+    ProfilesChanged,
     /// Inhibitor poller edge. wayland=false -> logind source.
     Inhibitor { wayland: bool, active: bool },
     /// LockedHint PropertiesChanged (also mirrored into the locked watch).
@@ -72,7 +74,7 @@ impl Event {
             Event::MonitorHotplug { added: true, .. } => EventKind::MonitorAdded,
             Event::MonitorHotplug { added: false, .. } => EventKind::MonitorRemoved,
             Event::ConfigReloaded => EventKind::Reconcile,
-            Event::MonitorsChanged => EventKind::MonitorsChanged,
+            Event::MonitorsChanged | Event::ProfilesChanged => EventKind::MonitorsChanged,
             Event::Inhibitor { active: true, .. } => EventKind::InhibitorOn,
             Event::Inhibitor { active: false, .. } => EventKind::InhibitorOff,
             Event::LockChanged(true) => EventKind::LockEngaged,
@@ -94,6 +96,9 @@ impl Event {
 
     /// v1 log label (EventKind value strings).
     pub fn label(&self) -> &'static str {
+        if matches!(self, Event::ProfilesChanged) {
+            return "ProfilesChanged";
+        }
         match self.kind() {
             EventKind::LidClose => "LidClose",
             EventKind::LidOpen => "LidOpen",

@@ -19,7 +19,7 @@ use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::power_policy::power_policy_check;
-use super::telemetry::{FrameCtx, TelemetryEmitter, build_frame};
+use super::telemetry::TelemetryEmitter;
 use crate::pure::fsm::{
     EventKind, ScreenState, State, StuckScreenInputs, desired_screen_state, desired_state,
     dpms_stuck_off, world_state,
@@ -138,22 +138,14 @@ async fn evaluate_fsms(
         on_enter(new, Entry::Fresh, ctx, fx).await;
 
         // Best-effort telemetry — never affects FSM behavior.
-        let frame = build_frame(
+        telem.emit_help(
+            ctx,
+            "transition",
+            label,
             from,
             new,
-            kind,
-            label,
-            ctx.screen_state,
-            FrameCtx {
-                lid_closed: ctx.lid_closed,
-                ext_mon_count: ctx.ext_mon_count,
-                inhibitor: ctx.inhibitor(),
-                locked: ctx.locked,
-                on_ac: ctx.on_ac,
-            },
             on_enter_effector_names(new),
         );
-        telem.emit(&frame);
     } else {
         debug!(
             "ignored: {label} in {} (ext_mon={}, inhibitor={}, locked={}, on_ac={})",
@@ -163,6 +155,8 @@ async fn evaluate_fsms(
             ctx.locked,
             ctx.on_ac,
         );
+        // Ctx may still have changed (e.g. inhibitor while already LID_OPEN).
+        telem.emit_help(ctx, "ctx", label, from, ctx.state, Vec::new());
     }
 
     if let Some(new) = desired_screen_state(ctx.state, ctx.screen_state, kind, &ctx.screen_inputs())
@@ -195,7 +189,7 @@ fn on_enter_effector_names(state: State) -> Vec<&'static str> {
 
 /// MONITORS_CHANGED branch: profile apply -> breadcrumb -> gpu drift ->
 /// power policy. Never feeds the main FSM.
-async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
+async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors, telem: &mut TelemetryEmitter) {
     let signature = hyprctl::monitor_signature().await;
     let profiles = load_profiles();
     let chosen = select_profile(&signature, &profiles);
@@ -234,6 +228,14 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors) {
     if edp_should_be_off && ctx.ext_mon_count > 0 {
         fx.rehome_edp_workspaces();
     }
+    telem.emit_help(
+        ctx,
+        "snapshot",
+        "MonitorsChanged",
+        ctx.state,
+        ctx.state,
+        Vec::new(),
+    );
 }
 
 /// Diff a reconciler snapshot against ctx; repair, route repairs back into
@@ -393,6 +395,15 @@ async fn handle_reconcile_tick(
             fx.dpms(true);
         }
     }
+
+    telem.emit_help(
+        ctx,
+        "snapshot",
+        "ReconcileTick",
+        ctx.state,
+        ctx.state,
+        Vec::new(),
+    );
 }
 
 pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors) {
@@ -407,6 +418,14 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         ctx.on_ac,
     );
     on_enter(ctx.state, Entry::Fresh, &mut ctx, &fx).await;
+    telem.emit_help(
+        &ctx,
+        "snapshot",
+        "Startup",
+        ctx.state,
+        ctx.state,
+        on_enter_effector_names(ctx.state),
+    );
 
     // Pre-evaluate the sub-FSM in case we start in LID_OPEN/DOCKED already
     // locked + inhibited.
@@ -477,7 +496,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 continue;
             }
             Event::MonitorsChanged => {
-                handle_monitors_changed(&mut ctx, &fx).await;
+                handle_monitors_changed(&mut ctx, &fx, &mut telem).await;
                 continue; // profile reconciliation does not feed the main FSM
             }
             Event::ProfilesChanged => {
@@ -601,6 +620,14 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 | EventKind::PowerAcSettled
         ) {
             power_policy_check(&mut ctx, &fx).await;
+            telem.emit_help(
+                &ctx,
+                "ctx",
+                label,
+                ctx.state,
+                ctx.state,
+                Vec::new(),
+            );
         }
 
         evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;

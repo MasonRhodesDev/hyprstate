@@ -108,20 +108,27 @@ pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> O
             return None;
         }
     };
-    for (who, _why, what, mode, _uid, _pid) in rows {
+    Some(logind_has_real_idle_block(&rows))
+}
+
+/// `rows` are Login1.ListInhibitors tuples: (what, who, why, mode, uid, pid).
+pub(crate) fn logind_has_real_idle_block(
+    rows: &[(String, String, String, String, u32, u32)],
+) -> bool {
+    for (what, who, _why, mode, _uid, _pid) in rows {
         if mode != "block" {
             continue;
         }
-        let cats: Vec<&str> = what.split(':').collect();
-        if !cats.contains(&"idle") && !cats.contains(&"sleep") {
+        let idle_or_sleep = what.split(':').any(|c| c == "idle" || c == "sleep");
+        if !idle_or_sleep {
             continue;
         }
         if paths::INHIBIT_BASELINE_WHO.contains(&who.as_str()) {
             continue;
         }
-        return Some(true);
+        return true;
     }
-    Some(false)
+    false
 }
 
 pub async fn inhibitor_poller(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
@@ -501,5 +508,33 @@ pub async fn powerd_name_watcher(tx: mpsc::Sender<Event>, conn: Connection) {
         {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::logind_has_real_idle_block;
+
+    fn row(what: &str, who: &str, mode: &str) -> (String, String, String, String, u32, u32) {
+        (what.into(), who.into(), "why".into(), mode.into(), 1000, 1)
+    }
+
+    #[test]
+    fn counts_logind_idle_control_block() {
+        let rows = [row("idle", "logind-idle-control", "block")];
+        assert!(logind_has_real_idle_block(&rows));
+    }
+
+    #[test]
+    fn ignores_hyprstate_baseline() {
+        let rows = [row("handle-lid-switch", "hyprstate", "block")];
+        assert!(!logind_has_real_idle_block(&rows));
+    }
+
+    #[test]
+    fn what_who_order_not_swapped() {
+        // Swapped fields would treat "idle" as who and miss the category check.
+        let rows = [row("idle", "firefox", "block")];
+        assert!(logind_has_real_idle_block(&rows));
     }
 }

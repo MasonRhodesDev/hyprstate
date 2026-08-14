@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.1.8
+Version:        2.2.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -110,6 +110,9 @@ fi
 %{_prefix}/lib/systemd/system-sleep/hyprstate
 
 %changelog
+* Fri Aug 14 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.0-1
+- Emit live Help telemetry and correctly detect idle inhibitors
+
 * Thu Aug 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.1.8-1
 - Hot-reload active profile when shared/user TOML changes (#19).
 

@@ -27,13 +27,14 @@ pub const POWER_AC_DEBOUNCE: Duration = Duration::from_secs(5);
 pub const GPU_NOTIFY_MIN: Duration = Duration::from_secs(60);
 
 /// logind inhibitor holders that do NOT count as "a real inhibitor is
-/// active" (baseline daemons + our own).
-pub const INHIBIT_BASELINE_WHO: [&str; 8] = [
+/// active" (baseline daemons + our own). Deliberately excludes
+/// `logind-idle-control` — that is the user's idle-inhibit toggle and must
+/// drive DEFERRED / Help like any other real idle block.
+pub const INHIBIT_BASELINE_WHO: [&str; 7] = [
     "ModemManager",
     "NetworkManager",
     "UPower",
     "hypridle",
-    "logind-idle-control",
     "hyprstate",
     "hypr-power", // transitional; predecessor name
     "hypr-fsm",   // transitional; earlier predecessor

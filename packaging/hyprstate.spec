@@ -65,7 +65,6 @@ install -Dpm0644 dist/org.hyprstate.Power1.conf %{buildroot}%{_datadir}/dbus-1/s
 install -Dpm0644 dist/org.hyprstate.Power1.service %{buildroot}%{_datadir}/dbus-1/system-services/org.hyprstate.Power1.service
 install -Dpm0644 dist/60-hyprstate-usb-wake.rules %{buildroot}%{_udevrulesdir}/60-hyprstate-usb-wake.rules
 install -Dpm0755 dist/sleep-hook-wrapper.sh %{buildroot}%{_prefix}/lib/systemd/system-sleep/hyprstate
-%dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 install -Dpm0644 dist/90-hyprstate.system.preset %{buildroot}%{_presetdir}/90-hyprstate.preset
 install -Dpm0644 dist/90-hyprstate.user.preset %{buildroot}%{_userpresetdir}/90-hyprstate.preset
 install -d -m2775 %{buildroot}%{_sysconfdir}/monitor-profiles
@@ -119,6 +118,7 @@ fi
 %{_datadir}/dbus-1/system-services/org.hyprstate.Power1.service
 %{_udevrulesdir}/60-hyprstate-usb-wake.rules
 %{_prefix}/lib/systemd/system-sleep/hyprstate
+%dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
 * Fri Aug 14 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.0-1

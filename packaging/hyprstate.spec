@@ -40,6 +40,15 @@ profiles/) and is not part of this package.
 # -a1 unpacks the vendor tarball (vendor/ at its root) into the source dir.
 %autosetup -p1 -a1
 %cargo_prep -v vendor
+# %%cargo_prep only redirects crates.io. Git pins are vendored in Source1
+# too; map them so the RPM build stays offline.
+cat >> .cargo/config.toml << 'EOF'
+
+[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=aef5f0e"]
+git = "https://github.com/MasonRhodesDev/monitor-profiles"
+rev = "aef5f0e"
+replace-with = "vendored-sources"
+EOF
 
 %build
 %cargo_build

@@ -24,7 +24,7 @@ optdepends=(
 # runtime; no pacman-level conflicts (parallel installs are fine, only one
 # may own platform_profile).
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP') # pin on release: updpkgsums
+sha256sums=('1fd33796892ee170487c85ecba0f93058b15a3fabb78a433ed3815e554e40b9e')
 
 prepare() {
   cd "$pkgname-$pkgver"

@@ -347,8 +347,8 @@ impl Effectors {
         let target =
             paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
         let link = paths::active_profile_link(profile.format);
-        let symlink_ok = link.is_symlink()
-            && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok();
+        let symlink_ok =
+            link.is_symlink() && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok();
         let name_same = ctx.current_profile.as_deref() == Some(profile.name.as_str());
         let body_same = ctx.active_profile_rev.as_ref() == Some(&profile.inner);
         if symlink_ok && name_same && body_same {

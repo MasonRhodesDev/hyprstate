@@ -642,14 +642,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 | EventKind::PowerAcSettled
         ) {
             power_policy_check(&mut ctx, &fx).await;
-            telem.emit_help(
-                &ctx,
-                "ctx",
-                label,
-                ctx.state,
-                ctx.state,
-                Vec::new(),
-            );
+            telem.emit_help(&ctx, "ctx", label, ctx.state, ctx.state, Vec::new());
         }
 
         evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;

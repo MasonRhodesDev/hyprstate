@@ -37,20 +37,23 @@ pub enum Entry {
     Reassert,
 }
 
-async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors) {
+async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors) -> bool {
     match state {
         State::LidOpen => {
             fx.cancel_grace_timer(ctx);
             fx.set_edp(true, ctx);
+            true
         }
         State::Docked => {
             fx.cancel_grace_timer(ctx);
             fx.set_edp(false, ctx);
+            true
         }
         State::Deferred => {
             fx.cancel_grace_timer(ctx);
             fx.set_edp(false, ctx);
             fx.pause_media();
+            true
         }
         State::Countdown => {
             fx.set_edp(false, ctx);
@@ -58,28 +61,30 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
             // countdown — v1 silently reset the 30s window on every
             // configreloaded.
             fx.start_grace_timer(ctx, entry == Entry::Fresh);
+            true
         }
         State::Suspending => {
             fx.cancel_grace_timer(ctx);
-            suspending_tail(ctx, fx).await;
+            suspending_tail(ctx, fx).await
         }
     }
 }
 
-/// Lock-before-suspend: trigger lock, wait up to LOCK_WAIT, then suspend
-/// regardless.
-async fn suspending_tail(ctx: &mut Context, fx: &Effectors) {
+/// Lock-before-suspend: proceed only after positive lock confirmation.
+async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
     if !ctx.locked {
         fx.request_lock().await;
         if fx.wait_for_lock(ctx).await {
             info!("lock engaged; proceeding to suspend");
         } else {
-            warn!("lock did not engage in 2.0s — suspending anyway");
+            warn!("lock did not engage in 2.0s — aborting suspend");
+            return false;
         }
     } else {
         info!("already locked; proceeding to suspend");
     }
     fx.do_suspend().await;
+    true
 }
 
 async fn on_enter_screen(
@@ -134,8 +139,21 @@ async fn evaluate_fsms(
         && new != ctx.state
     {
         log_state_transition(ctx, ctx.state, new, label);
-        ctx.state = new;
-        on_enter(new, Entry::Fresh, ctx, fx).await;
+        let entered = if new == State::Suspending {
+            if on_enter(new, Entry::Fresh, ctx, fx).await {
+                ctx.state = new;
+                true
+            } else {
+                // The timer transition is rejected when lock readiness is
+                // unconfirmed. Stay in COUNTDOWN and re-arm a fresh grace
+                // period so a later attempt can retry safely.
+                fx.start_grace_timer(ctx, true);
+                false
+            }
+        } else {
+            ctx.state = new;
+            on_enter(new, Entry::Fresh, ctx, fx).await
+        };
 
         // Best-effort telemetry — never affects FSM behavior.
         telem.emit_help(
@@ -143,8 +161,12 @@ async fn evaluate_fsms(
             "transition",
             label,
             from,
-            new,
-            on_enter_effector_names(new),
+            ctx.state,
+            if entered {
+                on_enter_effector_names(new)
+            } else {
+                vec!["request_lock", "start_grace_timer"]
+            },
         );
     } else {
         debug!(
@@ -417,7 +439,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         ctx.locked,
         ctx.on_ac,
     );
-    on_enter(ctx.state, Entry::Fresh, &mut ctx, &fx).await;
+    let _ = on_enter(ctx.state, Entry::Fresh, &mut ctx, &fx).await;
     telem.emit_help(
         &ctx,
         "snapshot",
@@ -479,7 +501,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                         ctx.state.as_str(),
                         ctx.screen_state.as_str()
                     );
-                    on_enter(ctx.state, Entry::Reassert, &mut ctx, &fx).await;
+                    let _ = on_enter(ctx.state, Entry::Reassert, &mut ctx, &fx).await;
                     on_enter_screen(
                         ctx.screen_state,
                         ctx.screen_state,

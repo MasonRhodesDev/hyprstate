@@ -8,3 +8,8 @@ addFilter("spelling-error")
 # Source1 is the cargo-vendor tarball produced by build-srpm.sh, not a URL —
 # intentional (offline, reproducible RPM build).
 addFilter("invalid-url Source1")
+
+# Shared setgid directory so desktop users can edit layouts without root.
+# vigil ships the same path and attributes.
+addFilter("non-standard-dir-perm /etc/monitor-profiles")
+addFilter("non-standard-gid /etc/monitor-profiles")

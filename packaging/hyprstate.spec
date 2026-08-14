@@ -56,7 +56,9 @@ EOF
 %{cargo_license} > LICENSE.dependencies
 
 %install
-%cargo_install
+# %%cargo_install re-resolves without Cargo.lock; git pins then fail offline.
+# %%cargo_build already produced the rpm-profile binary.
+install -Dpm0755 target/rpm/hyprstate %{buildroot}%{_bindir}/hyprstate
 install -Dpm0644 dist/hyprstate.service %{buildroot}%{_userunitdir}/hyprstate.service
 install -Dpm0644 dist/hyprstate-powerd.service %{buildroot}%{_unitdir}/hyprstate-powerd.service
 install -Dpm0644 dist/org.hyprstate.Power1.conf %{buildroot}%{_datadir}/dbus-1/system.d/org.hyprstate.Power1.conf

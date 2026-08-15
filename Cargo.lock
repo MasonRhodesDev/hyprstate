@@ -352,9 +352,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hypr-ipc"
+version = "0.1.0"
+source = "git+https://github.com/MasonRhodesDev/hypr-ipc?rev=367c52d43cf497f754c08490909669e935797c6b#367c52d43cf497f754c08490909669e935797c6b"
+dependencies = [
+ "hypr-paths",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hypr-logind"
+version = "0.1.0"
+source = "git+https://github.com/MasonRhodesDev/hypr-logind?rev=52613e91531a8945c88690e1b91d5898113c3bd2#52613e91531a8945c88690e1b91d5898113c3bd2"
+dependencies = [
+ "libc",
+ "zbus",
+]
+
+[[package]]
 name = "hypr-paths"
 version = "0.1.0"
-source = "git+https://github.com/MasonRhodesDev/hypr-paths?rev=535cec729936310b480c99203c05b5900d2a7e71#535cec729936310b480c99203c05b5900d2a7e71"
+source = "git+https://github.com/MasonRhodesDev/hypr-paths?rev=3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c#3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c"
 
 [[package]]
 name = "hyprstate"
@@ -364,6 +383,8 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "hypr-ipc",
+ "hypr-logind",
  "hypr-paths",
  "hyprstate-fsm",
  "libc",

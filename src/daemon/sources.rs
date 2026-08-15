@@ -1,8 +1,6 @@
 //! Event source tasks. Each holds an mpsc Sender<Event> clone and never
 //! touches Context — the dispatcher owns it.
 
-use std::path::PathBuf;
-
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, watch};
@@ -11,57 +9,24 @@ use zbus::Connection;
 use zbus::proxy::CacheProperties;
 
 use super::event::{Event, ReconcileSnapshot};
-use crate::dbus::logind::{LogindManagerProxy, LogindSessionProxy};
 use crate::dbus::upower::{DISPLAY_DEVICE_PATH, UPowerDeviceProxy, UPowerProxy};
 use crate::paths;
 use crate::sysio::{hyprctl, hypridle_log, sysfs};
+use hypr_logind::{LogindManagerProxy, LogindSessionProxy};
 
 // =========================================================================
 // Hyprland socket2 reader
 // =========================================================================
 
-/// Resolve the socket2 path: env signature first; when that is stale (the
-/// compositor restarted under us), rescan $XDG_RUNTIME_DIR/hypr/*/ for a
-/// live Hyprland lock.
-fn socket2_path() -> Option<PathBuf> {
-    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
-    if let Some(sig) = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE") {
-        let candidate = runtime.join("hypr").join(&sig).join(".socket2.sock");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    // Rescan: any instance dir whose lock holds a live Hyprland PID.
-    let hypr = runtime.join("hypr");
-    for entry in std::fs::read_dir(&hypr).ok()?.flatten() {
-        let lock = entry.path().join("hyprland.lock");
-        let Ok(text) = std::fs::read_to_string(&lock) else {
-            continue;
-        };
-        let Some(pid) = text
-            .lines()
-            .next()
-            .and_then(|l| l.trim().parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        if comm.trim() == "Hyprland" {
-            let candidate = entry.path().join(".socket2.sock");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
     loop {
-        let Some(path) = socket2_path() else {
-            warn!("no Hyprland event socket found; retrying in 2s");
-            tokio::time::sleep(paths::INHIBIT_POLL).await;
-            continue;
+        let path = match hypr_ipc::socket2_path() {
+            Ok(path) => path,
+            Err(_) => {
+                warn!("no Hyprland event socket found; retrying in 2s");
+                tokio::time::sleep(hypr_ipc::RECONNECT).await;
+                continue;
+            }
         };
         match tokio::net::UnixStream::connect(&path).await {
             Ok(stream) => {
@@ -92,7 +57,7 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
             }
             Err(e) => warn!("hypr socket unavailable ({e}); retrying in 2s"),
         }
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
+        tokio::time::sleep(hypr_ipc::RECONNECT).await;
     }
 }
 
@@ -338,70 +303,21 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
     }
 }
 
-/// Resolve our graphical session: GetSessionByPID(0), falling back to
-/// ListSessions with v1's scoring (class=user +1, graphical type +2,
-/// active +4 / online +1). Returns a (cached, uncached) proxy pair:
-/// lock_watcher needs the cached one (property-change streams are fed from
-/// the cache), the reconciler needs the uncached one (fresh reads).
+/// Resolve our graphical session via hypr-logind. Returns a (cached,
+/// uncached) proxy pair: lock_watcher needs the cached one (property-change
+/// streams are fed from the cache), the reconciler needs the uncached one
+/// (fresh reads). Lid/suspend/LockedHint policy stays in this daemon.
 pub async fn resolve_session(
     conn: &Connection,
-    manager: &LogindManagerProxy<'static>,
 ) -> Option<(LogindSessionProxy<'static>, LogindSessionProxy<'static>)> {
-    let path = match manager.get_session_by_pid(0).await {
-        Ok(p) => Some(p),
+    let session = match hypr_logind::resolve_session(conn).await {
+        Ok(session) => session,
         Err(e) => {
-            warn!("GetSessionByPID(0) failed: {e} — falling back to ListSessions");
-            let sessions = match manager.list_sessions().await {
-                Ok(s) => s,
-                Err(e2) => {
-                    warn!("ListSessions fallback failed: {e2}");
-                    return None;
-                }
-            };
-            let uid = unsafe { libc::getuid() };
-            let mut best: Option<(i32, zbus::zvariant::OwnedObjectPath)> = None;
-            for (_id, suid, _user, _seat, path) in sessions {
-                if suid != uid {
-                    continue;
-                }
-                let Ok(proxy) = LogindSessionProxy::builder(conn)
-                    .path(path.clone())
-                    .ok()?
-                    .build()
-                    .await
-                else {
-                    continue;
-                };
-                let (Ok(state), Ok(class), Ok(stype)) = (
-                    proxy.state().await,
-                    proxy.class().await,
-                    proxy.session_type().await,
-                ) else {
-                    continue;
-                };
-                let mut score = 0;
-                if class == "user" {
-                    score += 1;
-                }
-                if matches!(stype.as_str(), "wayland" | "x11" | "mir") {
-                    score += 2;
-                }
-                if state == "active" {
-                    score += 4;
-                } else if state == "online" {
-                    score += 1;
-                }
-                if best.as_ref().is_none_or(|(s, _)| score > *s) {
-                    best = Some((score, path));
-                }
-            }
-            best.map(|(_, p)| p)
+            warn!("no logind session resolved ({e}) — lock detection via LockedHint disabled");
+            return None;
         }
     };
-    let Some(path) = path else {
-        warn!("no logind session resolved — lock detection via LockedHint disabled");
-        return None;
-    };
+    let path = session.path().clone();
     let cached = LogindSessionProxy::builder(conn)
         .path(path.clone())
         .ok()?

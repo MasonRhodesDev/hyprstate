@@ -18,7 +18,6 @@ use tracing::{debug, info, warn};
 
 use super::ctx::Context;
 use super::event::Event;
-use crate::dbus::logind::{LogindManagerProxy, LogindSessionProxy};
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
 use crate::pure::fsm::edp_may_disable;
@@ -27,6 +26,7 @@ use crate::pure::profiles::{
     EdpPolicy, GpuPref, ProfileFormat, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
+use hypr_logind::{LogindManagerProxy, LogindSessionProxy};
 
 /// Serialized subprocess effects (ordering between reload and keyword
 /// matters for eDP handling).

@@ -19,7 +19,6 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use zbus::proxy::CacheProperties;
 
-use crate::dbus::logind::LogindManagerProxy;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::dbus::upower::UPowerProxy;
 use crate::paths;
@@ -27,6 +26,7 @@ use crate::sysio::{hyprctl, hypridle_log, sysfs};
 use ctx::Context;
 use effectors::Effectors;
 use event::Event;
+use hypr_logind::{Inhibitor, LogindManagerProxy};
 
 /// Startup diagnostic only — the sleep hook owns the fix.
 fn log_wake_state() {
@@ -136,14 +136,14 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let _lid_inhibit_fd = if shadow {
         None
     } else {
-        match manager
-            .inhibit(
-                "handle-lid-switch",
-                "hyprstate",
-                "30s grace window with monitor/inhibitor cancellation",
-                "block",
-            )
-            .await
+        match Inhibitor::acquire(
+            &manager,
+            "handle-lid-switch",
+            "hyprstate",
+            "30s grace window with monitor/inhibitor cancellation",
+            "block",
+        )
+        .await
         {
             Ok(fd) => {
                 info!("acquired handle-lid-switch inhibitor");
@@ -159,7 +159,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     };
 
     // Session + UPower setup.
-    let (session, session_uncached) = match sources::resolve_session(&conn, &manager).await {
+    let (session, session_uncached) = match sources::resolve_session(&conn).await {
         Some((cached, uncached)) => (Some(cached), Some(uncached)),
         None => (None, None),
     };

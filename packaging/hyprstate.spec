@@ -49,9 +49,19 @@ git = "https://github.com/MasonRhodesDev/monitor-profiles"
 rev = "aef5f0e"
 replace-with = "vendored-sources"
 
-[source."git+https://github.com/MasonRhodesDev/hypr-paths?rev=535cec729936310b480c99203c05b5900d2a7e71"]
+[source."git+https://github.com/MasonRhodesDev/hypr-paths?rev=3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c"]
 git = "https://github.com/MasonRhodesDev/hypr-paths"
-rev = "535cec729936310b480c99203c05b5900d2a7e71"
+rev = "3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/MasonRhodesDev/hypr-logind?rev=52613e91531a8945c88690e1b91d5898113c3bd2"]
+git = "https://github.com/MasonRhodesDev/hypr-logind"
+rev = "52613e91531a8945c88690e1b91d5898113c3bd2"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/MasonRhodesDev/hypr-ipc?rev=367c52d43cf497f754c08490909669e935797c6b"]
+git = "https://github.com/MasonRhodesDev/hypr-ipc"
+rev = "367c52d43cf497f754c08490909669e935797c6b"
 replace-with = "vendored-sources"
 EOF
 

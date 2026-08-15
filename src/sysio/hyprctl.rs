@@ -1,14 +1,15 @@
 //! Async hyprctl wrappers for the daemon (tokio::process — a slow or hung
 //! hyprctl must never stall event dispatch; see the effector worker).
 
-use tokio::process::Command;
 use tracing::warn;
 
 pub const EDP_MONITOR: &str = "eDP-2";
 
 async fn hyprctl_json(args: &[&str]) -> Option<Vec<serde_json::Value>> {
-    let out = Command::new("hyprctl").args(args).output().await.ok()?;
-    serde_json::from_slice(&out.stdout).ok()
+    let value = hypr_ipc::hyprctl_json(args, hypr_ipc::HYPRCTL_TIMEOUT)
+        .await
+        .ok()?;
+    value.as_array().cloned()
 }
 
 /// One `hyprctl -j monitors` payload. The reconciler needs three different
@@ -69,28 +70,13 @@ pub async fn monitor_signature() -> Vec<String> {
 /// rejected under the Lua config replies "keyword can't work with non-legacy
 /// parsers. Use eval." with exit 0). Success is exactly `ok` on stdout.
 pub async fn hyprctl_ok(args: &[&str]) -> bool {
-    let out = match Command::new("hyprctl").args(args).output().await {
-        Ok(out) => out,
+    match hypr_ipc::hyprctl_ok(args, hypr_ipc::HYPRCTL_TIMEOUT).await {
+        Ok(()) => true,
         Err(e) => {
-            warn!("hyprctl failed to spawn: {args:?}: {e}");
-            return false;
+            warn!("hyprctl {args:?} failed: {e}");
+            false
         }
-    };
-    let reply = String::from_utf8_lossy(&out.stdout);
-    let reply = reply.trim();
-    if !out.status.success() || reply != "ok" {
-        warn!(
-            "hyprctl {args:?} failed (rc={:?}): {}",
-            out.status.code(),
-            if reply.is_empty() {
-                String::from_utf8_lossy(&out.stderr).trim().to_string()
-            } else {
-                reply.to_string()
-            }
-        );
-        return false;
     }
-    true
 }
 
 /// Whether the eDP panel is disabled; None when undeterminable.
@@ -126,7 +112,9 @@ pub fn any_enabled_monitor_dpms_off_in(monitors: &[serde_json::Value]) -> bool {
 /// undeterminable. Complements logind LockedHint: a stuck hint with no
 /// compositor lock means the locker is dead.
 pub async fn session_is_locked() -> Option<bool> {
-    let out = Command::new("hyprctl").arg("locked").output().await.ok()?;
+    let out = hypr_ipc::hyprctl_output(&["locked"], hypr_ipc::HYPRCTL_TIMEOUT)
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -141,9 +129,7 @@ pub async fn session_is_locked() -> Option<bool> {
 /// outputs are DPMS off — input keeps flowing to the compositor even when
 /// nothing is lit, which is what makes this a usable presence signal.
 pub async fn cursor_pos() -> Option<(i64, i64)> {
-    let out = Command::new("hyprctl")
-        .args(["-j", "cursorpos"])
-        .output()
+    let out = hypr_ipc::hyprctl_output(&["-j", "cursorpos"], hypr_ipc::HYPRCTL_TIMEOUT)
         .await
         .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;

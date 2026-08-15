@@ -19,9 +19,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tracing::{info, warn};
 use zbus::object_server::SignalEmitter;
 
-use crate::dbus::logind::LogindManagerProxy;
 use crate::paths;
 use crate::pure::power::PowerProfile;
+use hypr_logind::LogindManagerProxy;
 
 #[derive(zbus::DBusError, Debug)]
 #[zbus(prefix = "org.hyprstate.Power1")]

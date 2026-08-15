@@ -40,16 +40,12 @@ pub const INHIBIT_BASELINE_WHO: [&str; 7] = [
     "hypr-fsm",   // transitional; earlier predecessor
 ];
 
-fn home() -> PathBuf {
-    std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
-}
-
 /// Hypr config tree: `$XDG_CONFIG_HOME/hypr` if set, else `$HOME/.config/hypr`.
 fn hypr_config(file: &str) -> PathBuf {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"));
-    config_home.join("hypr").join(file)
+    match hypr_paths::ConfigDirs::from_env() {
+        Ok(dirs) => dirs.config_dir("hypr").join(file),
+        Err(_) => PathBuf::new(),
+    }
 }
 
 /// Runtime user state (deliberately not chezmoi-managed): manual GPU mode
@@ -66,9 +62,10 @@ pub fn gpu_breadcrumb_file() -> PathBuf {
 }
 
 fn xdg_runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+    match hypr_paths::BaseDirs::from_env() {
+        Ok(dirs) => dirs.runtime_dir().to_path_buf(),
+        Err(_) => PathBuf::new(),
+    }
 }
 
 /// Contract between `gpu select` (run by uwsm pre-compositor) and the

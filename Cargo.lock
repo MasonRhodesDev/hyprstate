@@ -352,6 +352,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hypr-paths"
+version = "0.1.0"
+source = "git+https://github.com/MasonRhodesDev/hypr-paths?rev=535cec729936310b480c99203c05b5900d2a7e71#535cec729936310b480c99203c05b5900d2a7e71"
+
+[[package]]
 name = "hyprstate"
 version = "2.2.0"
 dependencies = [
@@ -359,6 +364,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "hypr-paths",
  "hyprstate-fsm",
  "libc",
  "monitor-profiles",

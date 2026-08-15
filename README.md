@@ -9,7 +9,7 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 - **Monitor profiles.** Auto-applies a profile based on the set of currently-connected monitors. Profiles are neutral TOML ([monitor-profiles](https://github.com/MasonRhodesDev/monitor-profiles)) read from `~/.config/hypr/profiles/` and the shared `/etc/monitor-profiles/`, with the Hyprland config rendered from them. Legacy `.conf`/`.lua` profiles still load; `hyprstate profile migrate` converts them.
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
 - **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
-- **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for `LockedHint=true`.
+- **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for a live locker (`LockedHint` plus compositor session lock). A stuck `LockedHint` aborts suspend.
 - **DPMS-off when locked + inhibitor.** With an active screen (`LID_OPEN` or `DOCKED`) and the session locked (any locker setting `LockedHint`) while an inhibitor is held, screens DPMS-off after 30s. Reverses on unlock or inhibitor release.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
 
@@ -180,4 +180,4 @@ sudo tail -f /var/log/hyprstate-sleep.log       # sleep hook log
 
 ## Dependencies
 
-System: `hyprctl`, `playerctl`, any screen locker that sets logind's `LockedHint` (vigil-lock, hyprlock, swaylock, …) — hyprstate reads `LockedHint` exclusively and never checks for a locker process — and `hypridle` (wayland-inhibitor log polling). Build: `cargo` / `rustc`.
+System: `hyprctl`, `playerctl`, any screen locker that sets logind's `LockedHint` and holds ext-session-lock-v1 (vigil-lock, hyprlock, swaylock, …) — hyprstate requires both `LockedHint` and `hyprctl locked` before suspend — and `hypridle` (wayland-inhibitor journal). Build: `cargo` / `rustc`.

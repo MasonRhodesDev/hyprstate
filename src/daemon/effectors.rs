@@ -682,10 +682,24 @@ impl Effectors {
         }
     }
 
+    /// Live locker: fresh logind LockedHint plus compositor session lock
+    /// (`hyprctl locked` / ext-session-lock-v1). LockedHint alone can stick
+    /// after vigil-lock dies; the compositor lock is the liveness proof.
+    pub async fn live_locker(&self) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        match session.locked_hint().await {
+            Ok(true) => matches!(hyprctl::session_is_locked().await, Some(true)),
+            _ => false,
+        }
+    }
+
     /// Wait for the lock to engage (watch channel fed by the LockedHint
-    /// subscription), up to LOCK_WAIT.
+    /// subscription), up to LOCK_WAIT. Does not treat a cached LockedHint
+    /// as proof of a live locker.
     pub async fn wait_for_lock(&self, ctx: &Context) -> bool {
-        if ctx.locked {
+        if ctx.locked && self.live_locker().await {
             return true;
         }
         let mut rx = self.locked_rx.clone();

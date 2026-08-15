@@ -150,8 +150,10 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
                 Some(fd)
             }
             Err(e) => {
-                warn!("could not take handle-lid-switch inhibitor: {e}");
-                None
+                return Err(anyhow::anyhow!(
+                    "handle-lid-switch inhibitor unavailable: {e}; \
+                     refusing to run (logind would suspend unlocked on lid close)"
+                ));
             }
         }
     };

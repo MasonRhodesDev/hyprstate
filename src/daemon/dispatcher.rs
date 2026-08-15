@@ -70,18 +70,19 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
     }
 }
 
-/// Lock-before-suspend: proceed only after positive lock confirmation.
+/// Lock-before-suspend: proceed only after a live locker is proven.
+/// A cached/stuck LockedHint is not proof; abort the same way as lock-timeout.
 async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
-    if !ctx.locked {
+    if fx.live_locker().await {
+        info!("already locked; proceeding to suspend");
+    } else {
         fx.request_lock().await;
-        if fx.wait_for_lock(ctx).await {
+        if fx.wait_for_lock(ctx).await && fx.live_locker().await {
             info!("lock engaged; proceeding to suspend");
         } else {
             warn!("lock did not engage in 2.0s — aborting suspend");
             return false;
         }
-    } else {
-        info!("already locked; proceeding to suspend");
     }
     fx.do_suspend().await;
     true

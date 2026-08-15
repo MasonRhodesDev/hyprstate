@@ -321,15 +321,20 @@ pub async fn lid_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'s
 }
 
 pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
-    let Ok(mut stream) = manager.receive_prepare_for_sleep().await else {
-        warn!("PrepareForSleep subscription failed");
-        return;
-    };
-    while let Some(signal) = stream.next().await {
-        let Ok(args) = signal.args() else { continue };
-        if !args.start && tx.send(Event::Resumed).await.is_err() {
-            return;
+    loop {
+        match manager.receive_prepare_for_sleep().await {
+            Ok(mut stream) => {
+                while let Some(signal) = stream.next().await {
+                    let Ok(args) = signal.args() else { continue };
+                    if !args.start && tx.send(Event::Resumed).await.is_err() {
+                        return;
+                    }
+                }
+                warn!("PrepareForSleep stream ended; resubscribing");
+            }
+            Err(e) => warn!("PrepareForSleep subscription failed: {e}; retrying"),
         }
+        tokio::time::sleep(paths::INHIBIT_POLL).await;
     }
 }
 

@@ -122,6 +122,21 @@ pub fn any_enabled_monitor_dpms_off_in(monitors: &[serde_json::Value]) -> bool {
     })
 }
 
+/// Whether Hyprland currently holds ext-session-lock-v1. None when
+/// undeterminable. Complements logind LockedHint: a stuck hint with no
+/// compositor lock means the locker is dead.
+pub async fn session_is_locked() -> Option<bool> {
+    let out = Command::new("hyprctl").arg("locked").output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// Current cursor position; None when undeterminable. Reads fine while the
 /// outputs are DPMS off — input keeps flowing to the compositor even when
 /// nothing is lit, which is what makes this a usable presence signal.

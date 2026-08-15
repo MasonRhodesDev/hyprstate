@@ -44,8 +44,12 @@ fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// Hypr config tree: `$XDG_CONFIG_HOME/hypr` if set, else `$HOME/.config/hypr`.
 fn hypr_config(file: &str) -> PathBuf {
-    home().join(".config/hypr").join(file)
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"));
+    config_home.join("hypr").join(file)
 }
 
 /// Runtime user state (deliberately not chezmoi-managed): manual GPU mode
@@ -61,13 +65,22 @@ pub fn gpu_breadcrumb_file() -> PathBuf {
     hypr_config("gpu-profile")
 }
 
+fn xdg_runtime_dir() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
 /// Contract between `gpu select` (run by uwsm pre-compositor) and the
 /// daemon's drift detection. Schema v1, see GPU_SPEC.md.
 pub fn gpu_state_path() -> PathBuf {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    runtime.join("hypr-gpu-primary.json")
+    xdg_runtime_dir().join("hypr-gpu-primary.json")
+}
+
+/// Help telemetry socket. Empty `XDG_RUNTIME_DIR` yields a relative path;
+/// the emitter then fails closed (no `/run/user/<uid>` or `/tmp` fallback).
+pub fn telemetry_sock_path() -> PathBuf {
+    xdg_runtime_dir().join("hyprstate-telemetry.sock")
 }
 
 pub fn platform_profile_path() -> &'static Path {

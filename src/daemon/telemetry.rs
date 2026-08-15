@@ -2,9 +2,9 @@
 //!
 //! After each relevant node/context change the daemon writes one
 //! newline-delimited JSON frame to `$XDG_RUNTIME_DIR/hyprstate-telemetry.sock`.
-//! The write is non-blocking and fire-and-forget: if no listener is connected
-//! or the socket doesn't exist, the frame is silently dropped. This module
-//! never affects FSM behavior.
+//! The daemon binds that socket; clients (hyprstate-gui) connect and read.
+//! The write is non-blocking and fire-and-forget: if no client is connected,
+//! the frame is silently dropped. This module never affects FSM behavior.
 //!
 //! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 1).
 //! v1 is an additive JSON object — unknown fields in a known version are
@@ -14,7 +14,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -98,17 +98,21 @@ impl FrameCtx {
     }
 }
 
-/// Persistent emitter handle. Holds a lazy connection to the socket.
+/// Persistent emitter handle. Binds the telemetry socket and writes to clients.
 pub struct TelemetryEmitter {
     sock_path: PathBuf,
+    listener: Option<UnixListener>,
     stream: Option<UnixStream>,
     last_fp: Option<u64>,
 }
 
 impl TelemetryEmitter {
     pub fn new() -> Self {
+        let sock_path = paths::telemetry_sock_path();
+        let listener = bind_listener(&sock_path);
         Self {
-            sock_path: paths::telemetry_sock_path(),
+            sock_path,
+            listener,
             stream: None,
             last_fp: None,
         }
@@ -146,22 +150,13 @@ impl TelemetryEmitter {
         };
         buf.push(b'\n');
 
-        // Try existing connection first, reconnect once on failure.
-        for attempt in 0..2 {
-            if attempt == 1 || self.stream.is_none() {
-                self.stream = connect_nonblocking(&self.sock_path);
-                if self.stream.is_none() {
-                    return false;
-                }
-            }
-            if let Some(ref mut s) = self.stream {
-                match s.write_all(&buf) {
-                    Ok(()) => return true,
-                    Err(_) => {
-                        self.stream = None;
-                        // Allow the same fingerprint to retry after reconnect.
-                        self.last_fp = None;
-                    }
+        self.accept_clients();
+        if let Some(ref mut s) = self.stream {
+            match s.write_all(&buf) {
+                Ok(()) => return true,
+                Err(_) => {
+                    self.stream = None;
+                    self.last_fp = None;
                 }
             }
         }
@@ -187,10 +182,33 @@ impl TelemetryEmitter {
             return;
         }
         // Only burn the fingerprint after a successful write so a later GUI
-        // bind still receives the current snapshot.
+        // connect still receives the current snapshot.
         if self.emit(frame) {
             self.last_fp = Some(fp);
         }
+    }
+
+    fn accept_clients(&mut self) {
+        let Some(listener) = self.listener.as_ref() else {
+            return;
+        };
+        loop {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    if s.set_nonblocking(true).is_ok() {
+                        self.stream = Some(s);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+impl Drop for TelemetryEmitter {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.sock_path);
     }
 }
 
@@ -201,11 +219,18 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn connect_nonblocking(path: &PathBuf) -> Option<UnixStream> {
-    let stream = UnixStream::connect(path).ok()?;
-    stream.set_nonblocking(true).ok()?;
-    debug!("telemetry: connected to {}", path.display());
-    Some(stream)
+fn bind_listener(path: &PathBuf) -> Option<UnixListener> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let _ = std::fs::remove_file(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let listener = UnixListener::bind(path).ok()?;
+    listener.set_nonblocking(true).ok()?;
+    debug!("telemetry: listening on {}", path.display());
+    Some(listener)
 }
 
 #[cfg(test)]

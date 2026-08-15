@@ -5,6 +5,12 @@
 //! The write is non-blocking and fire-and-forget: if no listener is connected
 //! or the socket doesn't exist, the frame is silently dropped. This module
 //! never affects FSM behavior.
+//!
+//! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 1).
+//! v1 is an additive JSON object — unknown fields in a known version are
+//! ignored. Consumers must skip frames whose `version` they do not understand
+//! rather than silently misparsing. Missing `XDG_RUNTIME_DIR` drops the frame
+//! (no `/run/user/<uid>` or `/tmp` fallback).
 
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -16,12 +22,18 @@ use serde::Serialize;
 use tracing::debug;
 
 use super::ctx::Context;
+use crate::paths;
 use crate::pure::fsm::State;
 use crate::pure::power::power_base_state;
+
+/// Current Help telemetry envelope version. Bump on breaking field changes.
+pub const TELEMETRY_VERSION: u32 = 1;
 
 /// A single telemetry frame for Help / observers.
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetryFrame {
+    /// Envelope version ([`TELEMETRY_VERSION`]). Consumers skip unknown majors.
+    pub version: u32,
     pub ts: u128,
     pub kind: &'static str,
     pub from: &'static str,
@@ -95,11 +107,8 @@ pub struct TelemetryEmitter {
 
 impl TelemetryEmitter {
     pub fn new() -> Self {
-        let runtime_dir =
-            std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-        let sock_path = PathBuf::from(runtime_dir).join("hyprstate-telemetry.sock");
         Self {
-            sock_path,
+            sock_path: paths::telemetry_sock_path(),
             stream: None,
             last_fp: None,
         }
@@ -116,6 +125,7 @@ impl TelemetryEmitter {
         effectors: Vec<&'static str>,
     ) {
         let frame = TelemetryFrame {
+            version: TELEMETRY_VERSION,
             ts: now_ms(),
             kind,
             from: from.as_str(),
@@ -205,6 +215,7 @@ mod tests {
     #[test]
     fn frame_serialization_roundtrip() {
         let frame = TelemetryFrame {
+            version: TELEMETRY_VERSION,
             ts: 1719100000000,
             kind: "transition",
             from: "LID_OPEN",
@@ -227,6 +238,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&frame).expect("serialize");
+        assert!(json.contains("\"version\":1"));
         assert!(json.contains("\"kind\":\"transition\""));
         assert!(json.contains("\"from\":\"LID_OPEN\""));
         assert!(json.contains("\"event\":\"LidClose\""));
@@ -239,6 +251,7 @@ mod tests {
         assert!(json.contains("\"effectors\":[\"start_grace_timer\"]"));
 
         let val: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(val["version"], 1);
         assert_eq!(val["ts"], 1719100000000u64);
         assert_eq!(val["kind"], "transition");
     }

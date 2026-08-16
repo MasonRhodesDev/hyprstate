@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   release:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/release.yml@a1b85c42addd5e876f301886f5c6ea9d1cc9b168
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/release.yml@cda4f4fa38fc8142439665f0e2d1946bc37ac595
     secrets: inherit
     with:
       spec-name: hyprstate
+      copr-project: hyprstate
       security: true

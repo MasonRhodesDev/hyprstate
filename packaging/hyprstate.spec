@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.2.2
+Version:        2.2.3
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,9 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.3-1
+- Name the COPR project so Fedora publishes on tag.
+
 * Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.2-1
 - Snapshot Arch sources on tag builds so the PKGBUILD checksum can match.
 

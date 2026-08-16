@@ -18,7 +18,8 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SPEC="$REPO/packaging/hyprstate.spec"
 SOURCES="${HOME}/rpmbuild/SOURCES"
-COPR_PROJECT="${COPR_PROJECT:-hyprstate}"
+NAME=hyprstate
+COPR_PROJECT="${COPR_PROJECT:-$NAME}"
 
 VER=$(sed -n 's/^Version:[[:space:]]*//p' "$SPEC")
 CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)

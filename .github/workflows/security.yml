@@ -14,4 +14,4 @@ concurrency:
 
 jobs:
   security:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/security.yml@a1b85c42addd5e876f301886f5c6ea9d1cc9b168
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/security.yml@cda4f4fa38fc8142439665f0e2d1946bc37ac595

@@ -11,9 +11,9 @@ concurrency:
 
 jobs:
   arch:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/arch-package.yml@a1b85c42addd5e876f301886f5c6ea9d1cc9b168
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/arch-package.yml@cda4f4fa38fc8142439665f0e2d1946bc37ac595
 
   rpm:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rpm-check.yml@a1b85c42addd5e876f301886f5c6ea9d1cc9b168
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rpm-check.yml@cda4f4fa38fc8142439665f0e2d1946bc37ac595
     with:
       spec-name: hyprstate

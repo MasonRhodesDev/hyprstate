@@ -22,9 +22,9 @@ publish = false
 
 [dependencies]
 hyprstate-fsm = { path = "crates/hyprstate-fsm" }
-hypr-paths = { git = "https://github.com/MasonRhodesDev/hypr-paths", rev = "3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c" }
-hypr-logind = { git = "https://github.com/MasonRhodesDev/hypr-logind", rev = "52613e91531a8945c88690e1b91d5898113c3bd2" }
-hypr-ipc = { git = "https://github.com/MasonRhodesDev/hypr-ipc", rev = "367c52d43cf497f754c08490909669e935797c6b" }
+hypr-paths = "0.1.0"
+hypr-logind = "0.1.0"
+hypr-ipc = "0.1.0"
 monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles", rev = "aef5f0e", features = ["hyprland-render"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

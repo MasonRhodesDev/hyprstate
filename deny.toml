@@ -41,7 +41,4 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/MasonRhodesDev/monitor-profiles",
-    "https://github.com/MasonRhodesDev/hypr-paths",
-    "https://github.com/MasonRhodesDev/hypr-logind",
-    "https://github.com/MasonRhodesDev/hypr-ipc",
 ]

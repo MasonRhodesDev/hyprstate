@@ -44,24 +44,9 @@ profiles/) and is not part of this package.
 # too; map them so the RPM build stays offline.
 cat >> .cargo/config.toml << 'EOF'
 
-[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=aef5f0e"]
+[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=aef5f0e#aef5f0e76afa78171a01c65ebc88d2dd7626d80d"]
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
 rev = "aef5f0e"
-replace-with = "vendored-sources"
-
-[source."git+https://github.com/MasonRhodesDev/hypr-paths?rev=3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c"]
-git = "https://github.com/MasonRhodesDev/hypr-paths"
-rev = "3fb776c9b63bd168c9e937e4d295e41d0f5b6b5c"
-replace-with = "vendored-sources"
-
-[source."git+https://github.com/MasonRhodesDev/hypr-logind?rev=52613e91531a8945c88690e1b91d5898113c3bd2"]
-git = "https://github.com/MasonRhodesDev/hypr-logind"
-rev = "52613e91531a8945c88690e1b91d5898113c3bd2"
-replace-with = "vendored-sources"
-
-[source."git+https://github.com/MasonRhodesDev/hypr-ipc?rev=367c52d43cf497f754c08490909669e935797c6b"]
-git = "https://github.com/MasonRhodesDev/hypr-ipc"
-rev = "367c52d43cf497f754c08490909669e935797c6b"
 replace-with = "vendored-sources"
 EOF
 

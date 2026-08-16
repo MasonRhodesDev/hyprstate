@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.2.1
+Version:        2.2.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,9 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.2-1
+- Snapshot Arch sources on tag builds so the PKGBUILD checksum can match.
+
 * Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.1-1
 - Pin hypr-paths, hypr-logind, and hypr-ipc to crates.io 0.1.0.
 - Map monitor-profiles to the Cargo.lock git URL so COPR stays offline.

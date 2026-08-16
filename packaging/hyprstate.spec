@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.2.0
+Version:        2.2.1
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,10 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.1-1
+- Pin hypr-paths, hypr-logind, and hypr-ipc to crates.io 0.1.0.
+- Map monitor-profiles to the Cargo.lock git URL so COPR stays offline.
+
 * Fri Aug 14 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.0-1
 - Emit live Help telemetry and correctly detect idle inhibitors
 

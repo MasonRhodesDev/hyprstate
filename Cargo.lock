@@ -380,7 +380,7 @@ checksum = "a2b57d35d5a9d1fe4892d499fca8fb64f331cf0a2618ca38b1fc32fdfef9f6ed"
 
 [[package]]
 name = "hyprstate"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "anyhow",
  "chrono",

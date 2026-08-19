@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.2.3
+Version:        2.2.4
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -44,9 +44,9 @@ profiles/) and is not part of this package.
 # too; map them so the RPM build stays offline.
 cat >> .cargo/config.toml << 'EOF'
 
-[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=aef5f0e#aef5f0e76afa78171a01c65ebc88d2dd7626d80d"]
+[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=64d5d1e#64d5d1ed079582a2014ebf23c403a3ca03ee9c64"]
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
-rev = "aef5f0e"
+rev = "64d5d1e"
 replace-with = "vendored-sources"
 EOF
 
@@ -121,6 +121,10 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Wed Aug 19 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.4-1
+- Share canonical monitor identity and profile selection with the desktop stack.
+- Parse one typed Hyprland monitor snapshot per reconciliation cycle.
+
 * Sun Aug 16 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.3-1
 - Name the COPR project so Fedora publishes on tag.
 

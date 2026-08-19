@@ -142,19 +142,15 @@ pub fn parse_profile(
 /// starts with the directive's value. The `desc:` prefix (Hyprland syntax)
 /// is stripped so users can paste rules from monitors.conf verbatim.
 pub fn match_in_signature(m: &str, signature: &[String]) -> bool {
-    let needle = m.strip_prefix("desc:").unwrap_or(m).trim();
-    signature.iter().any(|desc| desc.starts_with(needle))
+    monitor_profiles::match_in_signature(m, signature)
 }
 
 /// Pure: pick the profile whose match set is a subset of `signature`,
 /// breaking ties by (priority, match count, name) — all descending via max.
 pub fn select_profile<'a>(signature: &[String], profiles: &'a [Profile]) -> Option<&'a Profile> {
-    profiles
-        .iter()
-        .filter(|p| p.matches.iter().all(|m| match_in_signature(m, signature)))
-        .max_by(|a, b| {
-            (a.priority, a.matches.len(), &a.name).cmp(&(b.priority, b.matches.len(), &b.name))
-        })
+    monitor_profiles::select_by(signature, profiles, |p| {
+        (&p.matches, p.priority, p.name.as_str())
+    })
 }
 
 // =========================================================================

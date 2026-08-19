@@ -1,6 +1,7 @@
 //! Async hyprctl wrappers for the daemon (tokio::process — a slow or hung
 //! hyprctl must never stall event dispatch; see the effector worker).
 
+use serde::Deserialize;
 use tracing::warn;
 
 pub const EDP_MONITOR: &str = "eDP-2";
@@ -12,26 +13,40 @@ async fn hyprctl_json(args: &[&str]) -> Option<Vec<serde_json::Value>> {
     value.as_array().cloned()
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSnapshot {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default = "default_true")]
+    pub dpms_status: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// One `hyprctl -j monitors` payload. The reconciler needs three different
 /// facts from it every pass; fetching it once and deriving them is the
 /// difference between one subprocess per tick and three identical ones.
-pub async fn monitors() -> Option<Vec<serde_json::Value>> {
-    hyprctl_json(&["-j", "monitors"]).await
+pub async fn monitors() -> Option<Vec<MonitorSnapshot>> {
+    let value = hypr_ipc::hyprctl_json(&["-j", "monitors"], hypr_ipc::HYPRCTL_TIMEOUT)
+        .await
+        .ok()?;
+    serde_json::from_value(value).ok()
 }
 
 /// Connected non-eDP monitor count. Returns `prev` on hyprctl failure: a
 /// transient hyprctl error must not look like an undock (it would expire
 /// power overrides and flip profiles).
-pub fn ext_monitor_count_in(monitors: Option<&[serde_json::Value]>, prev: u32) -> u32 {
+pub fn ext_monitor_count_in(monitors: Option<&[MonitorSnapshot]>, prev: u32) -> u32 {
     match monitors {
         Some(monitors) => monitors
             .iter()
-            .filter(|m| {
-                !m.get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .starts_with("eDP")
-            })
+            .filter(|m| !m.name.starts_with("eDP"))
             .count() as u32,
         None => {
             warn!("ext_monitor_count failed (keeping {prev})");
@@ -46,16 +61,8 @@ pub async fn ext_monitor_count(prev: u32) -> u32 {
 
 /// Snapshot of currently-connected monitor descriptions.
 pub async fn monitor_signature() -> Vec<String> {
-    match hyprctl_json(&["-j", "monitors"]).await {
-        Some(monitors) => monitors
-            .iter()
-            .map(|m| {
-                m.get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            })
-            .collect(),
+    match monitors().await {
+        Some(monitors) => monitors.into_iter().map(|m| m.description).collect(),
         None => {
             warn!("monitor_signature failed");
             Vec::new()
@@ -80,32 +87,29 @@ pub async fn hyprctl_ok(args: &[&str]) -> bool {
 }
 
 /// Whether the eDP panel is disabled; None when undeterminable.
-pub fn edp_is_disabled_in(monitors: &[serde_json::Value]) -> Option<bool> {
+pub fn edp_is_disabled_in(monitors: &[MonitorSnapshot]) -> Option<bool> {
     monitors
         .iter()
-        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(EDP_MONITOR))
-        .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
+        .find(|m| m.name == EDP_MONITOR)
+        .map(|m| m.disabled)
 }
 
 pub async fn edp_is_disabled() -> Option<bool> {
-    let monitors = hyprctl_json(&["monitors", "all", "-j"]).await?;
+    let value = hypr_ipc::hyprctl_json(&["monitors", "all", "-j"], hypr_ipc::HYPRCTL_TIMEOUT)
+        .await
+        .ok()?;
+    let monitors: Vec<MonitorSnapshot> = serde_json::from_value(value).ok()?;
     monitors
         .iter()
-        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(EDP_MONITOR))
-        .map(|m| m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false))
+        .find(|m| m.name == EDP_MONITOR)
+        .map(|m| m.disabled)
 }
 
 /// Whether any ENABLED output is currently DPMS off; None when
 /// undeterminable. Disabled outputs are excluded: a disabled eDP reports
 /// dpmsStatus false forever and would look like a permanent blank.
-pub fn any_enabled_monitor_dpms_off_in(monitors: &[serde_json::Value]) -> bool {
-    monitors.iter().any(|m| {
-        !m.get("disabled").and_then(|d| d.as_bool()).unwrap_or(false)
-            && !m
-                .get("dpmsStatus")
-                .and_then(|d| d.as_bool())
-                .unwrap_or(true)
-    })
+pub fn any_enabled_monitor_dpms_off_in(monitors: &[MonitorSnapshot]) -> bool {
+    monitors.iter().any(|m| !m.disabled && !m.dpms_status)
 }
 
 /// Whether Hyprland currently holds ext-session-lock-v1. None when

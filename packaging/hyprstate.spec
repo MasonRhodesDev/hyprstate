@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.3.2
+Version:        2.3.3
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,14 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.3-1
+- Finish the Lua-only cut: only .active.lua is repointed (no stale .conf
+  twin), renders are always .lua, profile save no longer writes .conf,
+  and --format accepts only lua (kept for compatibility). Stale docs and
+  the 2.3.0 changelog claim about .conf readability corrected: profiles
+  load from TOML only; a leftover .conf render is untouched and
+  `profile migrate` retires it.
+
 * Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.2-1
 - DIMMED policy reworked from review: per-output DPMS counts (a hotplugged
   panel lighting up next to blanked ones is re-asserted, not mistaken for a

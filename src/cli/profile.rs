@@ -15,9 +15,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::pure::profiles::{
-    EdpPolicy, GpuPref, ProfileFormat, render_profile, render_profile_lua,
-};
+use crate::pure::profiles::{EdpPolicy, GpuPref, ProfileFormat, render_profile_lua};
 use crate::sysio::profiles::{
     active_profile_name, load_profiles, monitor_signature, monitor_snapshot_all,
     repoint_active_profile, write_if_changed_atomic,
@@ -30,9 +28,6 @@ pub struct SaveOpts {
     pub priority: Option<i64>,
     pub force: bool,
     pub dry_run: bool,
-    /// None = Lua (the session is Lua-config only); `conf` remains for
-    /// exporting a hyprlang rendering to foreign setups.
-    pub format: Option<ProfileFormat>,
 }
 
 fn difference<T: PartialEq + Debug>(
@@ -236,10 +231,10 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 eprintln!("profile names are [A-Za-z0-9._-]+ and must not start with '.'");
                 return 2;
             }
-            // Lua-only ecosystem: saves default to the dialect the session
-            // actually reads (`.active.lua`); --format conf remains for
-            // exporting to foreign setups.
-            let format = save.format.unwrap_or(ProfileFormat::Lua);
+            // Lua-only ecosystem: the session reads `.active.lua`, so that
+            // is the only render written (`--format lua` is accepted for
+            // compatibility and is the default).
+            let format = ProfileFormat::Lua;
             let target = paths::profiles_dir().join(format!("{name}.toml"));
             if target.exists() && !save.force {
                 eprintln!("profile {name} already exists — use --force to overwrite");
@@ -247,12 +242,9 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
             }
             let monitors = monitor_snapshot_all();
             let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let render = match format {
-                ProfileFormat::Conf => render_profile,
-                ProfileFormat::Lua => render_profile_lua,
-            };
             let (text, warnings) =
-                match render(name, &date, &monitors, save.edp, save.gpu, save.priority) {
+                match render_profile_lua(name, &date, &monitors, save.edp, save.gpu, save.priority)
+                {
                     Ok(r) => r,
                     Err(e) => {
                         eprintln!("capture failed: {e}");
@@ -282,10 +274,7 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 return 1;
             }
             let rendered_target = target.with_extension(format.ext());
-            let (rendered, render_warnings) = match format {
-                ProfileFormat::Conf => monitor_profiles::render::render_conf(&profile),
-                ProfileFormat::Lua => monitor_profiles::render::render_lua(&profile),
-            };
+            let (rendered, render_warnings) = monitor_profiles::render::render_lua(&profile);
             for warning in render_warnings {
                 eprintln!("WARNING {warning}");
             }

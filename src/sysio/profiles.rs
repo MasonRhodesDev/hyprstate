@@ -1,5 +1,5 @@
-//! io side of monitor profiles: directory loader (.conf + .lua dialects),
-//! the .active.conf/.active.lua symlinks, and the hyprctl monitor signature
+//! io side of monitor profiles: the TOML directory loader, the `.active.lua`
+//! symlink (the session is Lua-only), and the hyprctl monitor signature
 //! (sync — CLI use; the daemon gets async variants in its own module).
 
 use std::fs;
@@ -31,9 +31,8 @@ pub fn config_dialect() -> ProfileFormat {
     ProfileFormat::Lua
 }
 
-/// Read every *.conf and *.lua in the profiles dir (excluding the
-/// `.active.*` symlinks and any leading-dot file). When a stem exists in
-/// both dialects (the migration window), the .lua profile wins. Malformed
+/// Read every *.toml in the profiles dir (excluding any leading-dot file).
+/// Legacy .conf/.lua files are not profile sources any more. Malformed
 /// profiles are logged to stderr and skipped; parse warnings are logged but
 /// tolerated.
 pub fn load_profiles() -> Vec<TomlProfile> {
@@ -163,10 +162,9 @@ fn dir_has_legacy(dir: &Path) -> bool {
 }
 
 fn render_to_dir(dir: &Path, profile: &TomlProfile) -> std::io::Result<()> {
-    let (content, warnings) = match profile.format {
-        ProfileFormat::Conf => monitor_profiles::render::render_conf(profile),
-        ProfileFormat::Lua => monitor_profiles::render::render_lua(profile),
-    };
+    // Lua-only: a leftover `{name}.conf` from before the migration is never
+    // regenerated (nothing reads it); `profile migrate` retires it.
+    let (content, warnings) = monitor_profiles::render::render_lua(profile);
     for warning in warnings {
         eprintln!("WARNING {}: {warning}", profile.name);
     }
@@ -199,46 +197,29 @@ pub fn select_profile<'a>(
     profiles.iter().find(|p| p.name == selected.name)
 }
 
-/// Name (stem) of the profile the active symlink points at. `.active.lua`
-/// wins over a (possibly stale) `.active.conf` during the migration window.
+/// Name (stem) of the profile `.active.lua` points at.
 pub fn active_profile_name() -> Option<String> {
-    [ProfileFormat::Lua, ProfileFormat::Conf]
-        .into_iter()
-        .find_map(|fmt| {
-            let link = paths::active_profile_link(fmt);
-            if !link.is_symlink() {
-                return None;
-            }
-            fs::canonicalize(&link)
-                .ok()?
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-        })
+    let link = paths::active_profile_link(ProfileFormat::Lua);
+    if !link.is_symlink() {
+        return None;
+    }
+    fs::canonicalize(&link)
+        .ok()?
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
-/// Atomically repoint the active symlink of `target`'s dialect (tmp symlink,
-/// then rename). When the profile also exists in the OTHER dialect, that
-/// dialect's link is repointed too, so whichever config tree Hyprland is
-/// currently reading (.conf sources `.active.conf`; hyprland.lua dofiles
-/// `.active.lua`) always sees the switch — this is what keeps a manual or
-/// daemon-driven profile change working mid-migration.
+/// Atomically repoint `.active.lua` at `target` (tmp symlink, then rename).
+/// The session is Lua-only: hypr-DE's main.lua dofiles `.active.lua`, and a
+/// `.active.conf` twin would only ever point at a stale render nothing reads.
 pub fn repoint_active_profile(target: &Path) -> std::io::Result<()> {
-    let Some(format) = format_of(target) else {
-        return Err(std::io::Error::other(format!(
-            "profile target has no .conf/.lua extension: {}",
+    match format_of(target) {
+        Some(ProfileFormat::Lua) => repoint_link(target, ProfileFormat::Lua),
+        _ => Err(std::io::Error::other(format!(
+            "profile target is not a .lua render: {}",
             target.display()
-        )));
-    };
-    repoint_link(target, format)?;
-    let twin_format = match format {
-        ProfileFormat::Conf => ProfileFormat::Lua,
-        ProfileFormat::Lua => ProfileFormat::Conf,
-    };
-    let twin = target.with_extension(twin_format.ext());
-    if twin.exists() {
-        repoint_link(&twin, twin_format)?;
+        ))),
     }
-    Ok(())
 }
 
 fn repoint_link(target: &Path, format: ProfileFormat) -> std::io::Result<()> {
@@ -402,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn toml_displaces_legacy_twin() {
+    fn toml_renders_lua_and_leaves_legacy_conf_alone() {
         let dir = std::env::temp_dir().join(format!("hyprstate-test-toml-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.conf"), "#@ match = legacy\n").unwrap();
@@ -410,7 +391,23 @@ mod tests {
         let profiles = load_profiles_from(&dir);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].matches, ["toml"]);
+        // Lua-only: the TOML renders to a.lua; the stale conf is untouched.
+        assert!(
+            fs::read_to_string(dir.join("a.lua"))
+                .unwrap()
+                .contains("Do not edit")
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("a.conf")).unwrap(),
+            "#@ match = legacy\n"
+        );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn repoint_refuses_non_lua_targets() {
+        let err = repoint_active_profile(Path::new("/tmp/whatever.conf")).unwrap_err();
+        assert!(err.to_string().contains("not a .lua render"));
     }
 
     #[test]

@@ -62,6 +62,10 @@ pub enum EventKind {
     AcUnplugged,
     TimerExpired,
     ScreenTimerExpired,
+    /// Outputs observed DPMS-on while DIMMED: Hyprland woke them for input
+    /// (key_press/mouse_move_enables_dpms). The user wins; re-arm the dim
+    /// timer instead of re-blanking under their hands.
+    ScreenWoken,
     Resumed,
     Reconcile,
     MonitorsChanged,
@@ -147,6 +151,9 @@ pub fn desired_screen_state(
 
     if ev == EventKind::ScreenTimerExpired {
         return (screen == ScreenState::DimPending).then_some(ScreenState::Dimmed);
+    }
+    if ev == EventKind::ScreenWoken {
+        return (screen == ScreenState::Dimmed).then_some(ScreenState::DimPending);
     }
 
     let target = if !(s.locked && s.inhibitor) {
@@ -541,5 +548,47 @@ mod tests {
             ScreenState::DimPending,
             &stuck(true, true, true)
         ));
+    }
+    #[test]
+    fn user_wake_while_dimmed_rearms_the_timer() {
+        let s = ScreenInputs {
+            locked: true,
+            inhibitor: true,
+        };
+        assert_eq!(
+            desired_screen_state(
+                State::LidOpen,
+                ScreenState::Dimmed,
+                EventKind::ScreenWoken,
+                &s
+            ),
+            Some(ScreenState::DimPending)
+        );
+    }
+
+    #[test]
+    fn wake_outside_dimmed_is_ignored() {
+        let s = ScreenInputs {
+            locked: true,
+            inhibitor: true,
+        };
+        assert_eq!(
+            desired_screen_state(
+                State::LidOpen,
+                ScreenState::DimPending,
+                EventKind::ScreenWoken,
+                &s
+            ),
+            None
+        );
+        assert_eq!(
+            desired_screen_state(
+                State::LidOpen,
+                ScreenState::Active,
+                EventKind::ScreenWoken,
+                &s
+            ),
+            None
+        );
     }
 }

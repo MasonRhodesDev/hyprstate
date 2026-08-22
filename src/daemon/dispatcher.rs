@@ -14,6 +14,10 @@
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+/// How long after entering DIMMED an observed DPMS-on counts as a user wake
+/// rather than our own blank still landing.
+const DIMMED_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
 use super::ctx::Context;
 use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
@@ -110,6 +114,7 @@ async fn on_enter_screen(
         }
         ScreenState::Dimmed => {
             fx.cancel_screen_timer(ctx);
+            ctx.dimmed_at = Some(std::time::Instant::now());
             fx.dpms(false);
         }
     }
@@ -377,11 +382,29 @@ async fn handle_reconcile_tick(
         }
     }
 
-    // DPMS-DIMMED invariant: re-issue dpms off (idempotent).
+    // DIMMED: the blank is ours, but the user outranks it. Hyprland wakes
+    // outputs on input (key_press/mouse_move_enables_dpms); if we see them
+    // on after the blank had time to land, someone is at the keyboard —
+    // re-arm the dim timer instead of re-blanking every tick (that fight
+    // strobed the lock screen black while the password was being typed).
+    // Inside the settle window the off is re-asserted: hyprctl is async and
+    // a config reload can re-enable outputs underneath us.
     if ctx.screen_state == ScreenState::Dimmed {
-        fx.dpms(false);
-        // Nothing below can apply, and a stale cursor sample must not later
-        // read as movement when we come back out of DIMMED.
+        let settled = ctx
+            .dimmed_at
+            .is_some_and(|at| at.elapsed() >= DIMMED_SETTLE);
+        match snap.dpms_off {
+            Some(false) if settled => {
+                info!(
+                    "reconciler: outputs woke while DIMMED — user activity wins, re-arming dim timer"
+                );
+                fx.emit(Event::ScreenWoken);
+            }
+            Some(true) => {}
+            _ => fx.dpms(false),
+        }
+        // A stale cursor sample must not later read as movement when we
+        // come back out of DIMMED.
         ctx.last_cursor_pos = snap.cursor_pos;
         return;
     }
@@ -609,7 +632,10 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 }
                 ctx.on_ac_settled = ctx.on_ac;
             }
-            Event::TimerExpired | Event::ScreenTimerExpired | Event::Resumed => {}
+            Event::TimerExpired
+            | Event::ScreenTimerExpired
+            | Event::ScreenWoken
+            | Event::Resumed => {}
         }
 
         // Re-arm the brightness takeover guard on resume: panel raw values

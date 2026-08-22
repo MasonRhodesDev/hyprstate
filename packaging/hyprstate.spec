@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.3.0
+Version:        2.3.1
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,13 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.1-1
+- DIMMED no longer re-blanks outputs every reconcile tick. With working
+  Lua DPMS dispatch (2.3.0) that fought Hyprland's input wake
+  (key_press/mouse_move_enables_dpms) and strobed the lock screen while
+  the password was typed. A DPMS-on observation after a 3s settle now
+  counts as user activity (ScreenWoken) and re-arms the dim timer.
+
 * Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.0-1
 - Lua-only: Hyprland 0.56 removed classic string dispatchers and the
   legacy config parser; hyprctl argv (dpms, eDP disable, workspace

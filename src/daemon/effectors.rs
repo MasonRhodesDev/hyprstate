@@ -263,6 +263,11 @@ impl Effectors {
         });
     }
 
+    /// Queue an event from effect-side observation (reconciler findings).
+    pub fn emit(&self, event: Event) {
+        let _ = self.queue.try_send(event);
+    }
+
     // ---- timers ----
 
     fn spawn_timer(

@@ -29,6 +29,8 @@ pub enum Event {
     TimerExpired,
     /// Screen-DPMS timer fired.
     ScreenTimerExpired,
+    /// Reconciler saw enabled outputs DPMS-on while DIMMED (user woke them).
+    ScreenWoken,
     /// PrepareForSleep(false).
     Resumed,
     /// 5s reconciler world snapshot; the dispatcher diffs and repairs.
@@ -84,6 +86,7 @@ impl Event {
             Event::PowerAcSettled => EventKind::PowerAcSettled,
             Event::TimerExpired => EventKind::TimerExpired,
             Event::ScreenTimerExpired => EventKind::ScreenTimerExpired,
+            Event::ScreenWoken => EventKind::ScreenWoken,
             Event::Resumed => EventKind::Resumed,
             Event::ReconcileTick(_) => EventKind::CtxRepaired,
             Event::PlatformProfileChanged(_) => EventKind::PlatformProfileChanged,
@@ -112,6 +115,7 @@ impl Event {
             EventKind::AcUnplugged => "AcUnplugged",
             EventKind::TimerExpired => "TimerExpired",
             EventKind::ScreenTimerExpired => "ScreenTimerExpired",
+            EventKind::ScreenWoken => "ScreenWoken",
             EventKind::Resumed => "Resumed",
             EventKind::Reconcile => "Reconcile",
             EventKind::MonitorsChanged => "MonitorsChanged",

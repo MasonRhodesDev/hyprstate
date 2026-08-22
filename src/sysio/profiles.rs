@@ -23,16 +23,12 @@ impl Deref for TomlProfile {
     }
 }
 
+/// The ecosystem is Lua-config only (Hyprland 0.56 removed the legacy
+/// parser and hypr-DE's main.lua dofiles `.active.lua`). Rendering always
+/// targets Lua; the READ side still lists both dialects so pre-migration
+/// `.conf` profiles stay visible until re-saved.
 pub fn config_dialect() -> ProfileFormat {
-    #[cfg(test)]
-    return ProfileFormat::Conf;
-
-    #[cfg(not(test))]
-    if paths::hyprland_lua_config().exists() {
-        ProfileFormat::Lua
-    } else {
-        ProfileFormat::Conf
-    }
+    ProfileFormat::Lua
 }
 
 /// Read every *.conf and *.lua in the profiles dir (excluding the

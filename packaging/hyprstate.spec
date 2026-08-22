@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.2.4
+Version:        2.3.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,14 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.0-1
+- Lua-only: Hyprland 0.56 removed classic string dispatchers and the
+  legacy config parser; hyprctl argv (dpms, eDP disable, workspace
+  re-home) and profile rendering now always emit the Lua forms.
+  The fragile hyprland.lua-existence dialect detection is gone (it broke
+  DPMS the moment hypr-de-setup --adopt removed the home stub).
+- Existing .conf profiles stay readable; saving migrates them to .lua.
+
 * Wed Aug 19 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.2.4-1
 - Share canonical monitor identity and profile selection with the desktop stack.
 - Parse one typed Hyprland monitor snapshot per reconciliation cycle.

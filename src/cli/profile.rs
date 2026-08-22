@@ -237,13 +237,10 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 eprintln!("profile names are [A-Za-z0-9._-]+ and must not start with '.'");
                 return 2;
             }
-            let format = save.format.unwrap_or_else(|| {
-                if paths::hyprland_lua_config().exists() {
-                    ProfileFormat::Lua
-                } else {
-                    ProfileFormat::Conf
-                }
-            });
+            // Lua-only ecosystem: saves default to the dialect the session
+            // actually reads (`.active.lua`); --format conf remains for
+            // exporting to foreign setups.
+            let format = save.format.unwrap_or(ProfileFormat::Lua);
             let target = paths::profiles_dir().join(format!("{name}.toml"));
             if target.exists() && !save.force {
                 eprintln!("profile {name} already exists — use --force to overwrite");

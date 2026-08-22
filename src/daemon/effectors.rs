@@ -23,7 +23,7 @@ use crate::paths;
 use crate::pure::fsm::edp_may_disable;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
-    EdpPolicy, GpuPref, ProfileFormat, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
+    EdpPolicy, GpuPref, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
 use hypr_logind::{LogindManagerProxy, LogindSessionProxy};
@@ -80,7 +80,7 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                         continue;
                     }
                     info!("disabling {}", hyprctl::EDP_MONITOR);
-                    let args = edp_disable_args(config_dialect(), hyprctl::EDP_MONITOR);
+                    let args = edp_disable_args(hyprctl::EDP_MONITOR);
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     hyprctl::hyprctl_ok(&args).await;
                 }
@@ -89,7 +89,7 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 hyprctl::hyprctl_ok(&["reload"]).await;
             }
             Cmd::Dpms(on) => {
-                let args = dpms_args(config_dialect(), on);
+                let args = dpms_args(on);
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 hyprctl::hyprctl_ok(&args).await;
             }
@@ -103,13 +103,12 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                     // them put; a later dock change retries.
                     continue;
                 };
-                let dialect = config_dialect();
                 for ws in stranded {
                     info!(
                         "re-homing stranded workspace {ws}: {} -> {dest}",
                         hyprctl::EDP_MONITOR
                     );
-                    let args = move_workspace_to_monitor_args(dialect, ws, &dest);
+                    let args = move_workspace_to_monitor_args(ws, &dest);
                     let args: Vec<&str> = args.iter().map(String::as_str).collect();
                     hyprctl::hyprctl_ok(&args).await;
                 }
@@ -134,17 +133,6 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 }
             }
         }
-    }
-}
-
-/// The active Hyprland config dialect, resolved per-call with the same
-/// predicate as `profile save`: hyprland.lua's existence means the Lua
-/// parser owns the session (and `keyword`/string dispatchers are rejected).
-fn config_dialect() -> ProfileFormat {
-    if paths::hyprland_lua_config().exists() {
-        ProfileFormat::Lua
-    } else {
-        ProfileFormat::Conf
     }
 }
 

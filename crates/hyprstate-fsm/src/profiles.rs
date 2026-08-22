@@ -378,60 +378,38 @@ pub fn render_profile_lua(
 /// `keyword` outright ("Use eval.") — and with exit code 0 — so evaluate an
 /// `hl.monitor` rule instead; it replaces the rule for that output and
 /// applies within a frame. Either form is wiped by the next config reload.
-pub fn edp_disable_args(format: ProfileFormat, monitor: &str) -> Vec<String> {
-    match format {
-        ProfileFormat::Conf => vec![
-            "keyword".into(),
-            "monitor".into(),
-            format!("{monitor},disable"),
-        ],
-        ProfileFormat::Lua => vec![
-            "eval".into(),
-            format!("hl.monitor({{ output = \"{monitor}\", disabled = true }})"),
-        ],
-    }
+pub fn edp_disable_args(monitor: &str) -> Vec<String> {
+    vec![
+        "eval".into(),
+        format!("hl.monitor({{ output = \"{monitor}\", disabled = true }})"),
+    ]
 }
 
-/// hyprctl argv for a dpms flip, per config dialect. Under the Lua config
-/// `dispatch` evaluates its argument as `hl.dispatch(<text>)`, so the classic
-/// `dpms on/off` string form is a Lua syntax error there.
-pub fn dpms_args(format: ProfileFormat, on: bool) -> Vec<String> {
+/// hyprctl argv for a dpms flip. Hyprland 0.56 removed classic string
+/// dispatchers and hypr-DE is Lua-config only: `dispatch` evaluates its
+/// argument as `hl.dispatch(<text>)`, so the Lua call form is the only one
+/// that works.
+pub fn dpms_args(on: bool) -> Vec<String> {
     let action = if on { "on" } else { "off" };
-    match format {
-        ProfileFormat::Conf => vec!["dispatch".into(), "dpms".into(), action.into()],
-        ProfileFormat::Lua => vec![
-            "dispatch".into(),
-            format!("hl.dsp.dpms({{ action = \"{action}\" }})"),
-        ],
-    }
+    vec![
+        "dispatch".into(),
+        format!("hl.dsp.dpms({{ action = \"{action}\" }})"),
+    ]
 }
 
-/// hyprctl argv to move workspace `ws` onto `monitor`, per config dialect.
-/// Same `dispatch`-evaluates-Lua caveat as `dpms_args`: the classic
-/// `moveworkspacetomonitor <ws> <mon>` string form is a Lua syntax error
-/// under the Lua config, so emit the `hl.dsp.workspace.move` call there.
+/// hyprctl argv to move workspace `ws` onto `monitor`. Same Lua-only
+/// rationale as `dpms_args`.
 ///
 /// Used to repair workspaces Hyprland strands on the eDP: `CMonitor::
 /// onDisconnect` only evacuates workspaces to a monitor that was *enabled at
 /// the instant of disable* (BACKUPMON), and nothing retroactively re-homes
 /// them when an external returns — so an undock flap that briefly drops the
 /// external count to zero pins them to the disabled panel permanently.
-pub fn move_workspace_to_monitor_args(
-    format: ProfileFormat,
-    ws: i64,
-    monitor: &str,
-) -> Vec<String> {
-    match format {
-        ProfileFormat::Conf => vec![
-            "dispatch".into(),
-            "moveworkspacetomonitor".into(),
-            format!("{ws} {monitor}"),
-        ],
-        ProfileFormat::Lua => vec![
-            "dispatch".into(),
-            format!("hl.dsp.workspace.move({{ workspace = {ws}, monitor = \"{monitor}\" }})"),
-        ],
-    }
+pub fn move_workspace_to_monitor_args(ws: i64, monitor: &str) -> Vec<String> {
+    vec![
+        "dispatch".into(),
+        format!("hl.dsp.workspace.move({{ workspace = {ws}, monitor = \"{monitor}\" }})"),
+    ]
 }
 
 #[cfg(test)]
@@ -754,13 +732,9 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
     }
 
     #[test]
-    fn test_edp_disable_args_dialects() {
+    fn test_edp_disable_args_lua() {
         assert_eq!(
-            edp_disable_args(ProfileFormat::Conf, "eDP-2"),
-            ["keyword", "monitor", "eDP-2,disable"]
-        );
-        assert_eq!(
-            edp_disable_args(ProfileFormat::Lua, "eDP-2"),
+            edp_disable_args("eDP-2"),
             [
                 "eval",
                 "hl.monitor({ output = \"eDP-2\", disabled = true })"
@@ -769,33 +743,21 @@ monitor = eDP-2,3840x2160@165,6144x0,1.25
     }
 
     #[test]
-    fn test_dpms_args_dialects() {
+    fn test_dpms_args_lua() {
         assert_eq!(
-            dpms_args(ProfileFormat::Conf, true),
-            ["dispatch", "dpms", "on"]
-        );
-        assert_eq!(
-            dpms_args(ProfileFormat::Conf, false),
-            ["dispatch", "dpms", "off"]
-        );
-        assert_eq!(
-            dpms_args(ProfileFormat::Lua, true),
+            dpms_args(true),
             ["dispatch", "hl.dsp.dpms({ action = \"on\" })"]
         );
         assert_eq!(
-            dpms_args(ProfileFormat::Lua, false),
+            dpms_args(false),
             ["dispatch", "hl.dsp.dpms({ action = \"off\" })"]
         );
     }
 
     #[test]
-    fn test_move_workspace_to_monitor_args_dialects() {
+    fn test_move_workspace_to_monitor_args_lua() {
         assert_eq!(
-            move_workspace_to_monitor_args(ProfileFormat::Conf, 2, "DP-1"),
-            ["dispatch", "moveworkspacetomonitor", "2 DP-1"]
-        );
-        assert_eq!(
-            move_workspace_to_monitor_args(ProfileFormat::Lua, 2, "DP-1"),
+            move_workspace_to_monitor_args(2, "DP-1"),
             [
                 "dispatch",
                 "hl.dsp.workspace.move({ workspace = 2, monitor = \"DP-1\" })"

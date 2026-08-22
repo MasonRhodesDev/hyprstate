@@ -226,6 +226,7 @@ pub async fn reconcile_snapshot_task(
         let dpms_off = monitors
             .as_deref()
             .map(hyprctl::any_enabled_monitor_dpms_off_in);
+        let dpms_counts = monitors.as_deref().map(hyprctl::enabled_dpms_counts_in);
         // The cursor is only ever needed to decide whether a *dark* session
         // has a human in front of it. Asking for it while the screens are on
         // is a subprocess per tick, forever, to answer a question nobody
@@ -243,6 +244,7 @@ pub async fn reconcile_snapshot_task(
             on_ac,
             edp_disabled,
             dpms_off,
+            dpms_counts,
             cursor_pos,
         };
         if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {

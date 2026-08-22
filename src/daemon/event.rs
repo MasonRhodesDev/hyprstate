@@ -29,8 +29,11 @@ pub enum Event {
     TimerExpired,
     /// Screen-DPMS timer fired.
     ScreenTimerExpired,
-    /// Reconciler saw enabled outputs DPMS-on while DIMMED (user woke them).
+    /// Reconciler saw every enabled output DPMS-on while DIMMED (user woke them).
     ScreenWoken,
+    /// The effector worker finished a dpms dispatch (true = on). Anchors the
+    /// DIMMED settle window on the blank actually landing, not being queued.
+    DpmsApplied(bool),
     /// PrepareForSleep(false).
     Resumed,
     /// 5s reconciler world snapshot; the dispatcher diffs and repairs.
@@ -62,6 +65,8 @@ pub struct ReconcileSnapshot {
     pub edp_disabled: Option<bool>,
     /// Any enabled output reporting DPMS off (stuck-blank backstop).
     pub dpms_off: Option<bool>,
+    /// (enabled outputs, enabled outputs DPMS on); None when undeterminable.
+    pub dpms_counts: Option<(u32, u32)>,
     /// Cursor position this pass; the dispatcher diffs it against the
     /// previous one for a presence signal.
     pub cursor_pos: Option<(i64, i64)>,
@@ -87,6 +92,7 @@ impl Event {
             Event::TimerExpired => EventKind::TimerExpired,
             Event::ScreenTimerExpired => EventKind::ScreenTimerExpired,
             Event::ScreenWoken => EventKind::ScreenWoken,
+            Event::DpmsApplied(_) => EventKind::Reconcile,
             Event::Resumed => EventKind::Resumed,
             Event::ReconcileTick(_) => EventKind::CtxRepaired,
             Event::PlatformProfileChanged(_) => EventKind::PlatformProfileChanged,

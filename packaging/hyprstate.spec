@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.3.1
+Version:        2.3.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,16 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.2-1
+- DIMMED policy reworked from review: per-output DPMS counts (a hotplugged
+  panel lighting up next to blanked ones is re-asserted, not mistaken for a
+  user wake), settle window anchored on the blank actually landing
+  (DpmsApplied from the effector worker), a wake budget (2 per lock) so a
+  panel that ignores DPMS cannot loop the screen FSM, no re-blank on
+  config-reload reassert, shadow-gated observation events, and the verdict
+  moved into the pure FSM (dimmed_action) with tests.
+- Stale docs claiming hyprland.lua-existence dialect detection removed.
+
 * Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.1-1
 - DIMMED no longer re-blanks outputs every reconcile tick. With working
   Lua DPMS dispatch (2.3.0) that fought Hyprland's input wake

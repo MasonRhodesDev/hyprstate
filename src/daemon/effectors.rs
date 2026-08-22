@@ -54,7 +54,7 @@ pub enum Cmd {
     RunHook(String),
 }
 
-pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
+pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Event>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Cmd::SetEdp { on } => {
@@ -92,6 +92,7 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 let args = dpms_args(on);
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 hyprctl::hyprctl_ok(&args).await;
+                let _ = queue.try_send(Event::DpmsApplied(on));
             }
             Cmd::RehomeEdpWorkspaces => {
                 let stranded = hyprctl::workspaces_on_monitor(hyprctl::EDP_MONITOR).await;
@@ -264,8 +265,16 @@ impl Effectors {
     }
 
     /// Queue an event from effect-side observation (reconciler findings).
+    /// Shadow-gated like every other effect: a shadow daemon must not feed
+    /// conclusions about effects it never performed back into the FSM.
     pub fn emit(&self, event: Event) {
-        let _ = self.queue.try_send(event);
+        if self.shadow {
+            info!("[shadow] would emit {event:?}");
+            return;
+        }
+        if self.queue.try_send(event).is_err() {
+            warn!("dispatcher event queue full/closed — observation dropped");
+        }
     }
 
     // ---- timers ----

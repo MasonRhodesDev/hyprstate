@@ -87,7 +87,7 @@ enum Cmd {
         /// migrate: report conversions without writing TOML files
         #[arg(long)]
         dry_run: bool,
-        /// save: profile dialect (default: lua iff ~/.config/hypr/hyprland.lua exists)
+        /// save: profile dialect (default: lua; the session is Lua-config only)
         #[arg(long, value_parser = ["conf", "lua"])]
         format: Option<String>,
     },

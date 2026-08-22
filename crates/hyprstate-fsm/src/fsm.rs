@@ -168,6 +168,56 @@ pub fn desired_screen_state(
 }
 
 /// Inputs of the stuck-DPMS backstop (see `dpms_stuck_off`).
+/// What the reconciler should do about the outputs while the screen FSM is
+/// DIMMED. Pure so the one decision that can be wrong lives next to tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DimmedAction {
+    /// Blank landed (or nothing to act on): leave it.
+    Nothing,
+    /// Some enabled outputs are on while others are off (hotplug, partial
+    /// apply, re-enable): our blank, not the user — re-assert it.
+    Reassert,
+    /// Every enabled output is on after our blank provably landed: Hyprland
+    /// woke them for input. The user wins — re-arm the dim timer.
+    Wake,
+    /// A wake source keeps defeating the blank; stop fighting it.
+    GiveUp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DimmedInputs {
+    pub enabled_outputs: u32,
+    pub dpms_on_outputs: u32,
+    /// Our dpms-off command has landed AND the settle window has elapsed.
+    pub settled: bool,
+    /// Consecutive wakes since DIMMED was last entered from a lock edge.
+    pub wakes: u32,
+}
+
+/// Wakes tolerated per lock session before we assume the wake source is not a
+/// human (a panel that ignores DPMS, a client toggling DPMS) and stop
+/// re-blanking — an unbounded Dimmed/DimPending loop blinks panels all night.
+pub const MAX_DIMMED_WAKES: u32 = 2;
+
+pub fn dimmed_action(i: &DimmedInputs) -> DimmedAction {
+    if i.enabled_outputs == 0 || i.dpms_on_outputs == 0 {
+        return DimmedAction::Nothing;
+    }
+    if i.dpms_on_outputs < i.enabled_outputs {
+        return DimmedAction::Reassert;
+    }
+    if !i.settled {
+        // Our own blank may not have landed yet: never read it as a wake,
+        // and never pile a second dpms-off onto the effector queue.
+        return DimmedAction::Nothing;
+    }
+    if i.wakes >= MAX_DIMMED_WAKES {
+        DimmedAction::GiveUp
+    } else {
+        DimmedAction::Wake
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StuckScreenInputs {
     /// Reality: at least one ENABLED output reports DPMS off.
@@ -589,6 +639,48 @@ mod tests {
                 &s
             ),
             None
+        );
+    }
+    fn di(enabled: u32, on: u32, settled: bool, wakes: u32) -> DimmedInputs {
+        DimmedInputs {
+            enabled_outputs: enabled,
+            dpms_on_outputs: on,
+            settled,
+            wakes,
+        }
+    }
+
+    #[test]
+    fn dimmed_all_on_after_settle_is_a_user_wake() {
+        assert_eq!(dimmed_action(&di(2, 2, true, 0)), DimmedAction::Wake);
+    }
+
+    #[test]
+    fn dimmed_all_on_before_settle_is_our_blank_landing() {
+        assert_eq!(dimmed_action(&di(2, 2, false, 0)), DimmedAction::Nothing);
+    }
+
+    #[test]
+    fn dimmed_partial_lit_is_reasserted_not_a_wake() {
+        assert_eq!(dimmed_action(&di(2, 1, true, 0)), DimmedAction::Reassert);
+        assert_eq!(dimmed_action(&di(2, 1, false, 0)), DimmedAction::Reassert);
+    }
+
+    #[test]
+    fn dimmed_all_off_or_no_outputs_is_nothing() {
+        assert_eq!(dimmed_action(&di(2, 0, true, 0)), DimmedAction::Nothing);
+        assert_eq!(dimmed_action(&di(0, 0, true, 0)), DimmedAction::Nothing);
+    }
+
+    #[test]
+    fn dimmed_wake_budget_gives_up() {
+        assert_eq!(
+            dimmed_action(&di(1, 1, true, MAX_DIMMED_WAKES - 1)),
+            DimmedAction::Wake
+        );
+        assert_eq!(
+            dimmed_action(&di(1, 1, true, MAX_DIMMED_WAKES)),
+            DimmedAction::GiveUp
         );
     }
 }

@@ -259,7 +259,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let _ = locked_tx.send(ctx.locked);
 
     // Spawn everything; the dispatcher owns ctx from here.
-    tokio::spawn(effectors::effector_worker(worker_rx));
+    tokio::spawn(effectors::effector_worker(worker_rx, tx.clone()));
     tokio::spawn(sources::hypr_socket_reader(tx.clone()));
     tokio::spawn(sources::inhibitor_poller(tx.clone(), manager.clone()));
     tokio::spawn(sources::mode_poller(tx.clone()));

@@ -31,9 +31,13 @@ pub struct Context {
     /// Cursor position at the previous reconciler pass; a change is the
     /// presence signal for the stuck-DPMS backstop. None = not sampled yet.
     pub last_cursor_pos: Option<(i64, i64)>,
-    /// When DIMMED was entered; gates whether a DPMS-on observation is our
-    /// own blank still landing or the user waking the outputs.
-    pub dimmed_at: Option<std::time::Instant>,
+    /// When our dpms-off last LANDED (DpmsApplied) while DIMMED; None until
+    /// it has. Anchors the settle window that separates our own blank from
+    /// the user waking the outputs.
+    pub dimmed_blank_applied_at: Option<Instant>,
+    /// Wakes observed since DIMMED was last entered from a lock edge; the
+    /// budget that stops a non-human wake source looping the screen FSM.
+    pub dimmed_wakes: u32,
 
     // ---- monitor-profile sub-state ----
     pub current_profile: Option<String>,
@@ -88,7 +92,8 @@ impl Default for Context {
             grace_timer: None,
             screen_timer: None,
             last_cursor_pos: None,
-            dimmed_at: None,
+            dimmed_blank_applied_at: None,
+            dimmed_wakes: 0,
             profile_debounce: None,
             power_debounce: None,
             current_profile: None,

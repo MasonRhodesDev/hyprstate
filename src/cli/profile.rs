@@ -30,9 +30,8 @@ pub struct SaveOpts {
     pub priority: Option<i64>,
     pub force: bool,
     pub dry_run: bool,
-    /// None = auto: Lua iff ~/.config/hypr/hyprland.lua exists (i.e. the
-    /// machine's Hyprland config has migrated). Controls the *rendered*
-    /// dialect twin only — the source file is always `.toml`.
+    /// None = Lua (the session is Lua-config only); `conf` remains for
+    /// exporting a hyprlang rendering to foreign setups.
     pub format: Option<ProfileFormat>,
 }
 

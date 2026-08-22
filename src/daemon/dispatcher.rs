@@ -3,7 +3,7 @@
 //!
 //! Routing invariants ported from v1 (hyprstate.py dispatcher):
 //! - RECONCILE (configreloaded) re-asserts the current states only — it
-//!   never feeds desired_state — and ingests .active.conf first.
+//!   never feeds desired_state — and ingests the active profile link (.active.lua) first.
 //! - MONITORS_CHANGED: profile apply -> breadcrumb -> gpu drift -> dgpu
 //!   runtime-PM pin -> power policy -> continue (never feeds the main FSM).
 //! - gpu drift advice on AC/platform/gpu-override events happens in
@@ -14,9 +14,7 @@
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-/// How long after entering DIMMED an observed DPMS-on counts as a user wake
-/// rather than our own blank still landing.
-const DIMMED_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+use std::time::Instant;
 
 use super::ctx::Context;
 use super::effectors::Effectors;
@@ -24,6 +22,7 @@ use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::power_policy::power_policy_check;
 use super::telemetry::TelemetryEmitter;
+use crate::pure::fsm::{DimmedAction, DimmedInputs, MAX_DIMMED_WAKES, dimmed_action};
 use crate::pure::fsm::{
     EventKind, ScreenState, State, StuckScreenInputs, desired_screen_state, desired_state,
     dpms_stuck_off, world_state,
@@ -102,6 +101,10 @@ async fn on_enter_screen(
     match state {
         ScreenState::Active => {
             fx.cancel_screen_timer(ctx);
+            // A lock session ended (unlock / inhibitor off): the wake budget
+            // and blank anchor belong to the next one.
+            ctx.dimmed_wakes = 0;
+            ctx.dimmed_blank_applied_at = None;
             // Only wake screens when WE dimmed them (transition out of
             // DIMMED) — v1 fired dpms(on) on every config reload, fighting
             // hypridle's own idle DPMS.
@@ -114,8 +117,13 @@ async fn on_enter_screen(
         }
         ScreenState::Dimmed => {
             fx.cancel_screen_timer(ctx);
-            ctx.dimmed_at = Some(std::time::Instant::now());
-            fx.dpms(false);
+            // Blank on a fresh entry only. A config-reload re-assert must
+            // not re-blank a screen the user just woke; the reconciler's
+            // partial-lit check repairs anything a reload re-enabled.
+            if entry == Entry::Fresh {
+                ctx.dimmed_blank_applied_at = None;
+                fx.dpms(false);
+            }
         }
     }
 }
@@ -352,7 +360,7 @@ async fn handle_reconcile_tick(
         return;
     }
 
-    // Ingest any out-of-band .active.conf repoint before enforcing the eDP
+    // Ingest any out-of-band .active.lua repoint before enforcing the eDP
     // invariant — enforcing a stale edp_policy would fight a manual
     // `profile switch` every pass.
     fx.ingest_active_profile(ctx);
@@ -382,26 +390,49 @@ async fn handle_reconcile_tick(
         }
     }
 
-    // DIMMED: the blank is ours, but the user outranks it. Hyprland wakes
-    // outputs on input (key_press/mouse_move_enables_dpms); if we see them
-    // on after the blank had time to land, someone is at the keyboard —
-    // re-arm the dim timer instead of re-blanking every tick (that fight
-    // strobed the lock screen black while the password was being typed).
-    // Inside the settle window the off is re-asserted: hyprctl is async and
-    // a config reload can re-enable outputs underneath us.
+    // DIMMED: the blank is ours, but the user outranks it. The verdict is
+    // pure (hyprstate-fsm::dimmed_action): all enabled outputs on after our
+    // blank provably landed means Hyprland woke them for input, so re-arm
+    // the dim timer instead of re-blanking under the user's hands; a
+    // partially lit set (hotplug, re-enable) is re-asserted; a wake source
+    // that keeps winning is given up on rather than looped against.
     if ctx.screen_state == ScreenState::Dimmed {
-        let settled = ctx
-            .dimmed_at
-            .is_some_and(|at| at.elapsed() >= DIMMED_SETTLE);
-        match snap.dpms_off {
-            Some(false) if settled => {
-                info!(
-                    "reconciler: outputs woke while DIMMED — user activity wins, re-arming dim timer"
-                );
-                fx.emit(Event::ScreenWoken);
+        if let Some((enabled, on)) = snap.dpms_counts {
+            let settled = ctx
+                .dimmed_blank_applied_at
+                .is_some_and(|at| at.elapsed() >= crate::paths::DIMMED_SETTLE);
+            let inputs = DimmedInputs {
+                enabled_outputs: enabled,
+                dpms_on_outputs: on,
+                settled,
+                wakes: ctx.dimmed_wakes,
+            };
+            match dimmed_action(&inputs) {
+                DimmedAction::Nothing => {}
+                DimmedAction::Reassert => {
+                    info!(
+                        "reconciler: {on}/{enabled} outputs lit while DIMMED — re-asserting blank"
+                    );
+                    fx.dpms(false);
+                }
+                DimmedAction::Wake => {
+                    ctx.dimmed_wakes += 1;
+                    info!(
+                        "reconciler: outputs woke while DIMMED — user activity wins, re-arming dim timer (wake {}/{})",
+                        ctx.dimmed_wakes, MAX_DIMMED_WAKES
+                    );
+                    fx.emit(Event::ScreenWoken);
+                }
+                DimmedAction::GiveUp => {
+                    if ctx.dimmed_wakes == MAX_DIMMED_WAKES {
+                        ctx.dimmed_wakes += 1; // warn once
+                        warn!(
+                            "reconciler: outputs keep waking while DIMMED ({MAX_DIMMED_WAKES} times this lock) — \
+                             a wake source is defeating the blank; leaving outputs on until the next lock edge"
+                        );
+                    }
+                }
             }
-            Some(true) => {}
-            _ => fx.dpms(false),
         }
         // A stale cursor sample must not later read as movement when we
         // come back out of DIMMED.
@@ -631,6 +662,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     ctx.dgpu_pinned = None; // re-push the dgpu pin too
                 }
                 ctx.on_ac_settled = ctx.on_ac;
+            }
+            Event::DpmsApplied(on) => {
+                if ctx.screen_state == ScreenState::Dimmed {
+                    ctx.dimmed_blank_applied_at = if on { None } else { Some(Instant::now()) };
+                }
             }
             Event::TimerExpired
             | Event::ScreenTimerExpired

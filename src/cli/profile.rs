@@ -15,7 +15,7 @@ use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::pure::profiles::{EdpPolicy, GpuPref, ProfileFormat, render_profile_lua};
+use crate::pure::profiles::{EdpPolicy, GpuPref, render_profile_lua};
 use crate::sysio::profiles::{
     active_profile_name, load_profiles, monitor_signature, monitor_snapshot_all,
     repoint_active_profile, write_if_changed_atomic,
@@ -231,10 +231,6 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 eprintln!("profile names are [A-Za-z0-9._-]+ and must not start with '.'");
                 return 2;
             }
-            // Lua-only ecosystem: the session reads `.active.lua`, so that
-            // is the only render written (`--format lua` is accepted for
-            // compatibility and is the default).
-            let format = ProfileFormat::Lua;
             let target = paths::profiles_dir().join(format!("{name}.toml"));
             if target.exists() && !save.force {
                 eprintln!("profile {name} already exists — use --force to overwrite");
@@ -273,7 +269,7 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 eprintln!("write failed: {e}");
                 return 1;
             }
-            let rendered_target = target.with_extension(format.ext());
+            let rendered_target = target.with_extension("lua");
             let (rendered, render_warnings) = monitor_profiles::render::render_lua(&profile);
             for warning in render_warnings {
                 eprintln!("WARNING {warning}");
@@ -340,8 +336,7 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 );
                 return 1;
             };
-            let target =
-                paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
+            let target = paths::profiles_dir().join(format!("{}.lua", profile.name));
             if let Err(e) = repoint_active_profile(&target) {
                 eprintln!("symlink failed: {e}");
                 return 1;

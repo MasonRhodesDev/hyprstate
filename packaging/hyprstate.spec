@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.3.3
+Version:        2.4.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,12 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.4.0-1
+- Alpha cleanup: the hyprlang profile renderer, the per-profile dialect
+  field, and `profile save --format` are removed. Renders and the active
+  link are Lua only. ProfileFormat survives solely as the parse dialect of
+  legacy hand-written files for `profile migrate`.
+
 * Fri Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.3.3-1
 - Finish the Lua-only cut: only .active.lua is repointed (no stale .conf
   twin), renders are always .lua, profile save no longer writes .conf,

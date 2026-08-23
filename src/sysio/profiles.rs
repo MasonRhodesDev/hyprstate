@@ -7,12 +7,10 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use crate::paths;
-use crate::pure::profiles::ProfileFormat;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TomlProfile {
     pub inner: monitor_profiles::Profile,
-    pub format: ProfileFormat,
 }
 
 impl Deref for TomlProfile {
@@ -21,14 +19,6 @@ impl Deref for TomlProfile {
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
-}
-
-/// The ecosystem is Lua-config only (Hyprland 0.56 removed the legacy
-/// parser and hypr-DE's main.lua dofiles `.active.lua`). Rendering always
-/// targets Lua. Profiles are read from `*.toml` only; a leftover `.conf`
-/// render is never regenerated and `profile migrate` is the path off it.
-pub fn config_dialect() -> ProfileFormat {
-    ProfileFormat::Lua
 }
 
 /// Read every *.toml in the profiles dir (excluding any leading-dot file).
@@ -97,23 +87,21 @@ pub fn load_profiles_merged(user_dir: &Path, system_dir: &Path) -> Vec<TomlProfi
 pub fn load_toml_profiles_from(
     dir: &Path,
 ) -> (Vec<TomlProfile>, Vec<monitor_profiles::Diagnostic>) {
-    let format = config_dialect();
     let (profiles, diagnostics) = monitor_profiles::load_dir(dir);
     (
         profiles
             .into_iter()
-            .map(|inner| TomlProfile { inner, format })
+            .map(|inner| TomlProfile { inner })
             .collect(),
         diagnostics,
     )
 }
 
-fn format_of(path: &Path) -> Option<ProfileFormat> {
-    match path.extension()?.to_str()? {
-        "conf" => Some(ProfileFormat::Conf),
-        "lua" => Some(ProfileFormat::Lua),
-        _ => None,
-    }
+fn is_legacy_render(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("conf" | "lua")
+    )
 }
 
 pub fn load_profiles_from(dir: &Path) -> Vec<TomlProfile> {
@@ -147,7 +135,7 @@ fn dir_has_legacy(dir: &Path) -> bool {
     };
     rd.flatten().any(|e| {
         let p = e.path();
-        if format_of(&p).is_none() {
+        if !is_legacy_render(&p) {
             return false;
         }
         if p.file_name()
@@ -168,10 +156,7 @@ fn render_to_dir(dir: &Path, profile: &TomlProfile) -> std::io::Result<()> {
     for warning in warnings {
         eprintln!("WARNING {}: {warning}", profile.name);
     }
-    write_if_changed_atomic(
-        &dir.join(format!("{}.{}", profile.name, profile.format.ext())),
-        &content,
-    )
+    write_if_changed_atomic(&dir.join(format!("{}.lua", profile.name)), &content)
 }
 
 pub fn write_if_changed_atomic(path: &Path, content: &str) -> std::io::Result<()> {
@@ -199,7 +184,7 @@ pub fn select_profile<'a>(
 
 /// Name (stem) of the profile `.active.lua` points at.
 pub fn active_profile_name() -> Option<String> {
-    let link = paths::active_profile_link(ProfileFormat::Lua);
+    let link = paths::active_profile_link();
     if !link.is_symlink() {
         return None;
     }
@@ -213,21 +198,17 @@ pub fn active_profile_name() -> Option<String> {
 /// The session is Lua-only: hypr-DE's main.lua dofiles `.active.lua`, and a
 /// `.active.conf` twin would only ever point at a stale render nothing reads.
 pub fn repoint_active_profile(target: &Path) -> std::io::Result<()> {
-    match format_of(target) {
-        Some(ProfileFormat::Lua) => repoint_link(target, ProfileFormat::Lua),
-        _ => Err(std::io::Error::other(format!(
+    if target.extension().and_then(|e| e.to_str()) != Some("lua") {
+        return Err(std::io::Error::other(format!(
             "profile target is not a .lua render: {}",
             target.display()
-        ))),
+        )));
     }
-}
-
-fn repoint_link(target: &Path, format: ProfileFormat) -> std::io::Result<()> {
-    let link = paths::active_profile_link(format);
+    let link = paths::active_profile_link();
     if let Some(parent) = link.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = link.with_extension(format!("{}.tmp", format.ext()));
+    let tmp = link.with_extension("lua.tmp");
     let _ = fs::remove_file(&tmp);
     std::os::unix::fs::symlink(target, &tmp)?;
     fs::rename(&tmp, &link)
@@ -428,8 +409,8 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("a.toml"), "match = [\"A\"]\n").unwrap();
         let profiles = load_profiles_from(&dir);
-        let rendered =
-            fs::read_to_string(dir.join(format!("a.{}", profiles[0].format.ext()))).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let rendered = fs::read_to_string(dir.join("a.lua")).unwrap();
         assert!(rendered.contains("Do not edit"));
         fs::remove_dir_all(&dir).unwrap();
     }

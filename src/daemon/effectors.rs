@@ -346,9 +346,8 @@ impl Effectors {
     /// Idempotent on name+symlink **and** profile body — a TOML edit that
     /// keeps the same name still forces a re-render reload (#19).
     pub fn apply_profile(&self, profile: &crate::sysio::profiles::TomlProfile, ctx: &mut Context) {
-        let target =
-            paths::profiles_dir().join(format!("{}.{}", profile.name, profile.format.ext()));
-        let link = paths::active_profile_link(profile.format);
+        let target = paths::profiles_dir().join(format!("{}.lua", profile.name));
+        let link = paths::active_profile_link();
         let symlink_ok =
             link.is_symlink() && fs::canonicalize(&link).ok() == fs::canonicalize(&target).ok();
         let name_same = ctx.current_profile.as_deref() == Some(profile.name.as_str());

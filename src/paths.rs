@@ -105,8 +105,9 @@ pub fn profiles_dir() -> PathBuf {
     hypr_config("profiles")
 }
 
-pub fn active_profile_link(format: hyprstate_fsm::profiles::ProfileFormat) -> PathBuf {
-    profiles_dir().join(format!(".active.{}", format.ext()))
+/// The symlink hypr-DE's main.lua dofiles; renders are Lua only.
+pub fn active_profile_link() -> PathBuf {
+    profiles_dir().join(".active.lua")
 }
 
 /// Marker the daemon maintains with the resolved eDP policy: present = panel

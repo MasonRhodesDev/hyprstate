@@ -87,9 +87,6 @@ enum Cmd {
         /// migrate: report conversions without writing TOML files
         #[arg(long)]
         dry_run: bool,
-        /// save: profile dialect; only `lua` exists (kept for compatibility)
-        #[arg(long, value_parser = ["lua"])]
-        format: Option<String>,
     },
     /// systemctl + journalctl + gpu + power summary
     Status,
@@ -154,7 +151,6 @@ fn main() {
             priority,
             force,
             dry_run,
-            format: _,
         } => {
             use pure::profiles::{EdpPolicy, GpuPref};
             let save = cli::profile::SaveOpts {

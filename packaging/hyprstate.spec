@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.4.1
+Version:        2.4.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,9 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sat Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.4.2-1
+- Resolve hypr-ipc 0.1.1 so the old hypr-paths crate leaves the dependency graph.
+
 * Sat Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.4.1-1
 - Depend on xdg-paths, logind-session, and hypr-ipc 0.1.1 (renamed crates, desktop-commons ADR 0005).
 

@@ -1,5 +1,5 @@
 [workspace]
-# hyprstate-gui is intentionally NOT a member: it lives in its own repo so the
+# dials (the settings app, formerly hyprstate-gui) is intentionally NOT a member: it lives in its own repo so the
 # Slint/femtovg dependency tree never enters this crate's `cargo vendor` tarball
 # or the RPM/PKGBUILD build. It path-depends on hyprstate-fsm instead.
 members = [".", "crates/hyprstate-fsm"]
@@ -11,7 +11,7 @@ resolver = "3"
 
 [package]
 name = "hyprstate"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2024"
 license = "MIT"
 description = "Hyprland session/power state machine: lid, monitors, profiles, GPU selection, powerd"
@@ -22,8 +22,8 @@ publish = false
 
 [dependencies]
 hyprstate-fsm = { path = "crates/hyprstate-fsm" }
-hypr-paths = "0.1.0"
-hypr-logind = "0.1.0"
+xdg-paths = "0.2.0"
+logind-session = "0.2.0"
 hypr-ipc = "0.1.0"
 monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles", rev = "64d5d1e", features = ["hyprland-render"] }
 clap = { version = "4.5", features = ["derive"] }

@@ -82,7 +82,7 @@ Consumers must skip frames with an unknown `version` instead of misparsing.
 - `hyprstate` repo: daemon binary + `crates/hyprstate-fsm` (workspace). Builds/vendors
   exactly as before — the GUI is **not** a member, so Slint never enters `cargo vendor`
   or the RPM/PKGBUILD build.
-- `hyprstate-gui` repo (separate): the Slint app. Depends on `hyprstate-fsm`
+- `dials` repo (separate, formerly `hyprstate-gui`): the Slint app. Depends on `hyprstate-fsm`
   (path/git) and `slint-headless` (dev-dep). Packaged independently.
 - `slint-headless` repo (built): the offscreen Slint→PNG snapshot primitive.
 
@@ -112,7 +112,7 @@ changes — the GUI never writes daemon-owned runtime state:
 
 ## Autonomous build loop
 
-This project is driven by an automation harness (`hyprstate-gui/automation/`,
+This project is driven by an automation harness (`dials/automation/`,
 TypeScript on Node 24): an ordered task plan, a `verify.ts` gate (build + test +
 clippy + headless snapshot across the three repos), and a `drive.ts` orchestrator that
 dispatches each task to a headless `pi --print` agent, runs the gate, commits on green,

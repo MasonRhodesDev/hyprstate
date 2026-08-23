@@ -363,16 +363,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hypr-logind"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f626bf6e676211c779ad16bb35f8cbfef246101c2d4b261e698208c0081270"
-dependencies = [
- "libc",
- "zbus",
-]
-
-[[package]]
 name = "hypr-paths"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,23 +370,23 @@ checksum = "a2b57d35d5a9d1fe4892d499fca8fb64f331cf0a2618ca38b1fc32fdfef9f6ed"
 
 [[package]]
 name = "hyprstate"
-version = "2.4.0"
+version = "2.4.1"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "futures-util",
  "hypr-ipc",
- "hypr-logind",
- "hypr-paths",
  "hyprstate-fsm",
  "libc",
+ "logind-session",
  "monitor-profiles",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "xdg-paths",
  "zbus",
 ]
 
@@ -488,6 +478,16 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "logind-session"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "596931f7f4c3aed91073dc63c04780d22b2709f575f30ecfe414874963858bbf"
+dependencies = [
+ "libc",
+ "zbus",
+]
 
 [[package]]
 name = "memchr"
@@ -1098,6 +1098,12 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "xdg-paths"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86bfd0671d6ceb9f3d5049ceaa7ec29b00d36cf26aceae18e4c9f553d7da780a"
 
 [[package]]
 name = "zbus"

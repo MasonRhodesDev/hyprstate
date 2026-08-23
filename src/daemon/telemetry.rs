@@ -2,7 +2,7 @@
 //!
 //! After each relevant node/context change the daemon writes one
 //! newline-delimited JSON frame to `$XDG_RUNTIME_DIR/hyprstate-telemetry.sock`.
-//! The daemon binds that socket; clients (hyprstate-gui) connect and read.
+//! The daemon binds that socket; clients (dials) connect and read.
 //! The write is non-blocking and fire-and-forget: if no client is connected,
 //! the frame is silently dropped. This module never affects FSM behavior.
 //!

@@ -12,7 +12,7 @@ use super::event::{Event, ReconcileSnapshot};
 use crate::dbus::upower::{DISPLAY_DEVICE_PATH, UPowerDeviceProxy, UPowerProxy};
 use crate::paths;
 use crate::sysio::{hyprctl, hypridle_log, sysfs};
-use hypr_logind::{LogindManagerProxy, LogindSessionProxy};
+use logind_session::{LogindManagerProxy, LogindSessionProxy};
 
 // =========================================================================
 // Hyprland socket2 reader
@@ -305,14 +305,14 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
     }
 }
 
-/// Resolve our graphical session via hypr-logind. Returns a (cached,
+/// Resolve our graphical session via logind-session. Returns a (cached,
 /// uncached) proxy pair: lock_watcher needs the cached one (property-change
 /// streams are fed from the cache), the reconciler needs the uncached one
 /// (fresh reads). Lid/suspend/LockedHint policy stays in this daemon.
 pub async fn resolve_session(
     conn: &Connection,
 ) -> Option<(LogindSessionProxy<'static>, LogindSessionProxy<'static>)> {
-    let session = match hypr_logind::resolve_session(conn).await {
+    let session = match logind_session::resolve_session(conn).await {
         Ok(session) => session,
         Err(e) => {
             warn!("no logind session resolved ({e}) — lock detection via LockedHint disabled");

@@ -26,7 +26,7 @@ use crate::pure::profiles::{
     EdpPolicy, GpuPref, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
-use hypr_logind::{LogindManagerProxy, LogindSessionProxy};
+use logind_session::{LogindManagerProxy, LogindSessionProxy};
 
 /// Serialized subprocess effects (ordering between reload and keyword
 /// matters for eDP handling).

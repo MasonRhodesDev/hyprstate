@@ -26,7 +26,7 @@ use crate::sysio::{hyprctl, hypridle_log, sysfs};
 use ctx::Context;
 use effectors::Effectors;
 use event::Event;
-use hypr_logind::{Inhibitor, LogindManagerProxy};
+use logind_session::{Inhibitor, LogindManagerProxy};
 
 /// Startup diagnostic only — the sleep hook owns the fix.
 fn log_wake_state() {

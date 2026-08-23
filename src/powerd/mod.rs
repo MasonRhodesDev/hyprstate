@@ -21,7 +21,7 @@ use zbus::object_server::SignalEmitter;
 
 use crate::paths;
 use crate::pure::power::PowerProfile;
-use hypr_logind::LogindManagerProxy;
+use logind_session::LogindManagerProxy;
 
 #[derive(zbus::DBusError, Debug)]
 #[zbus(prefix = "org.hyprstate.Power1")]

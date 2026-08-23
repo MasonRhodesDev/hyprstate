@@ -45,7 +45,7 @@ pub const INHIBIT_BASELINE_WHO: [&str; 7] = [
 
 /// Hypr config tree: `$XDG_CONFIG_HOME/hypr` if set, else `$HOME/.config/hypr`.
 fn hypr_config(file: &str) -> PathBuf {
-    match hypr_paths::ConfigDirs::from_env() {
+    match xdg_paths::ConfigDirs::from_env() {
         Ok(dirs) => dirs.config_dir("hypr").join(file),
         Err(_) => PathBuf::new(),
     }
@@ -65,7 +65,7 @@ pub fn gpu_breadcrumb_file() -> PathBuf {
 }
 
 fn xdg_runtime_dir() -> PathBuf {
-    match hypr_paths::BaseDirs::from_env() {
+    match xdg_paths::BaseDirs::from_env() {
         Ok(dirs) => dirs.runtime_dir().to_path_buf(),
         Err(_) => PathBuf::new(),
     }

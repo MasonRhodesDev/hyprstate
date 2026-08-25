@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.4.2
+Version:        2.5.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,13 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Aug 25 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.5.0-1
+- Delete the screen-DPMS sub-FSM. hyprstate no longer blanks outputs at all:
+  hypridle (hypr-DE >= 0.2.25) owns locked-screen blanking with an
+  input-idle listener, which stops the 30 s re-blank under the user's hands
+  after a wake (#24). The stuck-DPMS repair (DPMS on only) stays. Telemetry
+  envelope v2 drops the `screen` field.
+
 * Sat Aug 22 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.4.2-1
 - Resolve hypr-ipc 0.1.1 so the old hypr-paths crate leaves the dependency graph.
 

@@ -44,12 +44,12 @@ The daemon emits a JSON event per transition/tick over a Unix domain socket
 `daemon-transport` convention (newline-delimited serde_json frames):
 
 ```
-{ "version": 1, "ts": <ms>, "kind": "transition", "from": "LID_OPEN", "event": "LidClose",
+{ "version": 2, "ts": <ms>, "kind": "transition", "from": "LID_OPEN", "event": "LidClose",
   "to": "Countdown", "ctx": { ...inputs... },
   "effectors": ["arm_grace_timer"] }
 ```
 
-`version` is the envelope major. v1 is additive JSON (unknown fields ignored).
+`version` is the envelope major. Each version is additive JSON (unknown fields ignored); v2 dropped `screen`.
 Consumers must skip frames with an unknown `version` instead of misparsing.
 
 - A small additive emitter in the daemon (Layer 2 `on_enter` already the single place

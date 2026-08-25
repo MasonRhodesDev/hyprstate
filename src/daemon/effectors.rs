@@ -23,7 +23,7 @@ use crate::paths;
 use crate::pure::fsm::edp_may_disable;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
-    EdpPolicy, GpuPref, dpms_args, edp_disable_args, move_workspace_to_monitor_args,
+    EdpPolicy, GpuPref, dpms_on_args, edp_disable_args, move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
@@ -91,7 +91,7 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                 hyprctl::hyprctl_ok(&["reload"]).await;
             }
             Cmd::DpmsOn => {
-                let args = dpms_args(true);
+                let args = dpms_on_args();
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 hyprctl::hyprctl_ok(&args).await;
             }

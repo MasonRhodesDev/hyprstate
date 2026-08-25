@@ -327,20 +327,18 @@ pub fn edp_disable_args(monitor: &str) -> Vec<String> {
     ]
 }
 
-/// hyprctl argv for a dpms flip. Hyprland 0.56 removed classic string
-/// dispatchers and hypr-DE is Lua-config only: `dispatch` evaluates its
-/// argument as `hl.dispatch(<text>)`, so the Lua call form is the only one
-/// that works.
-pub fn dpms_args(on: bool) -> Vec<String> {
-    let action = if on { "on" } else { "off" };
-    vec![
-        "dispatch".into(),
-        format!("hl.dsp.dpms({{ action = \"{action}\" }})"),
-    ]
+/// hyprctl argv to turn every output DPMS on. Deliberately not
+/// parameterised: hyprstate never blanks (hypridle owns DPMS off,
+/// hyprstate#24), so no off form is constructible from this crate.
+/// Hyprland 0.56 removed classic string dispatchers and hypr-DE is
+/// Lua-config only: `dispatch` evaluates its argument as
+/// `hl.dispatch(<text>)`, so the Lua call form is the only one that works.
+pub fn dpms_on_args() -> Vec<String> {
+    vec!["dispatch".into(), "hl.dsp.dpms({ action = \"on\" })".into()]
 }
 
 /// hyprctl argv to move workspace `ws` onto `monitor`. Same Lua-only
-/// rationale as `dpms_args`.
+/// rationale as `dpms_on_args`.
 ///
 /// Used to repair workspaces Hyprland strands on the eDP: `CMonitor::
 /// onDisconnect` only evacuates workspaces to a monitor that was *enabled at
@@ -598,14 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn test_dpms_args_lua() {
+    fn test_dpms_on_args_lua() {
         assert_eq!(
-            dpms_args(true),
+            dpms_on_args(),
             ["dispatch", "hl.dsp.dpms({ action = \"on\" })"]
-        );
-        assert_eq!(
-            dpms_args(false),
-            ["dispatch", "hl.dsp.dpms({ action = \"off\" })"]
         );
     }
 

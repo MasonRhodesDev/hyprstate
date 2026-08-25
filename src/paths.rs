@@ -16,13 +16,9 @@ pub const GPU_SETTLE: Duration = Duration::from_millis(500);
 // ---- daemon timing ----
 
 pub const GRACE_SECONDS: Duration = Duration::from_secs(30);
-pub const DPMS_DELAY: Duration = Duration::from_secs(30);
 pub const LOCK_WAIT: Duration = Duration::from_secs(2);
 pub const INHIBIT_POLL: Duration = Duration::from_secs(2);
 pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-/// After our dpms-off LANDS, how long an observed all-outputs-on must wait
-/// before it counts as the user waking the screens (DIMMED policy).
-pub const DIMMED_SETTLE: Duration = Duration::from_secs(3);
 /// Coalesce monitor add/remove bursts before profile reconciliation.
 pub const PROFILE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// AC plug-jiggle settle window before power policy reacts.

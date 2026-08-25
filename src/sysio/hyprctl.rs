@@ -112,18 +112,6 @@ pub fn any_enabled_monitor_dpms_off_in(monitors: &[MonitorSnapshot]) -> bool {
     monitors.iter().any(|m| !m.disabled && !m.dpms_status)
 }
 
-/// (enabled outputs, enabled outputs currently DPMS on). The DIMMED policy
-/// needs per-output granularity: an any-aggregate cannot tell a user wake
-/// (all on) from a hotplugged panel lighting up next to blanked ones.
-pub fn enabled_dpms_counts_in(monitors: &[MonitorSnapshot]) -> (u32, u32) {
-    let enabled = monitors.iter().filter(|m| !m.disabled).count() as u32;
-    let on = monitors
-        .iter()
-        .filter(|m| !m.disabled && m.dpms_status)
-        .count() as u32;
-    (enabled, on)
-}
-
 /// Whether Hyprland currently holds ext-session-lock-v1. None when
 /// undeterminable. Complements logind LockedHint: a stuck hint with no
 /// compositor lock means the locker is dead.

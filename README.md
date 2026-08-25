@@ -10,7 +10,7 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
 - **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for a live locker (`LockedHint` plus compositor session lock). A stuck `LockedHint` aborts suspend.
-- **DPMS-off when locked + inhibitor.** With an active screen (`LID_OPEN` or `DOCKED`) and the session locked (any locker setting `LockedHint`) while an inhibitor is held, screens DPMS-off after 30s. Reverses on unlock or inhibitor release.
+- **Stuck-DPMS repair.** hyprstate never blanks outputs: hypridle owns every DPMS-off (hypr-DE's unlocked idle listener and its locked input-idle listener). If hypridle loses its wake and a live session is left driving dark panels, the reconciler turns them back on once presence is proven (unlocked, or cursor movement while locked). Known loss versus 2.4: a panel hotplugged into a blanked, locked session stays lit until the next input→idle cycle — re-blanking it here would make hyprstate a second DPMS-off writer. Same class: Hyprland warps the cursor when a monitor disconnects, which the backstop reads as presence and relights the remaining panels. Requires hypr-DE ≥ 0.2.25 (hypr-DE#27): on older hypr-DE a locked session holding an idle inhibitor is blanked by nobody. An inhibitor appearing or releasing no longer changes a locked screen; only input (or unlock) relights it.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
 
 ## Architecture
@@ -38,7 +38,7 @@ flowchart TD
     subgraph eff["Effectors"]
         mon["hyprctl reload / eDP-2 toggle"]
         media["playerctl --all-players pause"]
-        dpms["DPMS on/off"]
+        dpms["DPMS on (stuck repair)"]
         sd["logind Session.Lock() / Manager.Suspend()"]
         pwr["power client"]
     end

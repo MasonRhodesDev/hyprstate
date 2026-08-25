@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use tokio::task::JoinHandle;
 
-use crate::pure::fsm::{ScreenInputs, ScreenState, State, WorldInputs};
+use crate::pure::fsm::{State, WorldInputs};
 use crate::pure::power::{PowerPolicy, PowerProfile, SelfWriteTracker};
 use crate::pure::profiles::EdpPolicy;
 
 pub struct Context {
-    // ---- main + screen FSM inputs ----
+    // ---- main FSM + backstop inputs ----
     pub lid_closed: bool,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
@@ -20,24 +20,15 @@ pub struct Context {
     pub on_ac: bool,
 
     pub state: State,
-    pub screen_state: ScreenState,
 
     // ---- timers (abort + respawn pattern) ----
     pub grace_timer: Option<JoinHandle<()>>,
-    pub screen_timer: Option<JoinHandle<()>>,
     pub profile_debounce: Option<JoinHandle<()>>,
     pub power_debounce: Option<JoinHandle<()>>,
 
     /// Cursor position at the previous reconciler pass; a change is the
     /// presence signal for the stuck-DPMS backstop. None = not sampled yet.
     pub last_cursor_pos: Option<(i64, i64)>,
-    /// When our dpms-off last LANDED (DpmsApplied) while DIMMED; None until
-    /// it has. Anchors the settle window that separates our own blank from
-    /// the user waking the outputs.
-    pub dimmed_blank_applied_at: Option<Instant>,
-    /// Wakes observed since DIMMED was last entered from a lock edge; the
-    /// budget that stops a non-human wake source looping the screen FSM.
-    pub dimmed_wakes: u32,
 
     // ---- monitor-profile sub-state ----
     pub current_profile: Option<String>,
@@ -88,12 +79,8 @@ impl Default for Context {
             locked: false,
             on_ac: true,
             state: State::LidOpen,
-            screen_state: ScreenState::Active,
             grace_timer: None,
-            screen_timer: None,
             last_cursor_pos: None,
-            dimmed_blank_applied_at: None,
-            dimmed_wakes: 0,
             profile_debounce: None,
             power_debounce: None,
             current_profile: None,
@@ -133,13 +120,6 @@ impl Context {
         WorldInputs {
             lid_closed: self.lid_closed,
             ext_mon_count: self.ext_mon_count,
-            inhibitor: self.inhibitor(),
-        }
-    }
-
-    pub fn screen_inputs(&self) -> ScreenInputs {
-        ScreenInputs {
-            locked: self.locked,
             inhibitor: self.inhibitor(),
         }
     }

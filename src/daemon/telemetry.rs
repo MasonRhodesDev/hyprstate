@@ -6,7 +6,7 @@
 //! The write is non-blocking and fire-and-forget: if no client is connected,
 //! the frame is silently dropped. This module never affects FSM behavior.
 //!
-//! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 1).
+//! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 2).
 //! v1 is an additive JSON object — unknown fields in a known version are
 //! ignored. Consumers must skip frames whose `version` they do not understand
 //! rather than silently misparsing. Missing `XDG_RUNTIME_DIR` drops the frame
@@ -27,7 +27,9 @@ use crate::pure::fsm::State;
 use crate::pure::power::power_base_state;
 
 /// Current Help telemetry envelope version. Bump on breaking field changes.
-pub const TELEMETRY_VERSION: u32 = 1;
+/// v2 (hyprstate 2.5.0) dropped the `screen` field with the screen-DPMS
+/// sub-FSM; dials never read it.
+pub const TELEMETRY_VERSION: u32 = 2;
 
 /// A single telemetry frame for Help / observers.
 #[derive(Debug, Clone, Serialize)]
@@ -39,7 +41,6 @@ pub struct TelemetryFrame {
     pub from: &'static str,
     pub event: &'static str,
     pub to: &'static str,
-    pub screen: &'static str,
     pub ctx: FrameCtx,
     pub effectors: Vec<&'static str>,
 }
@@ -135,7 +136,6 @@ impl TelemetryEmitter {
             from: from.as_str(),
             event,
             to: to.as_str(),
-            screen: ctx.screen_state.as_str(),
             ctx: FrameCtx::from_context(ctx),
             effectors,
         };
@@ -169,7 +169,6 @@ impl TelemetryEmitter {
         frame.from.hash(&mut h);
         frame.event.hash(&mut h);
         frame.to.hash(&mut h);
-        frame.screen.hash(&mut h);
         for e in &frame.effectors {
             e.hash(&mut h);
         }
@@ -246,7 +245,6 @@ mod tests {
             from: "LID_OPEN",
             event: "LidClose",
             to: "COUNTDOWN",
-            screen: "SCREEN_ACTIVE",
             ctx: FrameCtx {
                 lid_closed: true,
                 ext_mon_count: 0,
@@ -263,12 +261,11 @@ mod tests {
         };
 
         let json = serde_json::to_string(&frame).expect("serialize");
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"version\":2"));
         assert!(json.contains("\"kind\":\"transition\""));
         assert!(json.contains("\"from\":\"LID_OPEN\""));
         assert!(json.contains("\"event\":\"LidClose\""));
         assert!(json.contains("\"to\":\"COUNTDOWN\""));
-        assert!(json.contains("\"screen\":\"SCREEN_ACTIVE\""));
         assert!(json.contains("\"lid_closed\":true"));
         assert!(json.contains("\"ext_mon_count\":0"));
         assert!(json.contains("\"power_base\":\"ac\""));
@@ -276,7 +273,7 @@ mod tests {
         assert!(json.contains("\"effectors\":[\"start_grace_timer\"]"));
 
         let val: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(val["version"], 1);
+        assert_eq!(val["version"], 2);
         assert_eq!(val["ts"], 1719100000000u64);
         assert_eq!(val["kind"], "transition");
     }

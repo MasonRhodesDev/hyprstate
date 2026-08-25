@@ -1,9 +1,9 @@
-//! Main lid/suspend FSM and the screen-DPMS sub-FSM.
+//! Main lid/suspend FSM and the stuck-DPMS backstop.
 //!
-//! Port of hyprstate.py's `desired_state` / `_world_state` /
-//! `desired_screen_state`. The functions are total over plain input structs;
-//! the daemon snapshots its `Context` into `WorldInputs` / `ScreenInputs` at
-//! dispatch time.
+//! Port of hyprstate.py's `desired_state` / `_world_state`. The functions are
+//! total over plain input structs; the daemon snapshots its `Context` into
+//! `WorldInputs` / `StuckScreenInputs` at dispatch time. hyprstate has no
+//! DPMS-off decision: hypridle owns blanking (hyprstate#24).
 
 /// Main FSM states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28,26 +28,6 @@ impl State {
     }
 }
 
-/// Screen-DPMS sub-FSM states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum ScreenState {
-    Active,
-    DimPending,
-    Dimmed,
-}
-
-impl ScreenState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ScreenState::Active => "SCREEN_ACTIVE",
-            ScreenState::DimPending => "SCREEN_DIM_PENDING",
-            ScreenState::Dimmed => "SCREEN_DIMMED",
-        }
-    }
-}
-
-/// Event kinds as the transition maps see them. The daemon's `Event` enum
-/// carries payloads; it projects to this for the pure layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum EventKind {
     LidClose,
@@ -61,11 +41,6 @@ pub enum EventKind {
     AcPlugged,
     AcUnplugged,
     TimerExpired,
-    ScreenTimerExpired,
-    /// Outputs observed DPMS-on while DIMMED: Hyprland woke them for input
-    /// (key_press/mouse_move_enables_dpms). The user wins; re-arm the dim
-    /// timer instead of re-blanking under their hands.
-    ScreenWoken,
     Resumed,
     Reconcile,
     MonitorsChanged,
@@ -127,97 +102,7 @@ pub fn desired_state(state: State, ev: EventKind, w: &WorldInputs) -> Option<Sta
     (target != state).then_some(target)
 }
 
-/// Inputs of the screen-DPMS sub-FSM.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ScreenInputs {
-    pub locked: bool,
-    pub inhibitor: bool,
-}
-
-/// Pure transition for the screen-DPMS sub-FSM.
-///
-/// Active only when the main FSM is showing a screen (LidOpen or Docked);
-/// otherwise force Active. DimPending -> Dimmed is the one event-driven
-/// transition; everything else is computed from (locked, inhibitor).
-pub fn desired_screen_state(
-    main: State,
-    screen: ScreenState,
-    ev: EventKind,
-    s: &ScreenInputs,
-) -> Option<ScreenState> {
-    if !matches!(main, State::LidOpen | State::Docked) {
-        return (screen != ScreenState::Active).then_some(ScreenState::Active);
-    }
-
-    if ev == EventKind::ScreenTimerExpired {
-        return (screen == ScreenState::DimPending).then_some(ScreenState::Dimmed);
-    }
-    if ev == EventKind::ScreenWoken {
-        return (screen == ScreenState::Dimmed).then_some(ScreenState::DimPending);
-    }
-
-    let target = if !(s.locked && s.inhibitor) {
-        ScreenState::Active
-    } else if screen == ScreenState::Dimmed {
-        ScreenState::Dimmed // stay dimmed; only unlock/inhibit-off exits
-    } else {
-        ScreenState::DimPending
-    };
-
-    (target != screen).then_some(target)
-}
-
 /// Inputs of the stuck-DPMS backstop (see `dpms_stuck_off`).
-/// What the reconciler should do about the outputs while the screen FSM is
-/// DIMMED. Pure so the one decision that can be wrong lives next to tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DimmedAction {
-    /// Blank landed (or nothing to act on): leave it.
-    Nothing,
-    /// Some enabled outputs are on while others are off (hotplug, partial
-    /// apply, re-enable): our blank, not the user — re-assert it.
-    Reassert,
-    /// Every enabled output is on after our blank provably landed: Hyprland
-    /// woke them for input. The user wins — re-arm the dim timer.
-    Wake,
-    /// A wake source keeps defeating the blank; stop fighting it.
-    GiveUp,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DimmedInputs {
-    pub enabled_outputs: u32,
-    pub dpms_on_outputs: u32,
-    /// Our dpms-off command has landed AND the settle window has elapsed.
-    pub settled: bool,
-    /// Consecutive wakes since DIMMED was last entered from a lock edge.
-    pub wakes: u32,
-}
-
-/// Wakes tolerated per lock session before we assume the wake source is not a
-/// human (a panel that ignores DPMS, a client toggling DPMS) and stop
-/// re-blanking — an unbounded Dimmed/DimPending loop blinks panels all night.
-pub const MAX_DIMMED_WAKES: u32 = 2;
-
-pub fn dimmed_action(i: &DimmedInputs) -> DimmedAction {
-    if i.enabled_outputs == 0 || i.dpms_on_outputs == 0 {
-        return DimmedAction::Nothing;
-    }
-    if i.dpms_on_outputs < i.enabled_outputs {
-        return DimmedAction::Reassert;
-    }
-    if !i.settled {
-        // Our own blank may not have landed yet: never read it as a wake,
-        // and never pile a second dpms-off onto the effector queue.
-        return DimmedAction::Nothing;
-    }
-    if i.wakes >= MAX_DIMMED_WAKES {
-        DimmedAction::GiveUp
-    } else {
-        DimmedAction::Wake
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StuckScreenInputs {
     /// Reality: at least one ENABLED output reports DPMS off.
@@ -231,9 +116,13 @@ pub struct StuckScreenInputs {
 
 /// Whether an observed DPMS-off state is *unowned* and must be repaired.
 ///
-/// hypridle, not hyprstate, does the ordinary idle blank, so SCREEN_ACTIVE +
-/// DPMS off is normally legitimate and must be left alone (v1 fired dpms(on)
-/// on every config reload and fought hypridle for exactly this reason). This
+/// hypridle, not hyprstate, does every blank -- the unlocked idle listener
+/// and the locked input-idle listener in hypr-DE's hypridle.conf -- so an
+/// observed DPMS off is normally legitimate and must be left alone (v1 fired
+/// dpms(on) on every config reload and fought hypridle for exactly this
+/// reason; 2.x blanked locked sessions itself on an input-blind timer and
+/// re-blanked them under the user's hands, hyprstate#24). Turning outputs
+/// on is the only DPMS effect hyprstate has. This
 /// backstop exists because hypridle can *lose* its wake: `CHypridle::
 /// onInhibit` recreates the idle-notify listeners when the systemd idle
 /// inhibit count returns to 0, clearing `isIdled` without ever running
@@ -243,7 +132,6 @@ pub struct StuckScreenInputs {
 /// input will wake.
 ///
 /// The guard is what keeps this from fighting a legitimate blank:
-/// - SCREEN_DIMMED means *we* own the off state — never repair it.
 /// - Only LidOpen/Docked are meant to be showing anything; a machine on its
 ///   way to suspend stays dark.
 /// - Unlocked + dark is unambiguous: hypridle locks at 180s and blanks at
@@ -254,8 +142,8 @@ pub struct StuckScreenInputs {
 /// Known gap: cursor movement is the only presence signal available without
 /// hyprstate becoming a Wayland client itself, so a keyboard-only wake of a
 /// *locked* session is not covered.
-pub fn dpms_stuck_off(main: State, screen: ScreenState, s: &StuckScreenInputs) -> bool {
-    if !s.dpms_off || screen == ScreenState::Dimmed {
+pub fn dpms_stuck_off(main: State, s: &StuckScreenInputs) -> bool {
+    if !s.dpms_off {
         return false;
     }
     if !matches!(main, State::LidOpen | State::Docked) {
@@ -403,106 +291,6 @@ mod tests {
         );
     }
 
-    fn s(locked: bool, inhibitor: bool) -> ScreenInputs {
-        ScreenInputs { locked, inhibitor }
-    }
-
-    #[test]
-    fn test_screen_forced_active_when_no_screen_showing() {
-        let inputs = s(true, true);
-        assert_eq!(
-            desired_screen_state(
-                State::Countdown,
-                ScreenState::Dimmed,
-                EventKind::Reconcile,
-                &inputs
-            ),
-            Some(ScreenState::Active)
-        );
-        assert_eq!(
-            desired_screen_state(
-                State::Countdown,
-                ScreenState::Active,
-                EventKind::Reconcile,
-                &inputs
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_screen_dim_pending_when_locked_and_inhibited() {
-        let inputs = s(true, true);
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Active,
-                EventKind::LockEngaged,
-                &inputs
-            ),
-            Some(ScreenState::DimPending)
-        );
-    }
-
-    #[test]
-    fn test_screen_timer_dims_only_from_dim_pending() {
-        let inputs = s(true, true);
-        assert_eq!(
-            desired_screen_state(
-                State::Docked,
-                ScreenState::DimPending,
-                EventKind::ScreenTimerExpired,
-                &inputs
-            ),
-            Some(ScreenState::Dimmed)
-        );
-        assert_eq!(
-            desired_screen_state(
-                State::Docked,
-                ScreenState::Active,
-                EventKind::ScreenTimerExpired,
-                &inputs
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_screen_stays_dimmed_while_locked_and_inhibited() {
-        let inputs = s(true, true);
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Dimmed,
-                EventKind::Reconcile,
-                &inputs
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn test_screen_wakes_on_unlock_or_inhibitor_release() {
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Dimmed,
-                EventKind::LockReleased,
-                &s(false, true)
-            ),
-            Some(ScreenState::Active)
-        );
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Dimmed,
-                EventKind::InhibitorOff,
-                &s(true, false)
-            ),
-            Some(ScreenState::Active)
-        );
-    }
-
     #[test]
     fn edp_stays_on_when_it_is_the_only_output() {
         assert!(
@@ -527,160 +315,39 @@ mod tests {
 
     #[test]
     fn test_stuck_dpms_ignores_screens_that_are_on() {
-        assert!(!dpms_stuck_off(
-            State::LidOpen,
-            ScreenState::Active,
-            &stuck(false, false, true)
-        ));
-    }
-
-    #[test]
-    fn test_stuck_dpms_never_fights_our_own_dim() {
-        // SCREEN_DIMMED is hyprstate's deliberate blank — repairing it would
-        // undo the state we just entered.
-        assert!(!dpms_stuck_off(
-            State::LidOpen,
-            ScreenState::Dimmed,
-            &stuck(true, true, true)
-        ));
+        assert!(!dpms_stuck_off(State::LidOpen, &stuck(false, false, true)));
     }
 
     #[test]
     fn test_stuck_dpms_leaves_an_ordinary_idle_blank_alone() {
-        // hypridle blanked a locked session and the user is still away: no
-        // cursor movement, so nothing to repair.
-        assert!(!dpms_stuck_off(
-            State::Docked,
-            ScreenState::Active,
-            &stuck(true, true, false)
-        ));
+        // hypridle's locked listener blanked the session and the user is
+        // still away: no cursor movement, so nothing to repair.
+        assert!(!dpms_stuck_off(State::Docked, &stuck(true, true, false)));
     }
 
     #[test]
     fn test_stuck_dpms_repairs_locked_session_once_user_returns() {
         // The incident: hypridle dropped on-resume, the panels stayed dark,
         // and input reached the compositor without waking anything.
-        assert!(dpms_stuck_off(
-            State::Docked,
-            ScreenState::Active,
-            &stuck(true, true, true)
-        ));
+        assert!(dpms_stuck_off(State::Docked, &stuck(true, true, true)));
     }
 
     #[test]
     fn test_stuck_dpms_repairs_unlocked_dark_session_without_cursor_proof() {
-        // hypridle locks at 180s before blanking at 240s, so it never blanks
-        // an unlocked session — unlocked + dark cannot be a legitimate blank.
-        assert!(dpms_stuck_off(
-            State::LidOpen,
-            ScreenState::Active,
-            &stuck(true, false, false)
-        ));
+        // hypridle locks at 180s before its unlocked listener blanks at 240s,
+        // and its locked listener needs the compositor lock, so an unlocked
+        // session is never blanked on purpose — unlocked + dark is repairable.
+        assert!(dpms_stuck_off(State::LidOpen, &stuck(true, false, false)));
     }
 
     #[test]
     fn test_stuck_dpms_stays_dark_on_the_way_to_suspend() {
         for main in [State::Countdown, State::Deferred, State::Suspending] {
             assert!(
-                !dpms_stuck_off(main, ScreenState::Active, &stuck(true, false, true)),
+                !dpms_stuck_off(main, &stuck(true, false, true)),
                 "{} must not wake screens",
                 main.as_str()
             );
         }
-    }
-
-    #[test]
-    fn test_stuck_dpms_repairs_during_dim_pending() {
-        // DimPending means our timer is armed but we have NOT blanked yet, so
-        // an observed blank is still hypridle's and still repairable.
-        assert!(dpms_stuck_off(
-            State::LidOpen,
-            ScreenState::DimPending,
-            &stuck(true, true, true)
-        ));
-    }
-    #[test]
-    fn user_wake_while_dimmed_rearms_the_timer() {
-        let s = ScreenInputs {
-            locked: true,
-            inhibitor: true,
-        };
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Dimmed,
-                EventKind::ScreenWoken,
-                &s
-            ),
-            Some(ScreenState::DimPending)
-        );
-    }
-
-    #[test]
-    fn wake_outside_dimmed_is_ignored() {
-        let s = ScreenInputs {
-            locked: true,
-            inhibitor: true,
-        };
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::DimPending,
-                EventKind::ScreenWoken,
-                &s
-            ),
-            None
-        );
-        assert_eq!(
-            desired_screen_state(
-                State::LidOpen,
-                ScreenState::Active,
-                EventKind::ScreenWoken,
-                &s
-            ),
-            None
-        );
-    }
-    fn di(enabled: u32, on: u32, settled: bool, wakes: u32) -> DimmedInputs {
-        DimmedInputs {
-            enabled_outputs: enabled,
-            dpms_on_outputs: on,
-            settled,
-            wakes,
-        }
-    }
-
-    #[test]
-    fn dimmed_all_on_after_settle_is_a_user_wake() {
-        assert_eq!(dimmed_action(&di(2, 2, true, 0)), DimmedAction::Wake);
-    }
-
-    #[test]
-    fn dimmed_all_on_before_settle_is_our_blank_landing() {
-        assert_eq!(dimmed_action(&di(2, 2, false, 0)), DimmedAction::Nothing);
-    }
-
-    #[test]
-    fn dimmed_partial_lit_is_reasserted_not_a_wake() {
-        assert_eq!(dimmed_action(&di(2, 1, true, 0)), DimmedAction::Reassert);
-        assert_eq!(dimmed_action(&di(2, 1, false, 0)), DimmedAction::Reassert);
-    }
-
-    #[test]
-    fn dimmed_all_off_or_no_outputs_is_nothing() {
-        assert_eq!(dimmed_action(&di(2, 0, true, 0)), DimmedAction::Nothing);
-        assert_eq!(dimmed_action(&di(0, 0, true, 0)), DimmedAction::Nothing);
-    }
-
-    #[test]
-    fn dimmed_wake_budget_gives_up() {
-        assert_eq!(
-            dimmed_action(&di(1, 1, true, MAX_DIMMED_WAKES - 1)),
-            DimmedAction::Wake
-        );
-        assert_eq!(
-            dimmed_action(&di(1, 1, true, MAX_DIMMED_WAKES)),
-            DimmedAction::GiveUp
-        );
     }
 }

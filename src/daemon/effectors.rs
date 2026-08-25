@@ -37,7 +37,9 @@ pub enum Cmd {
         on: bool,
     },
     Reload,
-    Dpms(bool),
+    /// Every output DPMS on: the stuck-DPMS repair. hyprstate never blanks
+    /// (hypridle owns every DPMS off), so there is no off variant to reach.
+    DpmsOn,
     /// Re-home workspaces stranded on the disabled eDP onto an external
     /// monitor. Hyprland's `CMonitor::onDisconnect` evacuates workspaces
     /// only to a monitor that was enabled at disable time, and never
@@ -54,7 +56,7 @@ pub enum Cmd {
     RunHook(String),
 }
 
-pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Event>) {
+pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Cmd::SetEdp { on } => {
@@ -88,11 +90,10 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
             Cmd::Reload => {
                 hyprctl::hyprctl_ok(&["reload"]).await;
             }
-            Cmd::Dpms(on) => {
-                let args = dpms_args(on);
+            Cmd::DpmsOn => {
+                let args = dpms_args(true);
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 hyprctl::hyprctl_ok(&args).await;
-                let _ = queue.try_send(Event::DpmsApplied(on));
             }
             Cmd::RehomeEdpWorkspaces => {
                 let stranded = hyprctl::workspaces_on_monitor(hyprctl::EDP_MONITOR).await;
@@ -219,8 +220,8 @@ impl Effectors {
         self.send_cmd(Cmd::SetEdp { on: resolved });
     }
 
-    pub fn dpms(&self, on: bool) {
-        self.send_cmd(Cmd::Dpms(on));
+    pub fn dpms_on(&self) {
+        self.send_cmd(Cmd::DpmsOn);
     }
 
     /// Repair workspaces stranded on the disabled eDP (see `Cmd::
@@ -264,19 +265,6 @@ impl Effectors {
         });
     }
 
-    /// Queue an event from effect-side observation (reconciler findings).
-    /// Shadow-gated like every other effect: a shadow daemon must not feed
-    /// conclusions about effects it never performed back into the FSM.
-    pub fn emit(&self, event: Event) {
-        if self.shadow {
-            info!("[shadow] would emit {event:?}");
-            return;
-        }
-        if self.queue.try_send(event).is_err() {
-            warn!("dispatcher event queue full/closed — observation dropped");
-        }
-    }
-
     // ---- timers ----
 
     fn spawn_timer(
@@ -305,20 +293,6 @@ impl Effectors {
         }
         self.cancel_grace_timer(ctx);
         ctx.grace_timer = Some(self.spawn_timer(paths::GRACE_SECONDS, || Event::TimerExpired));
-    }
-
-    pub fn cancel_screen_timer(&self, ctx: &mut Context) {
-        if let Some(t) = ctx.screen_timer.take() {
-            t.abort();
-        }
-    }
-
-    pub fn start_screen_timer(&self, ctx: &mut Context, fresh: bool) {
-        if !fresh && ctx.screen_timer.as_ref().is_some_and(|t| !t.is_finished()) {
-            return;
-        }
-        self.cancel_screen_timer(ctx);
-        ctx.screen_timer = Some(self.spawn_timer(paths::DPMS_DELAY, || Event::ScreenTimerExpired));
     }
 
     /// Debounce monitor add/remove bursts into one MonitorsChanged.

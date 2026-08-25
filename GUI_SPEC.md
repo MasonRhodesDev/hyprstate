@@ -5,7 +5,7 @@ discarded TypeScript draft — the project is Rust, so the GUI is Rust + Slint.
 
 ## Goal
 
-hyprstate is a state machine (lid/monitor/lock/suspend FSM + DPMS sub-FSM + power
+hyprstate is a state machine (lid/monitor/lock/suspend FSM + power
 policy + GPU selection) observable today only via logs and scattered state files.
 The GUI renders the FSM as a live node graph: current state, recent transitions,
 context, and effector firings in real time — answering "why did it pick the iGPU /
@@ -14,8 +14,8 @@ config surface.
 
 ## Mechanism vs configuration (kept separate)
 
-- **Mechanism = the FSM** (`hyprstate-fsm` crate: `State`, `ScreenState`, `EventKind`,
-  `world_state`, `desired_state`, `desired_screen_state`). This is code. The GUI
+- **Mechanism = the FSM** (`hyprstate-fsm` crate: `State`, `EventKind`,
+  `world_state`, `desired_state`). This is code. The GUI
   *renders and observes* it; it is never editable-as-graph.
 - **Configuration = data**, and small: `power.conf` (4-row base-state→profile map +
   `battery-low-percent`), `gpu-select` (one enum word), `profiles/*.conf` (monitor
@@ -32,7 +32,7 @@ arrows where the code doesn't have them.
 ## Single source of truth: the shared crate
 
 `hyprstate-fsm` (already extracted, a workspace member of the daemon repo) is the
-shared crate. The GUI imports it directly — same `State`/`ScreenState`/`EventKind`
+shared crate. The GUI imports it directly — same `State`/`EventKind`
 the daemon runs, with `#[derive(Serialize, Deserialize)]` already added. **No
 hand-mirrored model, no drift guard.** When the daemon's FSM changes, the GUI's model
 changes with it at compile time.

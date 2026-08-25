@@ -45,7 +45,7 @@ The daemon emits a JSON event per transition/tick over a Unix domain socket
 
 ```
 { "version": 1, "ts": <ms>, "kind": "transition", "from": "LID_OPEN", "event": "LidClose",
-  "to": "Countdown", "screen": "Active", "ctx": { ...inputs... },
+  "to": "Countdown", "ctx": { ...inputs... },
   "effectors": ["arm_grace_timer"] }
 ```
 

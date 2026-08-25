@@ -122,8 +122,9 @@ pub struct StuckScreenInputs {
 /// dpms(on) on every config reload and fought hypridle for exactly this
 /// reason; 2.x blanked locked sessions itself on an input-blind timer and
 /// re-blanked them under the user's hands, hyprstate#24). Turning outputs
-/// on is the only DPMS effect hyprstate has. This
-/// backstop exists because hypridle can *lose* its wake: `CHypridle::
+/// on is the only DPMS effect hyprstate has.
+///
+/// This backstop exists because hypridle can *lose* its wake: `CHypridle::
 /// onInhibit` recreates the idle-notify listeners when the systemd idle
 /// inhibit count returns to 0, clearing `isIdled` without ever running
 /// `on-resume`, and `CHypridle::onResumed` early-returns while any inhibit

@@ -7,8 +7,8 @@
 //! the frame is silently dropped. This module never affects FSM behavior.
 //!
 //! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 2).
-//! v1 is an additive JSON object — unknown fields in a known version are
-//! ignored. Consumers must skip frames whose `version` they do not understand
+//! Each version is an additive JSON object — unknown fields in a known
+//! version are ignored; v2 dropped the `screen` field. Consumers must skip frames whose `version` they do not understand
 //! rather than silently misparsing. Missing `XDG_RUNTIME_DIR` drops the frame
 //! (no `/run/user/<uid>` or `/tmp` fallback).
 

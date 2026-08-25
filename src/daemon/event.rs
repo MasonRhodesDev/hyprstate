@@ -58,7 +58,6 @@ pub struct ReconcileSnapshot {
     pub edp_disabled: Option<bool>,
     /// Any enabled output reporting DPMS off (stuck-blank backstop).
     pub dpms_off: Option<bool>,
-    /// (enabled outputs, enabled outputs DPMS on); None when undeterminable.
     /// Cursor position this pass; the dispatcher diffs it against the
     /// previous one for a presence signal.
     pub cursor_pos: Option<(i64, i64)>,

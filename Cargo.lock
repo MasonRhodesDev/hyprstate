@@ -377,6 +377,7 @@ dependencies = [
  "monitor-profiles",
  "serde",
  "serde_json",
+ "span-lines",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -730,6 +731,16 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "span-lines"
+version = "0.1.0"
+source = "git+https://github.com/MasonRhodesDev/desktop-commons?rev=266121a#266121a64beeac20e7016d1e1cb11a8a20542721"
+dependencies = [
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]

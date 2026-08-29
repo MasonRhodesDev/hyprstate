@@ -41,4 +41,7 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/MasonRhodesDev/monitor-profiles",
+    # span-lines, pinned by rev in Cargo.toml. cargo-deny matches repository
+    # URLs; Cargo.toml and Cargo.lock are what enforce the revision.
+    "https://github.com/MasonRhodesDev/desktop-commons",
 ]

@@ -20,6 +20,10 @@ pub struct Context {
     pub on_ac: bool,
 
     pub state: State,
+    /// Span covering the state currently occupied; replaced on every
+    /// transition, so its duration is the dwell time in that state.
+    /// Held unentered - a daemon has no single call stack to nest under.
+    pub state_span: Option<tracing::Span>,
 
     // ---- timers (abort + respawn pattern) ----
     pub grace_timer: Option<JoinHandle<()>>,
@@ -79,6 +83,7 @@ impl Default for Context {
             locked: false,
             on_ac: true,
             state: State::LidOpen,
+            state_span: None,
             grace_timer: None,
             last_cursor_pos: None,
             profile_debounce: None,

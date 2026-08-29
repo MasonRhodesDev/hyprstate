@@ -97,6 +97,39 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
         ctx.locked,
         ctx.on_ac,
     );
+    // The same fact in a shape a machine can read. The prose line above is
+    // for a person and stays; this one carries the world that produced the
+    // transition, so a reader can ask why it happened and not only that it
+    // did.
+    tracing::event!(
+        name: "state.transition",
+        target: "hyprstate.trace",
+        tracing::Level::INFO,
+        from = from.as_str(),
+        to = to.as_str(),
+        cause = label,
+        ext_mon = ctx.ext_mon_count,
+        inhibitor = ctx.inhibitor(),
+        locked = ctx.locked,
+        on_ac = ctx.on_ac,
+    );
+}
+
+/// Replace the span covering the state the daemon occupies.
+///
+/// Dropping the outgoing span is what emits it, so its `dur_us` is how long
+/// the daemon actually sat in that state - the question the prose log
+/// cannot answer without someone subtracting timestamps by hand.
+///
+/// Not entered. A daemon has no single call stack to nest these under, and
+/// entering one would make every unrelated span opened afterwards its
+/// child.
+fn enter_state_span(ctx: &mut Context, to: State) {
+    ctx.state_span = Some(tracing::info_span!(
+        target: "hyprstate.trace",
+        "state.occupancy",
+        state = to.as_str()
+    ));
 }
 
 /// Run both transition maps for one event kind; fire on_enter on change.
@@ -127,6 +160,11 @@ async fn evaluate_fsms(
             ctx.state = new;
             on_enter(new, Entry::Fresh, ctx, fx).await
         };
+
+        if entered {
+            let settled = ctx.state;
+            enter_state_span(ctx, settled);
+        }
 
         // Best-effort telemetry — never affects FSM behavior.
         telem.emit_help(
@@ -378,6 +416,11 @@ async fn handle_reconcile_tick(
 pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors) {
     let mut telem = TelemetryEmitter::new();
     ctx.state = world_state(&ctx.world());
+    // The starting state is never transitioned into, so nothing else opens
+    // its span - and without it the first stretch of every daemon's life
+    // sits in no state at all.
+    let initial = ctx.state;
+    enter_state_span(&mut ctx, initial);
     info!(
         "initial state: {} (ext_mon={}, inhibitor={}, locked={}, on_ac={})",
         ctx.state.as_str(),
@@ -565,5 +608,68 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         }
 
         evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct Collector(Arc<Mutex<Vec<String>>>);
+
+    impl span_lines::Sink for Collector {
+        fn write(&self, record: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(record).trim_end().to_string());
+        }
+    }
+
+    fn field(line: &str, key: &str) -> String {
+        line.split_whitespace()
+            .filter_map(|t| t.split_once('='))
+            .find(|(k, _)| *k == key)
+            .unwrap_or_else(|| panic!("no {key} in {line}"))
+            .1
+            .to_string()
+    }
+
+    /// A transition must reach the record stream, carrying the world that
+    /// produced it - and the daemon's prose log must not.
+    #[test]
+    fn a_transition_emits_one_record_and_the_prose_log_emits_none() {
+        let sink = Collector::default();
+        assert!(span_lines::set_sink(sink.clone()), "test owns the sink");
+
+        let layer = span_lines::tracing_layer::SpanLinesLayer::with_detail(
+            &["hyprstate.trace"],
+            span_lines::Detail::Session,
+        );
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let ctx = Context::default();
+            log_state_transition(&ctx, State::LidOpen, State::Docked, "monitor-added");
+            // Prose, at the module-path target. This is the line that used
+            // to be duplicated into the record stream as `event=log`,
+            // because the allowlist matched `hyprstate::daemon` too.
+            info!("STATE: something a person reads");
+        });
+
+        let written = sink.0.lock().unwrap().clone();
+        assert_eq!(
+            written.len(),
+            1,
+            "prose must not become a record: {written:?}"
+        );
+        let record = &written[0];
+        assert_eq!(field(record, "event"), "state.transition");
+        assert_eq!(field(record, "from"), "LID_OPEN");
+        assert_eq!(field(record, "to"), "DOCKED");
+        assert_eq!(field(record, "cause"), "monitor-added");
+        assert_eq!(field(record, "on_ac"), "true");
     }
 }

@@ -121,6 +121,14 @@ pub fn power_conf_file() -> PathBuf {
     hypr_config("power.conf")
 }
 
+/// Standing idle-suspend request. Runtime dir on purpose: a reboot must
+/// clear it (a persistent request would suspend the machine at first
+/// idle after every boot), unlike the deliberate persistence of
+/// power-override. One word; existence is the signal.
+pub fn suspend_request_file() -> PathBuf {
+    xdg_runtime_dir().join("hyprstate-suspend-request")
+}
+
 pub fn power_override_file() -> PathBuf {
     hypr_config("power-override")
 }

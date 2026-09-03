@@ -229,12 +229,24 @@ async fn handle_reconcile_tick(
     let mut fsm_drift = false;
     let mut power_drift = false;
 
-    if snap.lid_closed != ctx.lid_closed {
+    if ctx.lid_present && snap.lid_closed != ctx.lid_closed {
         drift.push(format!(
             "lid_closed {}->{}",
             ctx.lid_closed, snap.lid_closed
         ));
         ctx.lid_closed = snap.lid_closed;
+        fsm_drift = true;
+    } else if !ctx.lid_present && snap.lid_closed {
+        // A closed lid reported on a machine declared lidless: log it, but
+        // never let it drive the FSM (that is the whole point of absent).
+        warn!("reconciler: lid reported closed but power.conf declares lid absent — ignoring");
+    }
+    if snap.suspend_requested != ctx.suspend_requested {
+        drift.push(format!(
+            "suspend_requested {}->{}",
+            ctx.suspend_requested, snap.suspend_requested
+        ));
+        ctx.suspend_requested = snap.suspend_requested;
         fsm_drift = true;
     }
     if snap.ext_mon_count != ctx.ext_mon_count {
@@ -447,7 +459,16 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             }
 
             // ---- ctx updates that fall through to the FSMs ----
-            Event::Lid(closed) => ctx.lid_closed = closed,
+            Event::Lid(closed) => {
+                if ctx.lid_present {
+                    ctx.lid_closed = closed;
+                } else {
+                    warn!(
+                        "lid event on a machine declared lidless (power.conf lid=absent) — ignoring"
+                    );
+                    continue;
+                }
+            }
             Event::MonitorHotplug { added, ref name } => {
                 debug!(
                     "monitor {}: {name}",
@@ -527,7 +548,37 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 }
                 ctx.on_ac_settled = ctx.on_ac;
             }
-            Event::TimerExpired | Event::Resumed => {}
+            Event::SuspendRequestChanged(word) => {
+                let requested = word.is_some();
+                if requested != ctx.suspend_requested {
+                    info!(
+                        "idle-suspend request {}",
+                        if requested { "standing" } else { "withdrawn" }
+                    );
+                }
+                ctx.suspend_requested = requested;
+            }
+            Event::TimerExpired => {
+                // Close the cancel-vs-expiry race: hypridle's on-resume
+                // deletes the request file on first input, but the poller
+                // echoes that at 2 s cadence and the grace timer can fire
+                // inside the gap. The file is the authority; a request the
+                // user just withdrew must not suspend the machine.
+                if ctx.suspend_requested && !crate::paths::suspend_request_file().exists() {
+                    info!("idle-suspend request withdrawn at grace expiry");
+                    ctx.suspend_requested = false;
+                }
+            }
+            Event::Resumed => {
+                // Clear BEFORE evaluate_fsms re-derives: Resumed maps
+                // Suspending back to world_state, and a stale standing
+                // request would re-enter Countdown - a wake that schedules
+                // its own next suspend, looping the machine. Registry
+                // assertion idle-suspend-request-cleared-on-resume pins
+                // this ordering.
+                ctx.suspend_requested = false;
+                fx.clear_suspend_request(&mut ctx);
+            }
         }
 
         // Re-arm the brightness takeover guard on resume: panel raw values

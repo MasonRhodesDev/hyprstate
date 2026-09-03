@@ -4,3 +4,4 @@ pub mod gpu;
 pub mod power;
 pub mod profile;
 pub mod status;
+pub mod suspend;

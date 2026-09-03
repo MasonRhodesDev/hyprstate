@@ -1,6 +1,6 @@
 [package]
 name = "hyprstate-fsm"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 license = "MIT"
 description = "Pure, I/O-free state machine + policy layer for hyprstate (shared by the daemon and the GUI)."

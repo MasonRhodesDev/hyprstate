@@ -149,6 +149,7 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
     let mut last_platform = sysfs::read_first_word(paths::platform_profile_path());
     let mut last_gpu = sysfs::read_first_word(&paths::gpu_override_file());
     let mut last_power = sysfs::read_first_word(&paths::power_override_file());
+    let mut last_suspend = sysfs::read_first_word(&paths::suspend_request_file());
     let mut last_profiles = crate::sysio::profiles::profiles_source_fingerprint();
     loop {
         tokio::time::sleep(paths::INHIBIT_POLL).await;
@@ -170,6 +171,13 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
         if cur != last_power {
             last_power = cur.clone();
             if tx.send(Event::PowerOverrideChanged(cur)).await.is_err() {
+                return;
+            }
+        }
+        let cur = sysfs::read_first_word(&paths::suspend_request_file());
+        if cur != last_suspend {
+            last_suspend = cur.clone();
+            if tx.send(Event::SuspendRequestChanged(cur)).await.is_err() {
                 return;
             }
         }
@@ -244,6 +252,7 @@ pub async fn reconcile_snapshot_task(
             edp_disabled,
             dpms_off,
             cursor_pos,
+            suspend_requested: paths::suspend_request_file().exists(),
         };
         if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {
             return;

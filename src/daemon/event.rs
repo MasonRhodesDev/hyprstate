@@ -39,6 +39,11 @@ pub enum Event {
     BatteryPercent(f64),
     /// power-override file changed (payload = first word).
     PowerOverrideChanged(Option<String>),
+    /// The idle-suspend request file changed: `Some(word)` = a request is
+    /// standing, `None` = withdrawn. Written by `hyprstate suspend
+    /// request|cancel` (driven by hypridle's timeout/on-resume), polled by
+    /// mode_poller, and deleted by the daemon itself on Resumed.
+    SuspendRequestChanged(Option<String>),
     /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,
 }
@@ -61,6 +66,11 @@ pub struct ReconcileSnapshot {
     /// Cursor position this pass; the dispatcher diffs it against the
     /// previous one for a presence signal.
     pub cursor_pos: Option<(i64, i64)>,
+    /// The idle-suspend request file exists this pass. Carried through the
+    /// reconciler so a missed poller edge is repaired like any other input
+    /// (a request that appeared and the SuspendRequestChanged event was
+    /// dropped, or a stale flag after a file the daemon deleted).
+    pub suspend_requested: bool,
 }
 
 impl Event {
@@ -87,6 +97,8 @@ impl Event {
             Event::GpuOverrideChanged(_) => EventKind::GpuOverrideChanged,
             Event::BatteryPercent(_) => EventKind::BatteryLowChanged,
             Event::PowerOverrideChanged(_) => EventKind::PowerOverrideChanged,
+            Event::SuspendRequestChanged(Some(_)) => EventKind::SuspendRequested,
+            Event::SuspendRequestChanged(None) => EventKind::SuspendCancelled,
             Event::PowerdAppeared => EventKind::PowerAcSettled,
         }
     }
@@ -117,6 +129,8 @@ impl Event {
             EventKind::BatteryLowChanged => "BatteryLowChanged",
             EventKind::PowerOverrideChanged => "PowerOverrideChanged",
             EventKind::PowerAcSettled => "PowerAcSettled",
+            EventKind::SuspendRequested => "SuspendRequested",
+            EventKind::SuspendCancelled => "SuspendCancelled",
         }
     }
 }

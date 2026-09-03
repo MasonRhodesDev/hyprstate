@@ -13,6 +13,12 @@ use crate::pure::profiles::EdpPolicy;
 pub struct Context {
     // ---- main FSM + backstop inputs ----
     pub lid_closed: bool,
+    /// Whether this machine is configured to have a lid at all
+    /// (power.conf `#@ lid = present|absent`; default present). Daemon-side
+    /// only: the FSM's lid route is naturally dead when lid_closed can
+    /// never become true, so WorldInputs does not carry it. Gates the
+    /// handle-lid-switch inhibitor, the lid watcher, and Lid events.
+    pub lid_present: bool,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
     pub wayland_inhibitor: bool,
@@ -20,6 +26,10 @@ pub struct Context {
     pub on_ac: bool,
 
     pub state: State,
+    /// A standing idle-suspend request (runtime request file present).
+    /// Cleared on Resumed before dispatch - a stale value re-enters
+    /// Countdown after wake and loops the machine back into suspend.
+    pub suspend_requested: bool,
 
     // ---- timers (abort + respawn pattern) ----
     pub grace_timer: Option<JoinHandle<()>>,
@@ -73,12 +83,14 @@ impl Default for Context {
     fn default() -> Self {
         Context {
             lid_closed: false,
+            lid_present: true,
             ext_mon_count: 0,
             logind_inhibitor: false,
             wayland_inhibitor: false,
             locked: false,
             on_ac: true,
             state: State::LidOpen,
+            suspend_requested: false,
             grace_timer: None,
             last_cursor_pos: None,
             profile_debounce: None,
@@ -121,6 +133,7 @@ impl Context {
             lid_closed: self.lid_closed,
             ext_mon_count: self.ext_mon_count,
             inhibitor: self.inhibitor(),
+            suspend_requested: self.suspend_requested,
         }
     }
 }

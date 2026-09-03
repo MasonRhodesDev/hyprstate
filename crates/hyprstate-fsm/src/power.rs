@@ -180,9 +180,74 @@ impl PowerPolicy {
 /// Parse power.conf text -> (policy, battery-low %, warnings). Missing keys
 /// fall back to defaults; invalid values warn + keep the default. The io
 /// layer handles the missing-file case (also defaults) and logs warnings.
+/// Whether this machine has a lid at all. `power.conf` `#@ lid = ...`.
+/// Default `Present` keeps today's behavior (the handle-lid-switch
+/// inhibitor is taken); `Absent` is the explicit opt-out for a lidless
+/// desktop, where the lid FSM route is dead and the inhibitor must not be
+/// held. There is deliberately no auto-probe: a false "absent" would let
+/// logind suspend a laptop unlocked on lid close, so absence must be
+/// declared, not guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LidMode {
+    #[default]
+    Present,
+    Absent,
+}
+
+impl LidMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LidMode::Present => "present",
+            LidMode::Absent => "absent",
+        }
+    }
+}
+
+impl std::str::FromStr for LidMode {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "present" => Ok(LidMode::Present),
+            "absent" => Ok(LidMode::Absent),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Everything `power.conf` declares. Additive superset of the tuple
+/// `parse_power_policy` returns, so the GUI's dependency on that signature
+/// is untouched.
+#[derive(Debug, Clone)]
+pub struct PowerConf {
+    pub policy: PowerPolicy,
+    pub battery_low_pct: u8,
+    pub lid: LidMode,
+}
+
+impl Default for PowerConf {
+    fn default() -> Self {
+        // NOT #[derive(Default)]: a bare u8 defaults to 0, which would make
+        // BatteryLow unreachable and pin a no-power.conf laptop to the
+        // `battery` profile down to 0%. The parser already uses this
+        // constant; the missing-file path must match it.
+        Self {
+            policy: PowerPolicy::default(),
+            battery_low_pct: DEFAULT_BATTERY_LOW_PCT,
+            lid: LidMode::default(),
+        }
+    }
+}
+
+/// Thin wrapper: the original tuple contract, preserved for the GUI.
 pub fn parse_power_policy(text: &str) -> (PowerPolicy, u8, Vec<String>) {
+    let (conf, warnings) = parse_power_conf(text);
+    (conf.policy, conf.battery_low_pct, warnings)
+}
+
+pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
     let mut policy = PowerPolicy::default();
     let mut low_pct = DEFAULT_BATTERY_LOW_PCT;
+    let mut lid = LidMode::default();
     let mut warnings = Vec::new();
 
     for line in text.lines() {
@@ -193,6 +258,16 @@ pub fn parse_power_policy(text: &str) -> (PowerPolicy, u8, Vec<String>) {
             warnings.push(format!("ignoring malformed directive: {line:?}"));
             continue;
         };
+        if key == "lid" {
+            match val.parse::<LidMode>() {
+                Ok(m) => lid = m,
+                Err(_) => warnings.push(format!(
+                    "lid must be present|absent, got {val:?} — using {}",
+                    lid.as_str()
+                )),
+            }
+            continue;
+        }
         if key == "battery-low-percent" {
             match val.parse::<i64>() {
                 Ok(n) => low_pct = n.clamp(1, 50) as u8,
@@ -218,7 +293,14 @@ pub fn parse_power_policy(text: &str) -> (PowerPolicy, u8, Vec<String>) {
             )),
         }
     }
-    (policy, low_pct, warnings)
+    (
+        PowerConf {
+            policy,
+            battery_low_pct: low_pct,
+            lid,
+        },
+        warnings,
+    )
 }
 
 /// Self-write detection for platform_profile: tracks the expected values
@@ -402,5 +484,63 @@ mod tests {
             policy.for_base(BaseState::BatteryLow),
             PowerProfile::PowerSaver
         );
+    }
+
+    #[test]
+    fn parse_lid_defaults_present() {
+        let (conf, warnings) = parse_power_conf("");
+        assert_eq!(conf.lid, LidMode::Present);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_lid_present_and_absent() {
+        assert_eq!(parse_power_conf("#@ lid = absent").0.lid, LidMode::Absent);
+        assert_eq!(parse_power_conf("#@ lid = present").0.lid, LidMode::Present);
+    }
+
+    #[test]
+    fn parse_lid_invalid_warns_and_keeps_present() {
+        let (conf, warnings) = parse_power_conf("#@ lid = maybe");
+        assert_eq!(
+            conf.lid,
+            LidMode::Present,
+            "invalid must not flip to absent"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("lid must be present|absent"))
+        );
+    }
+
+    #[test]
+    fn parse_power_policy_wrapper_is_silent_on_lid() {
+        // The GUI's tuple contract: a lid directive is not its concern and
+        // must not surface as a warning through the wrapper.
+        let (_policy, _pct, warnings) = parse_power_policy("#@ lid = absent");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn default_conf_keeps_the_battery_low_threshold() {
+        // Regression guard: the missing-power.conf path (load_power_conf's
+        // Err branch returns PowerConf::default) must not zero the low
+        // threshold. A bare u8 derive did exactly that.
+        assert_eq!(
+            PowerConf::default().battery_low_pct,
+            DEFAULT_BATTERY_LOW_PCT
+        );
+        assert_eq!(
+            parse_power_conf("").0.battery_low_pct,
+            DEFAULT_BATTERY_LOW_PCT
+        );
+    }
+
+    #[test]
+    fn parse_power_conf_still_reads_the_power_keys() {
+        let (conf, _) = parse_power_conf("#@ ac = performance\n#@ lid = absent");
+        assert_eq!(conf.policy.ac.as_str(), "performance");
+        assert_eq!(conf.lid, LidMode::Absent);
     }
 }

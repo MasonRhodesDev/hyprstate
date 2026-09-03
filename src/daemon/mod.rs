@@ -108,6 +108,22 @@ fn discover_backlight(ctx: &mut Context) {
     ctx.brightness_max = max;
 }
 
+/// Delete a request file left over from before a daemon restart. Standalone
+/// (not an Effectors method) because it runs before Effectors is built.
+fn fx_clear_stale_request(_shadow: bool) {
+    // Runs even in shadow: a leftover request file is stale user state, not
+    // a system effect, and leaving it wedges a shadow daemon in COUNTDOWN
+    // (shadow never receives Resumed to clear it).
+    let Some(path) = crate::paths::suspend_request_file() else {
+        return;
+    };
+    if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!("startup: stale idle-suspend request clear failed: {e}");
+    }
+}
+
 pub async fn run(shadow: bool) -> anyhow::Result<()> {
     if shadow {
         info!("SHADOW MODE: effects logged, not fired; no lid inhibitor taken");
@@ -128,12 +144,24 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let (locked_tx, locked_rx) = watch::channel(false);
 
     let mut ctx = Context::default();
-    let (policy, low_pct) = crate::sysio::power_conf::load_power_policy();
-    ctx.power_policy = policy;
-    ctx.battery_low_pct = low_pct;
+    let conf = crate::sysio::power_conf::load_power_conf();
+    ctx.power_policy = conf.policy;
+    ctx.battery_low_pct = conf.battery_low_pct;
+    ctx.lid_present = conf.lid == crate::pure::power::LidMode::Present;
+    if !ctx.lid_present {
+        info!("power.conf declares lid absent — the lid FSM route and its inhibitor are disabled");
+    }
+
+    // A daemon restart mid-request must not suspend a user who has since
+    // returned; the request is re-established only if the file still exists
+    // and the poller re-reads it.
+    fx_clear_stale_request(shadow);
 
     // Lid inhibitor first (held for process lifetime; dropping releases).
-    let _lid_inhibit_fd = if shadow {
+    // Skipped entirely on a lidless machine (lid = absent): there is no lid
+    // switch for logind to mishandle, and holding a phantom inhibitor is
+    // what showed on `systemd-inhibit --list` for this desktop.
+    let _lid_inhibit_fd = if shadow || !ctx.lid_present {
         None
     } else {
         match Inhibitor::acquire(
@@ -214,7 +242,11 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     };
 
     // Initial world snapshot.
-    ctx.lid_closed = manager_uncached.lid_closed().await.unwrap_or(false);
+    ctx.lid_closed = if ctx.lid_present {
+        manager_uncached.lid_closed().await.unwrap_or(false)
+    } else {
+        false
+    };
     ctx.logind_inhibitor = sources::logind_real_inhibitor_active(&manager)
         .await
         .unwrap_or(false);
@@ -268,8 +300,11 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         manager_uncached,
         session_uncached,
         ctx.ext_mon_count,
+        ctx.lid_present,
     ));
-    tokio::spawn(sources::lid_watcher(tx.clone(), manager.clone()));
+    if ctx.lid_present {
+        tokio::spawn(sources::lid_watcher(tx.clone(), manager.clone()));
+    }
     tokio::spawn(sources::sleep_watcher(tx.clone(), manager.clone()));
     if let Some(s) = session {
         tokio::spawn(sources::lock_watcher(tx.clone(), locked_tx, s));

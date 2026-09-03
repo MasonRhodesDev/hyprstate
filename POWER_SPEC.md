@@ -140,10 +140,32 @@ unrecognized `#@` lines):
 #@ battery = power-saver
 #@ battery-low = power-saver
 #@ battery-low-percent = 15
+#@ lid = present
 ```
 
 Missing file/keys → defaults above; values validated ∈ profiles. `battery*`
 keys inert on desktops — deliberate, not templated (V20c).
+
+**`lid = present|absent`** (default `present`). `absent` declares a lidless
+machine: the `handle-lid-switch` block inhibitor is not taken, the lid watcher
+is not spawned, lid events warn-and-ignore, and the FSM's lid route is
+therefore dead. There is no auto-probe — a mistaken "absent" is harmless
+(no lid to mishandle) but a mistaken "present" is too (today's default), while
+a *false absent from a probe* on a real laptop would let logind suspend it
+unlocked on lid close, so absence must be declared, never guessed.
+
+### Idle-suspend request
+
+`hyprstate suspend request|cancel` writes/removes
+`$XDG_RUNTIME_DIR/hyprstate-suspend-request` (runtime dir so a reboot clears
+it). A standing request is a fourth `WorldInputs` field that drives
+`world_state` to `Countdown` (or `Deferred` under an inhibitor) ahead of the
+lid chain — the ONLY way a lidless desktop reaches suspend. It is a *request*
+into the existing machinery: grace window, `LockedHint`+`hyprctl locked`
+proof, cancellation, and the single `do_suspend` call all belong to the lid
+path already. hypridle drives it (idle timeout → request, on-resume →
+cancel); the daemon clears it on `Resumed` and at startup so a wake or a
+restart never re-suspends.
 
 ### Inputs (V5, V8, V10)
 

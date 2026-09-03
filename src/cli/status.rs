@@ -3,6 +3,8 @@
 
 use std::process::Command;
 
+use crate::paths;
+
 fn run_inherit(cmd: &str, args: &[&str]) {
     let _ = Command::new(cmd).args(args).status();
 }
@@ -25,7 +27,16 @@ pub fn run() -> i32 {
             "--no-pager",
         ],
     );
-    println!("\n=== logind handle-lid-switch inhibitor ===");
+    let conf = crate::sysio::power_conf::load_power_conf();
+    if conf.lid == crate::pure::power::LidMode::Absent {
+        println!("\nlid: absent (power.conf) — no handle-lid-switch inhibitor expected");
+    } else {
+        println!("\nlid: present — handle-lid-switch inhibitor held by hyprstate");
+    }
+    if paths::suspend_request_standing() {
+        println!("idle-suspend request: standing");
+    }
+    println!("\n=== logind inhibitors ===");
     run_inherit("systemd-inhibit", &["--list", "--no-pager"]);
     println!("\n=== gpu selection ===");
     super::gpu::run("status");

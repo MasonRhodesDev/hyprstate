@@ -42,6 +42,10 @@ pub enum EventKind {
     AcUnplugged,
     TimerExpired,
     Resumed,
+    /// An idle-suspend request appeared (hypridle's timeout fired).
+    SuspendRequested,
+    /// The standing request was withdrawn (input, or explicit cancel).
+    SuspendCancelled,
     Reconcile,
     MonitorsChanged,
     CtxRepaired,
@@ -58,9 +62,37 @@ pub struct WorldInputs {
     pub lid_closed: bool,
     pub ext_mon_count: u32,
     pub inhibitor: bool,
+    /// An idle-suspend request is standing (the runtime request file
+    /// exists). The daemon clears it on Resumed and on cancellation;
+    /// leaving it set across a resume would re-enter Countdown and loop.
+    pub suspend_requested: bool,
 }
 
 pub fn world_state(w: &WorldInputs) -> State {
+    // Docked (lid shut, driving external monitors) is a deliberate
+    // "stay awake" - a laptop used as a workstation - and outranks an
+    // idle-suspend request: a docked laptop mid-build must not idle-suspend,
+    // exactly as before this feature. A lidless desktop is NEVER Docked
+    // (lid_closed is forced false when lid=absent, so it is LidOpen), so
+    // this early return does not block idle-suspend there - which is the
+    // whole point. Behaviour-preserving for the no-request path: every case
+    // that reached Docked below still does.
+    if w.lid_closed && w.ext_mon_count >= 1 {
+        return State::Docked;
+    }
+    // A standing request outranks the remaining lid chain (a desktop is
+    // otherwise LidOpen forever), but NOT an inhibitor - a request made
+    // while media plays parks in Deferred, exactly as a closed lid would,
+    // and proceeds when the inhibitor drops. Everything downstream (grace,
+    // lock proof, cancellation, the single do_suspend site) is the same
+    // machinery the lid uses; this only adds a way in.
+    if w.suspend_requested {
+        return if w.inhibitor {
+            State::Deferred
+        } else {
+            State::Countdown
+        };
+    }
     if !w.lid_closed {
         State::LidOpen
     } else if w.ext_mon_count >= 1 {
@@ -177,7 +209,35 @@ mod tests {
             lid_closed,
             ext_mon_count,
             inhibitor,
+            suspend_requested: false,
         }
+    }
+
+    /// An idle-suspend request on a lidless desktop: lid open, external
+    /// monitors present, request standing. `inhibitor` varies the branch.
+    fn req(inhibitor: bool) -> WorldInputs {
+        WorldInputs {
+            lid_closed: false,
+            ext_mon_count: 2,
+            inhibitor,
+            suspend_requested: true,
+        }
+    }
+
+    /// Drive a sequence of (event, world, expected desired_state) from a
+    /// start state, threading the state forward. Sequences catch the
+    /// stale-timer / stale-request classes that a per-call value grid
+    /// cannot: the bug lives in what yesterday's state was.
+    fn drive(start: State, steps: &[(EventKind, WorldInputs, Option<State>)]) -> State {
+        let mut state = start;
+        for (i, (ev, world, expect)) in steps.iter().enumerate() {
+            let got = desired_state(state, *ev, world);
+            assert_eq!(got, *expect, "step {i}: {ev:?} from {state:?}");
+            if let Some(next) = got {
+                state = next;
+            }
+        }
+        state
     }
 
     #[test]
@@ -350,5 +410,172 @@ mod tests {
                 main.as_str()
             );
         }
+    }
+
+    #[test]
+    fn suspend_request_wins_over_lid_chain() {
+        // The desktop case: lid open (would be LidOpen), external monitors
+        // (would be Docked), but a request stands -> Countdown.
+        assert_eq!(world_state(&req(false)), State::Countdown);
+    }
+
+    #[test]
+    fn a_docked_laptop_with_a_request_stays_docked() {
+        // Review #6: a docked laptop (lid shut + externals) is deliberately
+        // kept awake; an idle request must not suspend it. A lidless desktop
+        // is LidOpen, not Docked, so this does not affect it.
+        let docked_request = WorldInputs {
+            lid_closed: true,
+            ext_mon_count: 2,
+            inhibitor: false,
+            suspend_requested: true,
+        };
+        assert_eq!(world_state(&docked_request), State::Docked);
+        assert_eq!(
+            desired_state(State::Countdown, EventKind::TimerExpired, &docked_request),
+            Some(State::Docked),
+            "a docked laptop must re-derive out of Countdown, never suspend"
+        );
+    }
+
+    #[test]
+    fn suspend_request_with_inhibitor_is_deferred() {
+        // A request made while media plays parks, exactly as a closed lid
+        // would, and proceeds when the inhibitor drops.
+        assert_eq!(world_state(&req(true)), State::Deferred);
+    }
+
+    #[test]
+    fn suspend_request_enters_countdown_from_any_awake_state() {
+        for start in [State::LidOpen, State::Docked, State::Deferred] {
+            assert_eq!(
+                desired_state(start, EventKind::SuspendRequested, &req(false)),
+                Some(State::Countdown),
+                "from {start:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn suspend_request_ignored_while_suspending() {
+        assert_eq!(
+            desired_state(State::Suspending, EventKind::SuspendRequested, &req(false)),
+            None
+        );
+    }
+
+    #[test]
+    fn suspend_cancel_returns_to_world_state() {
+        // Request withdrawn (suspend_requested now false): from Countdown
+        // the world is a docked desktop.
+        // Lidless desktop: lid open wins the chain, so withdrawing the
+        // request rests at LidOpen (not Docked - that needs a closed lid).
+        assert_eq!(
+            desired_state(
+                State::Countdown,
+                EventKind::SuspendCancelled,
+                &w(false, 2, false)
+            ),
+            Some(State::LidOpen)
+        );
+    }
+
+    #[test]
+    fn timer_expired_with_live_request_suspends_a_lidless_desktop() {
+        // The re-derive previously only accepted a lid-closed Countdown;
+        // it must now accept a request-driven one, or a desktop's grace
+        // timer fires and does nothing.
+        assert_eq!(
+            desired_state(State::Countdown, EventKind::TimerExpired, &req(false)),
+            Some(State::Suspending)
+        );
+    }
+
+    #[test]
+    fn stale_timer_with_withdrawn_request_rederives_not_suspends() {
+        // Grace armed on a request that was then cancelled: the expiry
+        // re-derives the world (lidless desktop -> LidOpen), never Suspending.
+        assert_eq!(
+            desired_state(
+                State::Countdown,
+                EventKind::TimerExpired,
+                &w(false, 2, false)
+            ),
+            Some(State::LidOpen)
+        );
+    }
+
+    #[test]
+    fn sequence_request_then_cancel_within_grace_never_suspends() {
+        // LidOpen -> request -> Countdown -> cancel -> Docked; a stale
+        // TimerExpired must then find no request and stay out of Suspending.
+        let end = drive(
+            State::LidOpen,
+            &[
+                (
+                    EventKind::SuspendRequested,
+                    req(false),
+                    Some(State::Countdown),
+                ),
+                (
+                    EventKind::SuspendCancelled,
+                    w(false, 2, false),
+                    Some(State::LidOpen),
+                ),
+                (EventKind::TimerExpired, w(false, 2, false), None),
+            ],
+        );
+        assert_eq!(end, State::LidOpen);
+    }
+
+    #[test]
+    fn sequence_request_suspend_resume_cycle() {
+        // The whole idle-suspend loop, with the request cleared before
+        // Resumed (the daemon's contract).
+        let end = drive(
+            State::LidOpen,
+            &[
+                (
+                    EventKind::SuspendRequested,
+                    req(false),
+                    Some(State::Countdown),
+                ),
+                (EventKind::TimerExpired, req(false), Some(State::Suspending)),
+                (EventKind::Resumed, w(false, 2, false), Some(State::LidOpen)),
+            ],
+        );
+        assert_eq!(end, State::LidOpen);
+    }
+
+    #[test]
+    fn sequence_resumed_with_stale_request_reenters_countdown() {
+        // If the daemon FAILS to clear the request before Resumed, the
+        // machine re-enters Countdown - a self-perpetuating suspend loop.
+        // This test pins WHY the dispatcher must clear it: the FSM alone
+        // cannot, because Resumed re-derives world_state and the request
+        // still reads true here.
+        assert_eq!(
+            desired_state(State::Suspending, EventKind::Resumed, &req(false)),
+            Some(State::Countdown)
+        );
+    }
+
+    #[test]
+    fn sequence_inhibitor_toggle_during_idle_countdown() {
+        // A media inhibitor appearing mid-countdown parks in Deferred and
+        // resumes Countdown when it clears - the request stands throughout.
+        let end = drive(
+            State::LidOpen,
+            &[
+                (
+                    EventKind::SuspendRequested,
+                    req(false),
+                    Some(State::Countdown),
+                ),
+                (EventKind::InhibitorOn, req(true), Some(State::Deferred)),
+                (EventKind::InhibitorOff, req(false), Some(State::Countdown)),
+            ],
+        );
+        assert_eq!(end, State::Countdown);
     }
 }

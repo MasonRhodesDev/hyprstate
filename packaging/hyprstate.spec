@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.5.0
+Version:        2.6.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,19 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Wed Sep 03 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.6.0-1
+- Idle-suspend as a request into the existing lid Countdown machinery, and
+  explicit lidless configuration. A lidless desktop could never suspend:
+  the suspend route was reachable only via lid close, so the machine sat in
+  LID_OPEN forever. A standing idle-suspend request (written by hypridle via
+  `hyprstate suspend request`) now drives world_state to COUNTDOWN ahead of
+  the lid chain -- but NOT ahead of DOCKED, so a docked laptop mid-work is
+  still deliberately kept awake, exactly as before. `#@ lid = present|absent`
+  in power.conf declares lid presence; absent skips the handle-lid-switch
+  inhibitor (which otherwise showed on a desktop's `systemd-inhibit --list`)
+  and disables the lid route. Every suspend still traverses the one lock
+  proof before logind Suspend.
+
 * Tue Aug 25 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.5.0-1
 - Delete the screen-DPMS sub-FSM. hyprstate no longer blanks outputs at all:
   hypridle (hypr-DE >= 0.2.25) owns locked-screen blanking with an

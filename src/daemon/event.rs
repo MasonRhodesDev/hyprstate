@@ -39,6 +39,11 @@ pub enum Event {
     BatteryPercent(f64),
     /// power-override file changed (payload = first word).
     PowerOverrideChanged(Option<String>),
+    /// The idle-suspend request file changed: `Some(word)` = a request is
+    /// standing, `None` = withdrawn. Written by `hyprstate suspend
+    /// request|cancel` (driven by hypridle's timeout/on-resume), polled by
+    /// mode_poller, and deleted by the daemon itself on Resumed.
+    SuspendRequestChanged(Option<String>),
     /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,
 }
@@ -87,6 +92,8 @@ impl Event {
             Event::GpuOverrideChanged(_) => EventKind::GpuOverrideChanged,
             Event::BatteryPercent(_) => EventKind::BatteryLowChanged,
             Event::PowerOverrideChanged(_) => EventKind::PowerOverrideChanged,
+            Event::SuspendRequestChanged(Some(_)) => EventKind::SuspendRequested,
+            Event::SuspendRequestChanged(None) => EventKind::SuspendCancelled,
             Event::PowerdAppeared => EventKind::PowerAcSettled,
         }
     }
@@ -117,6 +124,8 @@ impl Event {
             EventKind::BatteryLowChanged => "BatteryLowChanged",
             EventKind::PowerOverrideChanged => "PowerOverrideChanged",
             EventKind::PowerAcSettled => "PowerAcSettled",
+            EventKind::SuspendRequested => "SuspendRequested",
+            EventKind::SuspendCancelled => "SuspendCancelled",
         }
     }
 }

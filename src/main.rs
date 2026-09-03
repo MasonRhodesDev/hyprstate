@@ -88,6 +88,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Idle-suspend request (driven by hypridle; feeds the daemon's
+    /// Countdown machinery, never suspends directly)
+    Suspend {
+        #[arg(value_parser = ["request", "cancel", "status"])]
+        action: String,
+    },
     /// systemctl + journalctl + gpu + power summary
     Status,
 }
@@ -170,6 +176,7 @@ fn main() {
             };
             cli::profile::run(&action, name.as_deref(), &save)
         }
+        Cmd::Suspend { action } => cli::suspend::run(&action),
         Cmd::Status => cli::status::run(),
     };
     std::process::exit(rc);

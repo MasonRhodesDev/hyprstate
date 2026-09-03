@@ -229,12 +229,29 @@ async fn handle_reconcile_tick(
     let mut fsm_drift = false;
     let mut power_drift = false;
 
-    if snap.lid_closed != ctx.lid_closed {
+    if ctx.lid_present && snap.lid_closed != ctx.lid_closed {
         drift.push(format!(
             "lid_closed {}->{}",
             ctx.lid_closed, snap.lid_closed
         ));
         ctx.lid_closed = snap.lid_closed;
+        fsm_drift = true;
+    } else if !ctx.lid_present && snap.lid_closed {
+        // A closed lid reported on a machine declared lidless: log it, but
+        // never let it drive the FSM (that is the whole point of absent).
+        warn!("reconciler: lid reported closed but power.conf declares lid absent — ignoring");
+    }
+    // Re-read the file HERE, not from the snapshot: this handler runs after
+    // the Resumed arm (events are processed serially), so a snapshot taken
+    // before Resumed cleared the request cannot resurrect it. Existence is
+    // the signal, matching the poller and the TimerExpired guard.
+    let request_now = crate::paths::suspend_request_standing();
+    if request_now != ctx.suspend_requested {
+        drift.push(format!(
+            "suspend_requested {}->{}",
+            ctx.suspend_requested, request_now
+        ));
+        ctx.suspend_requested = request_now;
         fsm_drift = true;
     }
     if snap.ext_mon_count != ctx.ext_mon_count {
@@ -447,7 +464,16 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             }
 
             // ---- ctx updates that fall through to the FSMs ----
-            Event::Lid(closed) => ctx.lid_closed = closed,
+            Event::Lid(closed) => {
+                if ctx.lid_present {
+                    ctx.lid_closed = closed;
+                } else {
+                    warn!(
+                        "lid event on a machine declared lidless (power.conf lid=absent) — ignoring"
+                    );
+                    continue;
+                }
+            }
             Event::MonitorHotplug { added, ref name } => {
                 debug!(
                     "monitor {}: {name}",
@@ -527,7 +553,37 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 }
                 ctx.on_ac_settled = ctx.on_ac;
             }
-            Event::TimerExpired | Event::Resumed => {}
+            Event::SuspendRequestChanged(word) => {
+                let requested = word.is_some();
+                if requested != ctx.suspend_requested {
+                    info!(
+                        "idle-suspend request {}",
+                        if requested { "standing" } else { "withdrawn" }
+                    );
+                }
+                ctx.suspend_requested = requested;
+            }
+            Event::TimerExpired => {
+                // Close the cancel-vs-expiry race: hypridle's on-resume
+                // deletes the request file on first input, but the poller
+                // echoes that at 2 s cadence and the grace timer can fire
+                // inside the gap. The file is the authority; a request the
+                // user just withdrew must not suspend the machine.
+                if ctx.suspend_requested && !crate::paths::suspend_request_standing() {
+                    info!("idle-suspend request withdrawn at grace expiry");
+                    ctx.suspend_requested = false;
+                }
+            }
+            Event::Resumed => {
+                // Clear BEFORE evaluate_fsms re-derives: Resumed maps
+                // Suspending back to world_state, and a stale standing
+                // request would re-enter Countdown - a wake that schedules
+                // its own next suspend, looping the machine. desktop-commons
+                // adds a conformance assertion pinning this ordering in the
+                // registry PR that follows.
+                ctx.suspend_requested = false;
+                fx.clear_suspend_request();
+            }
         }
 
         // Re-arm the brightness takeover guard on resume: panel raw values

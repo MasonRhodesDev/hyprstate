@@ -149,6 +149,10 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
     let mut last_platform = sysfs::read_first_word(paths::platform_profile_path());
     let mut last_gpu = sysfs::read_first_word(&paths::gpu_override_file());
     let mut last_power = sysfs::read_first_word(&paths::power_override_file());
+    // Existence, not content: every other reader (reconciler, TimerExpired
+    // guard, CLI) keys on the file existing, and a zero-byte file must not
+    // read as "standing" to one and "withdrawn" to another.
+    let mut last_suspend = paths::suspend_request_standing();
     let mut last_profiles = crate::sysio::profiles::profiles_source_fingerprint();
     loop {
         tokio::time::sleep(paths::INHIBIT_POLL).await;
@@ -173,6 +177,18 @@ pub async fn mode_poller(tx: mpsc::Sender<Event>) {
                 return;
             }
         }
+        let cur = paths::suspend_request_standing();
+        if cur != last_suspend {
+            last_suspend = cur;
+            let payload = cur.then(|| "idle".to_string());
+            if tx
+                .send(Event::SuspendRequestChanged(payload))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
         let cur = crate::sysio::profiles::profiles_source_fingerprint();
         if cur != last_profiles {
             last_profiles = cur;
@@ -191,15 +207,24 @@ pub async fn reconcile_snapshot_task(
     manager: LogindManagerProxy<'static>,
     session: Option<LogindSessionProxy<'static>>,
     mut ext_prev: u32,
+    lid_present: bool,
 ) {
     loop {
         tokio::time::sleep(paths::RECONCILE_INTERVAL).await;
-        let lid = match manager.lid_closed().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("reconciler snapshot failed: {e}");
-                continue;
+        // A lidless machine never reads the lid: there is nothing to read,
+        // and a logind error here must not skip the pass that also repairs
+        // the idle-suspend request. Lid-present machines keep the existing
+        // fail-the-pass behavior (a bad lid read must not fabricate a state).
+        let lid = if lid_present {
+            match manager.lid_closed().await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("reconciler snapshot failed: {e}");
+                    continue;
+                }
             }
+        } else {
+            false
         };
         // One monitors payload per pass: ext count, eDP state and the
         // stuck-blank check all read the same JSON, and spawning hyprctl

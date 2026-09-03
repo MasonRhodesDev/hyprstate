@@ -217,11 +217,25 @@ impl std::str::FromStr for LidMode {
 /// Everything `power.conf` declares. Additive superset of the tuple
 /// `parse_power_policy` returns, so the GUI's dependency on that signature
 /// is untouched.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PowerConf {
     pub policy: PowerPolicy,
     pub battery_low_pct: u8,
     pub lid: LidMode,
+}
+
+impl Default for PowerConf {
+    fn default() -> Self {
+        // NOT #[derive(Default)]: a bare u8 defaults to 0, which would make
+        // BatteryLow unreachable and pin a no-power.conf laptop to the
+        // `battery` profile down to 0%. The parser already uses this
+        // constant; the missing-file path must match it.
+        Self {
+            policy: PowerPolicy::default(),
+            battery_low_pct: DEFAULT_BATTERY_LOW_PCT,
+            lid: LidMode::default(),
+        }
+    }
 }
 
 /// Thin wrapper: the original tuple contract, preserved for the GUI.
@@ -506,6 +520,21 @@ mod tests {
         // must not surface as a warning through the wrapper.
         let (_policy, _pct, warnings) = parse_power_policy("#@ lid = absent");
         assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn default_conf_keeps_the_battery_low_threshold() {
+        // Regression guard: the missing-power.conf path (load_power_conf's
+        // Err branch returns PowerConf::default) must not zero the low
+        // threshold. A bare u8 derive did exactly that.
+        assert_eq!(
+            PowerConf::default().battery_low_pct,
+            DEFAULT_BATTERY_LOW_PCT
+        );
+        assert_eq!(
+            parse_power_conf("").0.battery_low_pct,
+            DEFAULT_BATTERY_LOW_PCT
+        );
     }
 
     #[test]

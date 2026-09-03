@@ -505,24 +505,27 @@ impl Effectors {
         }
     }
 
-    /// Delete the override file and update ctx SYNCHRONOUSLY — the poller
-    /// echo of the deletion must arrive as a no-op.
     /// Delete the standing idle-suspend request file. Runs on Resumed so a
     /// wake never inherits the request that put the machine to sleep, and
     /// at startup so a daemon restart mid-request cannot suspend a user
     /// who has since returned.
-    pub fn clear_suspend_request(&self, _ctx: &mut Context) {
+    pub fn clear_suspend_request(&self) {
         if self.shadow {
             info!("[shadow] would delete idle-suspend request file");
             return;
         }
-        if let Err(e) = fs::remove_file(paths::suspend_request_file())
+        let Some(path) = paths::suspend_request_file() else {
+            return;
+        };
+        if let Err(e) = fs::remove_file(path)
             && e.kind() != std::io::ErrorKind::NotFound
         {
             warn!("idle-suspend request clear failed: {e}");
         }
     }
 
+    /// Delete the override file and update ctx SYNCHRONOUSLY — the poller
+    /// echo of the deletion must arrive as a no-op.
     pub fn clear_power_override(&self, ctx: &mut Context) {
         ctx.power_override = None;
         ctx.power_override_base = None;

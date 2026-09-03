@@ -110,11 +110,14 @@ fn discover_backlight(ctx: &mut Context) {
 
 /// Delete a request file left over from before a daemon restart. Standalone
 /// (not an Effectors method) because it runs before Effectors is built.
-fn fx_clear_stale_request(shadow: bool) {
-    if shadow {
+fn fx_clear_stale_request(_shadow: bool) {
+    // Runs even in shadow: a leftover request file is stale user state, not
+    // a system effect, and leaving it wedges a shadow daemon in COUNTDOWN
+    // (shadow never receives Resumed to clear it).
+    let Some(path) = crate::paths::suspend_request_file() else {
         return;
-    }
-    if let Err(e) = std::fs::remove_file(crate::paths::suspend_request_file())
+    };
+    if let Err(e) = std::fs::remove_file(path)
         && e.kind() != std::io::ErrorKind::NotFound
     {
         warn!("startup: stale idle-suspend request clear failed: {e}");
@@ -297,6 +300,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         manager_uncached,
         session_uncached,
         ctx.ext_mon_count,
+        ctx.lid_present,
     ));
     if ctx.lid_present {
         tokio::spawn(sources::lid_watcher(tx.clone(), manager.clone()));

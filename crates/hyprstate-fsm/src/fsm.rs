@@ -69,13 +69,23 @@ pub struct WorldInputs {
 }
 
 pub fn world_state(w: &WorldInputs) -> State {
-    // An idle-suspend request outranks the lid chain: a lidless desktop is
-    // otherwise LidOpen (or Docked) forever, so Countdown could never be
-    // reached. It does NOT outrank an inhibitor - a request made while
-    // media plays parks in Deferred exactly as a closed lid would, and
-    // proceeds when the inhibitor drops. Everything downstream (grace,
+    // Docked (lid shut, driving external monitors) is a deliberate
+    // "stay awake" - a laptop used as a workstation - and outranks an
+    // idle-suspend request: a docked laptop mid-build must not idle-suspend,
+    // exactly as before this feature. A lidless desktop is NEVER Docked
+    // (lid_closed is forced false when lid=absent, so it is LidOpen), so
+    // this early return does not block idle-suspend there - which is the
+    // whole point. Behaviour-preserving for the no-request path: every case
+    // that reached Docked below still does.
+    if w.lid_closed && w.ext_mon_count >= 1 {
+        return State::Docked;
+    }
+    // A standing request outranks the remaining lid chain (a desktop is
+    // otherwise LidOpen forever), but NOT an inhibitor - a request made
+    // while media plays parks in Deferred, exactly as a closed lid would,
+    // and proceeds when the inhibitor drops. Everything downstream (grace,
     // lock proof, cancellation, the single do_suspend site) is the same
-    // machinery the lid uses; this branch only adds a way in.
+    // machinery the lid uses; this only adds a way in.
     if w.suspend_requested {
         return if w.inhibitor {
             State::Deferred
@@ -407,6 +417,25 @@ mod tests {
         // The desktop case: lid open (would be LidOpen), external monitors
         // (would be Docked), but a request stands -> Countdown.
         assert_eq!(world_state(&req(false)), State::Countdown);
+    }
+
+    #[test]
+    fn a_docked_laptop_with_a_request_stays_docked() {
+        // Review #6: a docked laptop (lid shut + externals) is deliberately
+        // kept awake; an idle request must not suspend it. A lidless desktop
+        // is LidOpen, not Docked, so this does not affect it.
+        let docked_request = WorldInputs {
+            lid_closed: true,
+            ext_mon_count: 2,
+            inhibitor: false,
+            suspend_requested: true,
+        };
+        assert_eq!(world_state(&docked_request), State::Docked);
+        assert_eq!(
+            desired_state(State::Countdown, EventKind::TimerExpired, &docked_request),
+            Some(State::Docked),
+            "a docked laptop must re-derive out of Countdown, never suspend"
+        );
     }
 
     #[test]

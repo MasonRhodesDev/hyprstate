@@ -241,12 +241,17 @@ async fn handle_reconcile_tick(
         // never let it drive the FSM (that is the whole point of absent).
         warn!("reconciler: lid reported closed but power.conf declares lid absent — ignoring");
     }
-    if snap.suspend_requested != ctx.suspend_requested {
+    // Re-read the file HERE, not from the snapshot: this handler runs after
+    // the Resumed arm (events are processed serially), so a snapshot taken
+    // before Resumed cleared the request cannot resurrect it. Existence is
+    // the signal, matching the poller and the TimerExpired guard.
+    let request_now = crate::paths::suspend_request_standing();
+    if request_now != ctx.suspend_requested {
         drift.push(format!(
             "suspend_requested {}->{}",
-            ctx.suspend_requested, snap.suspend_requested
+            ctx.suspend_requested, request_now
         ));
-        ctx.suspend_requested = snap.suspend_requested;
+        ctx.suspend_requested = request_now;
         fsm_drift = true;
     }
     if snap.ext_mon_count != ctx.ext_mon_count {
@@ -564,7 +569,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // echoes that at 2 s cadence and the grace timer can fire
                 // inside the gap. The file is the authority; a request the
                 // user just withdrew must not suspend the machine.
-                if ctx.suspend_requested && !crate::paths::suspend_request_file().exists() {
+                if ctx.suspend_requested && !crate::paths::suspend_request_standing() {
                     info!("idle-suspend request withdrawn at grace expiry");
                     ctx.suspend_requested = false;
                 }
@@ -573,11 +578,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // Clear BEFORE evaluate_fsms re-derives: Resumed maps
                 // Suspending back to world_state, and a stale standing
                 // request would re-enter Countdown - a wake that schedules
-                // its own next suspend, looping the machine. Registry
-                // assertion idle-suspend-request-cleared-on-resume pins
-                // this ordering.
+                // its own next suspend, looping the machine. desktop-commons
+                // adds a conformance assertion pinning this ordering in the
+                // registry PR that follows.
                 ctx.suspend_requested = false;
-                fx.clear_suspend_request(&mut ctx);
+                fx.clear_suspend_request();
             }
         }
 

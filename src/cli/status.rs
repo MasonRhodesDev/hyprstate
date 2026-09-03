@@ -27,13 +27,13 @@ pub fn run() -> i32 {
             "--no-pager",
         ],
     );
-    let conf = super::super::sysio::power_conf::load_power_conf();
+    let conf = crate::sysio::power_conf::load_power_conf();
     if conf.lid == crate::pure::power::LidMode::Absent {
         println!("\nlid: absent (power.conf) — no handle-lid-switch inhibitor expected");
     } else {
         println!("\nlid: present — handle-lid-switch inhibitor held by hyprstate");
     }
-    if paths::suspend_request_file().exists() {
+    if paths::suspend_request_standing() {
         println!("idle-suspend request: standing");
     }
     println!("\n=== logind inhibitors ===");

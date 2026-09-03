@@ -66,11 +66,6 @@ pub struct ReconcileSnapshot {
     /// Cursor position this pass; the dispatcher diffs it against the
     /// previous one for a presence signal.
     pub cursor_pos: Option<(i64, i64)>,
-    /// The idle-suspend request file exists this pass. Carried through the
-    /// reconciler so a missed poller edge is repaired like any other input
-    /// (a request that appeared and the SuspendRequestChanged event was
-    /// dropped, or a stale flag after a file the daemon deleted).
-    pub suspend_requested: bool,
 }
 
 impl Event {

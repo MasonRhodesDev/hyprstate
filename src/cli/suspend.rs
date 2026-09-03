@@ -9,7 +9,21 @@
 use crate::paths;
 
 pub fn run(action: &str) -> i32 {
-    let path = paths::suspend_request_file();
+    let Some(path) = paths::suspend_request_file() else {
+        // No runtime dir: a request written to cwd could outlive a reboot.
+        // Cancel/status are harmless no-ops; a request must refuse loudly.
+        return match action {
+            "request" => {
+                eprintln!("hyprstate suspend request: no XDG_RUNTIME_DIR");
+                1
+            }
+            "status" => {
+                println!("idle-suspend request: none (no runtime dir)");
+                0
+            }
+            _ => 0,
+        };
+    };
     match action {
         "request" => match std::fs::write(&path, "idle\n") {
             Ok(()) => 0,

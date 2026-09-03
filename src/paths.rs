@@ -122,11 +122,26 @@ pub fn power_conf_file() -> PathBuf {
 }
 
 /// Standing idle-suspend request. Runtime dir on purpose: a reboot must
-/// clear it (a persistent request would suspend the machine at first
-/// idle after every boot), unlike the deliberate persistence of
-/// power-override. One word; existence is the signal.
-pub fn suspend_request_file() -> PathBuf {
-    xdg_runtime_dir().join("hyprstate-suspend-request")
+/// clear it (a persistent request would suspend the machine at first idle
+/// after every boot), unlike the deliberate persistence of power-override.
+///
+/// `None` when there is no runtime dir. Unlike telemetry, this does NOT
+/// fall back to a relative path: a request written into the CLI's cwd
+/// (often `$HOME` for a user unit) would survive reboot and re-suspend the
+/// machine at first idle - the exact hazard the runtime dir avoids. No
+/// runtime dir means no request can be made or read, which is safe.
+pub fn suspend_request_file() -> Option<PathBuf> {
+    match xdg_paths::BaseDirs::from_env() {
+        Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate-suspend-request")),
+        Err(_) => None,
+    }
+}
+
+/// Whether an idle-suspend request is standing. Existence is the signal;
+/// every reader keys on this so a zero-byte file cannot read as "standing"
+/// to one and "withdrawn" to another.
+pub fn suspend_request_standing() -> bool {
+    suspend_request_file().is_some_and(|p| p.exists())
 }
 
 pub fn power_override_file() -> PathBuf {

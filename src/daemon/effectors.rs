@@ -754,14 +754,23 @@ impl Effectors {
             .is_ok_and(|r| r.is_ok())
     }
 
-    pub async fn do_suspend(&self) {
+    /// Returns whether logind accepted the suspend. A refusal must be
+    /// reported, not swallowed: on 2026-09-04 a masked suspend.target made
+    /// Suspend() fail with AccessDenied, the FSM sat in SUSPENDING forever
+    /// (nothing retries a state only Resumed leaves), and the machine
+    /// stayed awake all night. The caller re-arms the grace and retries.
+    pub async fn do_suspend(&self) -> bool {
         info!("calling logind Suspend()");
         if self.shadow {
             info!("[shadow] would call Suspend(false)");
-            return;
+            return true;
         }
-        if let Err(e) = self.manager.suspend(false).await {
-            warn!("Suspend() failed: {e}");
+        match self.manager.suspend(false).await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("Suspend() failed: {e}");
+                false
+            }
         }
     }
 }

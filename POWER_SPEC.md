@@ -356,6 +356,12 @@ section.
 
 ## Known accepted limitations
 
+- **A refused suspend retries forever.** A Suspend() that logind rejects
+  (masked suspend.target — the 2026-09-04 incident — or transient logind
+  trouble) re-arms the 30 s grace and retries indefinitely, exactly like
+  the broken-locker case below. The failure is loud in the journal each
+  round; the alternative (parking in SUSPENDING) left the machine awake
+  all night with no signal.
 - **Battery-low with a broken locker retries forever.** Decision 6's suspend
   cannot proceed without a proven live locker (fail-closed is the invariant),
   so a machine whose locker is broken re-arms the 30 s grace and asks

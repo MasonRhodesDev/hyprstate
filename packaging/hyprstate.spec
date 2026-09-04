@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.7.0
+Version:        2.7.1
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,14 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Thu Sep 04 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.1-1
+- A refused Suspend() no longer wedges the FSM. logind rejecting the call
+  (a masked suspend.target, transient trouble) used to park the daemon in
+  SUSPENDING forever - only Resumed leaves that state, and no Resumed ever
+  comes for a suspend that did not happen - leaving the machine locked but
+  awake all night (2026-09-04 incident). do_suspend now reports the
+  refusal and the transition is rejected, re-arming a fresh 30 s grace and
+  retrying, the same fail-closed shape as an unengaged lock.
 * Thu Sep 04 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.0-1
 - The decided idle/power ladder (POWER_SPEC.md, 2026-09-04) in the FSM:
   a keep-awake claim governs only the UNLOCKED machine. WorldInputs gains

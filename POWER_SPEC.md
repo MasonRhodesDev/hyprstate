@@ -211,6 +211,31 @@ The seven recorded decisions:
    sees the same claim set hypridle honors; resume re-arms the ladder
    (hypr-DE#29).
 
+#### Decision audit matrix
+
+Every decision maps to executable checks; "will this be auditable against a
+testable playbook" is answered by running them:
+
+| # | Decision | Executable checks |
+|---|----------|-------------------|
+| 1 | Locked always blanks | hypr-DE `tests/lock-policy.sh` (locked + toggle-held must blank); registry `ladder-locked-screen-always-blanks` |
+| 2 | Claim release acts on true input-idle | **GAP — untested.** Depends on hypridle's inhibitor-release behavior; verified and pinned in the Q7 sensing PR |
+| 3 | Lock ends claim authority | fsm test `lock_ends_a_claims_authority`; lock-policy.sh suspend-block structural check; registry `ladder-suspend-listener-ignores-claims`, `ladder-claims-govern-only-the-unlocked-machine` |
+| 4 | Docked follows the ladder | fsm tests `a_request_outranks_docked`, `a_docked_laptop_with_a_request_suspends` (documented reversal of review #6) |
+| 5 | Local input only | Doc-only by design — no code path senses remote activity, so there is nothing to test |
+| 6 | Battery-low overrides claims | fsm test `battery_low_overrides_the_claim`; dispatcher `battery_low_tests` (request + withdraw table, review F1/F2); registry `ladder-battery-request-withdraws-on-recovery` |
+| 7 | Holder-naming observability | **PENDING** — lands with the Q7 sensing/telemetry PR, with its own checks |
+
+Plus the standing suspend-safety assertions (single `do_suspend` site,
+Resumed clears the request, no direct suspend in hypridle.conf, no effector
+self-call) in the desktop-commons registry.
+
+Known audit gaps, on record: decision 2 has no executable check yet; the
+daemon's dispatcher layer has no test harness (the battery-low F1/F2 bugs
+were caught by adversarial review, not tests — the pure
+`battery_low_action` extraction is the mitigation); there is no automated
+end-to-end seat test of the ladder timing.
+
 Rationale on record: the 2026-09-03 incident — hours unlocked-and-lit because
 an unnameable app claim blocked the 180 s lock — was wrong twice under this
 model: the claim outlived real absence with unlimited authority, and nothing

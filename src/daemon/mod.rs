@@ -241,6 +241,11 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         locked_tx: locked_tx.clone(),
     };
 
+    // Decision 6 as a state, not an edge (review F6): a daemon that boots
+    // already discharging below the threshold requests now rather than
+    // waiting for the next UPower percent event.
+    crate::daemon::dispatcher::battery_low_request_check(&mut ctx, &fx);
+
     // Initial world snapshot.
     ctx.lid_closed = if ctx.lid_present {
         manager_uncached.lid_closed().await.unwrap_or(false)

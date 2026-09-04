@@ -330,6 +330,12 @@ section.
 
 ## Known accepted limitations
 
+- **Battery-low with a broken locker retries forever.** Decision 6's suspend
+  cannot proceed without a proven live locker (fail-closed is the invariant),
+  so a machine whose locker is broken re-arms the 30 s grace and asks
+  `Session.Lock()` indefinitely while the battery drains. Failing safe beats
+  suspending unlocked; a bounded retry + notification is future work.
+
 - hypridle timeout switching deferred (restart races lock pipeline + inhibit
   log).
 - Charge thresholds / kbd backlight: EC/QMK, future.

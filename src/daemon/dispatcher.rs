@@ -69,26 +69,77 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
     }
 }
 
-/// Lock-before-suspend: proceed only after a live locker is proven.
-/// A cached/stuck LockedHint is not proof; abort the same way as lock-timeout.
-/// Decision 6 (POWER_SPEC.md ladder): on battery below the low threshold
-/// the daemon requests its own suspend. The request rides the ordinary
-/// machinery - grace, lock proof, cancellation - and `world_state` lets a
-/// battery-low request bypass the keep-awake claim gate, so a paused video
-/// cannot ride the battery to zero. Never fires on AC or over a standing
-/// request. Returns whether a request was made.
-fn maybe_request_low_battery_suspend(ctx: &mut Context, fx: &Effectors) -> bool {
-    if ctx.low_battery && !ctx.on_ac_settled && !ctx.suspend_requested {
-        info!(
-            "battery-low: self-requesting suspend (locks first; 30 s grace is the plug-in window)"
-        );
-        ctx.suspend_requested = true;
-        fx.request_suspend();
-        return true;
-    }
-    false
+/// What decision 6 wants done, as a pure function of the power inputs.
+/// Request only when genuinely discharging low: BOTH the raw and the
+/// settled AC axis must be off - the raw one flips instantly at wake, so a
+/// machine that wakes on a charger inside the 5 s settle window must not
+/// self-request off a UPower percent event (review F2). Withdraw the
+/// moment the reason is gone: raw AC back OR the battery recovered - a
+/// plug-in during the 30 s grace must never ride to a suspend on the
+/// charger (review F1); the effector scopes the withdraw to the daemon's
+/// own "battery-low" file, so an idle-origin request stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatteryLowAction {
+    Request,
+    Withdraw,
+    Hold,
 }
 
+fn battery_low_action(
+    low_battery: bool,
+    on_ac: bool,
+    on_ac_settled: bool,
+    request_standing: bool,
+) -> BatteryLowAction {
+    if low_battery && !on_ac && !on_ac_settled && !request_standing {
+        BatteryLowAction::Request
+    } else if request_standing && (on_ac || !low_battery) {
+        BatteryLowAction::Withdraw
+    } else {
+        BatteryLowAction::Hold
+    }
+}
+
+/// Decision 6 (POWER_SPEC.md ladder): the daemon requests its own suspend
+/// on low battery, and withdraws that request when the reason is gone. The
+/// request rides the ordinary machinery - grace, lock proof, cancellation -
+/// and `world_state` lets a battery-low request bypass the keep-awake claim
+/// gate, so a paused video cannot ride the battery to zero. ctx is marked
+/// standing only when the file was actually written (shadow and failed
+/// writes stay consistent with what readers see, review F3), and cleared
+/// only when the daemon's own file was actually removed - an idle-origin
+/// request is not the daemon's to withdraw. Returns whether anything
+/// changed.
+pub(crate) fn battery_low_request_check(ctx: &mut Context, fx: &Effectors) -> bool {
+    match battery_low_action(
+        ctx.low_battery,
+        ctx.on_ac,
+        ctx.on_ac_settled,
+        ctx.suspend_requested,
+    ) {
+        BatteryLowAction::Request => {
+            if fx.request_suspend() {
+                info!(
+                    "battery-low: self-requesting suspend (locks first; 30 s grace is the plug-in window)"
+                );
+                ctx.suspend_requested = true;
+                return true;
+            }
+            false
+        }
+        BatteryLowAction::Withdraw => {
+            if fx.clear_battery_low_request() {
+                ctx.suspend_requested = false;
+                return true;
+            }
+            false
+        }
+        BatteryLowAction::Hold => false,
+    }
+}
+
+/// Lock-before-suspend: proceed only after a live locker is proven.
+/// A cached/stuck LockedHint is not proof; abort the same way as lock-timeout.
 async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
     if fx.live_locker().await {
         info!("already locked; proceeding to suspend");
@@ -328,6 +379,9 @@ async fn handle_reconcile_tick(
     if power_drift {
         ctx.on_ac_settled = ctx.on_ac;
         power_policy_check(ctx, fx).await;
+        // Repaired power inputs feed decision 6 like live ones - covers
+        // boot-on-battery with UPower down (review F6).
+        battery_low_request_check(ctx, fx);
     }
     // Repaired FSM inputs must DRIVE the machines, not just describe them.
     if fsm_drift {
@@ -513,14 +567,21 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             Event::AcChanged(on_ac) => {
                 ctx.on_ac = on_ac;
                 info!("AC: {label} (on_ac={on_ac})");
+                // Raw plug-in withdraws a battery-low request NOW, not
+                // after the 5 s settle: a suspend on the charger is the
+                // worse failure by far, so cancellation follows the fast
+                // signal while requests wait for both axes.
+                battery_low_request_check(&mut ctx, &fx);
                 fx.schedule_power_settle(&mut ctx);
             }
             Event::PowerAcSettled => {
                 ctx.on_ac_settled = ctx.on_ac;
-                // An unplug that settles while already low must request too
-                // (decision 6); plugging in merely stops future requests -
-                // a standing one is re-derived away by evaluate_fsms.
-                maybe_request_low_battery_suspend(&mut ctx, &fx);
+                // An unplug that settles while already low must request
+                // (decision 6), and a plug-in that settles must withdraw a
+                // standing battery-low request - re-derivation alone never
+                // cancels one, because suspend_requested short-circuits
+                // world_state (review F1).
+                battery_low_request_check(&mut ctx, &fx);
             }
             Event::PowerOverrideChanged(ref word) => {
                 // Echoes of the daemon's own writes arrive with ctx already
@@ -545,12 +606,12 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 let new_low = battery_low_step(ctx.low_battery, pct, ctx.battery_low_pct);
                 let flipped = new_low != ctx.low_battery;
                 ctx.low_battery = new_low;
-                // Decided model, decision 6: battery-low self-requests
-                // suspend. Checked on every percent event, not only the
-                // flip, so a machine that woke still-low re-requests (the
-                // 30 s grace is the plug-in window).
-                let requested = maybe_request_low_battery_suspend(&mut ctx, &fx);
-                if !flipped && !requested {
+                // Decided model, decision 6: battery-low requests and
+                // withdrawals ride every percent event, not only the flip,
+                // so a machine that woke still-low re-requests (the 30 s
+                // grace is the plug-in window) and a recovery withdraws.
+                let changed = battery_low_request_check(&mut ctx, &fx);
+                if !flipped && !changed {
                     continue; // no flip -> no event existed in v1
                 }
             }
@@ -651,5 +712,58 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         }
 
         evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;
+    }
+}
+
+#[cfg(test)]
+mod battery_low_tests {
+    use super::{BatteryLowAction, battery_low_action};
+
+    #[test]
+    fn requests_only_when_genuinely_discharging_low() {
+        // (low, on_ac, on_ac_settled, standing) -> action
+        assert_eq!(
+            battery_low_action(true, false, false, false),
+            BatteryLowAction::Request
+        );
+        // Review F2: a machine that wakes on the charger has raw on_ac
+        // true while on_ac_settled is still false for the 5 s debounce; a
+        // UPower percent event in that window must NOT request.
+        assert_eq!(
+            battery_low_action(true, true, false, false),
+            BatteryLowAction::Hold
+        );
+        // Stale-true settled axis alone also blocks a request.
+        assert_eq!(
+            battery_low_action(true, false, true, false),
+            BatteryLowAction::Hold
+        );
+        // Not low, nothing standing: nothing to do.
+        assert_eq!(
+            battery_low_action(false, false, false, false),
+            BatteryLowAction::Hold
+        );
+    }
+
+    #[test]
+    fn withdraws_the_moment_the_reason_is_gone() {
+        // Review F1: a plug-in during the 30 s grace must cancel the
+        // standing request - re-derivation alone cannot, because
+        // suspend_requested short-circuits world_state. The raw axis is
+        // enough: cancellation follows the fast signal.
+        assert_eq!(
+            battery_low_action(true, true, false, true),
+            BatteryLowAction::Withdraw
+        );
+        // Battery recovered (charged above threshold + hysteresis).
+        assert_eq!(
+            battery_low_action(false, false, false, true),
+            BatteryLowAction::Withdraw
+        );
+        // Still discharging low with a request standing: hold, idempotent.
+        assert_eq!(
+            battery_low_action(true, false, false, true),
+            BatteryLowAction::Hold
+        );
     }
 }

@@ -640,6 +640,25 @@ mod tests {
     }
 
     #[test]
+    fn a_docked_manual_request_under_a_claim_defers() {
+        // Review F5, pinned deliberately: a manual `hyprstate suspend
+        // request` on a docked, unlocked machine with a claim held (a
+        // movie) parks in Deferred - whose on_enter pauses media as the
+        // pre-suspend courtesy, same as lid-close mid-call. The idle path
+        // cannot reach this shape (hypridle's 900 s listener is gated on
+        // the lock, and locked kills the claim), so only an explicit
+        // request pays the pause.
+        let docked_claimed = WorldInputs {
+            lid_closed: true,
+            ext_mon_count: 2,
+            inhibitor: true,
+            suspend_requested: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&docked_claimed), State::Deferred);
+    }
+
+    #[test]
     fn lid_close_mid_call_still_defers_until_locked() {
         // Claims govern the unlocked machine: shutting the lid during a
         // call (claim held, undocked, unlocked) defers. The same closed lid

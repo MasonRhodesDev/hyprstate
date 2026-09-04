@@ -152,8 +152,17 @@ async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
             return false;
         }
     }
-    fx.do_suspend().await;
-    true
+    if fx.do_suspend().await {
+        true
+    } else {
+        // Same fail-closed shape as an unengaged lock: reject the
+        // transition so the caller re-arms a fresh grace and retries. A
+        // refused suspend (masked target, logind trouble) must never park
+        // the FSM in SUSPENDING - only Resumed leaves that state, and no
+        // Resumed ever comes for a suspend that did not happen.
+        warn!("suspend refused - staying in COUNTDOWN to retry");
+        false
+    }
 }
 
 fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {

@@ -219,7 +219,7 @@ testable playbook" is answered by running them:
 | # | Decision | Executable checks |
 |---|----------|-------------------|
 | 1 | Locked always blanks | hypr-DE `tests/lock-policy.sh` (locked + toggle-held must blank); registry `ladder-locked-screen-always-blanks` |
-| 2 | Claim release acts on true input-idle | **GAP — untested.** Depends on hypridle's inhibitor-release behavior; verified and pinned in the Q7 sensing PR |
+| 2 | Claim release acts on true input-idle | hypr-DE `no-keep-awake.sh` gate + `condition_retry=10` on the 180 s listener (release → warn + lock within ~10 s); lock-policy.sh per-source gate tests; registry `ladder-warn-gated-on-claims`. Residual gap: the D-Bus-ledger release path (hypridle internal) is still unpinned |
 | 3 | Lock ends claim authority | fsm test `lock_ends_a_claims_authority`; lock-policy.sh suspend-block structural check; registry `ladder-suspend-listener-ignores-claims`, `ladder-claims-govern-only-the-unlocked-machine` |
 | 4 | Docked follows the ladder | fsm tests `a_request_outranks_docked`, `a_docked_laptop_with_a_request_suspends` (documented reversal of review #6) |
 | 5 | Local input only | Doc-only by design — no code path senses remote activity, so there is nothing to test |
@@ -230,7 +230,8 @@ Plus the standing suspend-safety assertions (single `do_suspend` site,
 Resumed clears the request, no direct suspend in hypridle.conf, no effector
 self-call) in the desktop-commons registry.
 
-Known audit gaps, on record: decision 2 has no executable check yet; the
+Known audit gaps, on record: decision 2's D-Bus-ledger release path is
+hypridle-internal and unpinned (the stateless-gate sources are covered); the
 daemon's dispatcher layer has no test harness (the battery-low F1/F2 bugs
 were caught by adversarial review, not tests — the pure
 `battery_low_action` extraction is the mitigation); there is no automated

@@ -134,6 +134,11 @@ impl Context {
             ext_mon_count: self.ext_mon_count,
             inhibitor: self.inhibitor(),
             suspend_requested: self.suspend_requested,
+            locked: self.locked,
+            // battery_low is a bypass, not an axis: only meaningful on
+            // battery. The settled AC signal, so a plug-in during the 30 s
+            // grace (settles in ~5 s) withdraws the bypass before expiry.
+            battery_low: self.low_battery && !self.on_ac_settled,
         }
     }
 }

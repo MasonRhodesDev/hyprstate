@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.6.0
+Version:        2.7.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,18 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Thu Sep 04 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.0-1
+- The decided idle/power ladder (POWER_SPEC.md, 2026-09-04) in the FSM:
+  a keep-awake claim governs only the UNLOCKED machine. WorldInputs gains
+  locked and battery_low; an inhibitor on a locked machine defers nothing,
+  and battery-low bypasses the claim gate outright (the daemon
+  self-requests suspend on battery below the low threshold - the 30 s
+  grace is the plug-in window; it still locks first).
+- A standing suspend request now outranks Docked: docking neutralizes the
+  lid as a suspend trigger but is not itself a keep-awake, so a genuinely
+  idle docked laptop suspends like the desktop. Lid-close while docked
+  still triggers nothing; lid-close mid-call (claim held, unlocked) still
+  defers. hyprstate-fsm 5.0.0 (WorldInputs is a breaking change).
 * Wed Sep 03 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.6.0-1
 - Idle-suspend as a request into the existing lid Countdown machinery, and
   explicit lidless configuration. A lidless desktop could never suspend:

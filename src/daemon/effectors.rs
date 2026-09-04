@@ -509,6 +509,24 @@ impl Effectors {
     /// wake never inherits the request that put the machine to sleep, and
     /// at startup so a daemon restart mid-request cannot suspend a user
     /// who has since returned.
+    /// Decision 6: write the idle-suspend request file on the daemon's own
+    /// behalf (battery-low). Same file the CLI and hypridle write, so every
+    /// downstream contract (poller echo, Resumed clear, grace re-check)
+    /// applies unchanged.
+    pub fn request_suspend(&self) {
+        if self.shadow {
+            info!("[shadow] would write idle-suspend request file");
+            return;
+        }
+        let Some(path) = paths::suspend_request_file() else {
+            warn!("battery-low suspend request: no runtime dir");
+            return;
+        };
+        if let Err(e) = fs::write(path, "battery-low\n") {
+            warn!("battery-low suspend request write failed: {e}");
+        }
+    }
+
     pub fn clear_suspend_request(&self) {
         if self.shadow {
             info!("[shadow] would delete idle-suspend request file");

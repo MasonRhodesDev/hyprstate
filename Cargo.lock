@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "hyprstate"
-version = "2.6.0"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "hyprstate-fsm"
-version = "4.0.0"
+version = "5.0.0"
 dependencies = [
  "monitor-profiles",
  "serde",

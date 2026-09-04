@@ -71,6 +71,24 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
 
 /// Lock-before-suspend: proceed only after a live locker is proven.
 /// A cached/stuck LockedHint is not proof; abort the same way as lock-timeout.
+/// Decision 6 (POWER_SPEC.md ladder): on battery below the low threshold
+/// the daemon requests its own suspend. The request rides the ordinary
+/// machinery - grace, lock proof, cancellation - and `world_state` lets a
+/// battery-low request bypass the keep-awake claim gate, so a paused video
+/// cannot ride the battery to zero. Never fires on AC or over a standing
+/// request. Returns whether a request was made.
+fn maybe_request_low_battery_suspend(ctx: &mut Context, fx: &Effectors) -> bool {
+    if ctx.low_battery && !ctx.on_ac_settled && !ctx.suspend_requested {
+        info!(
+            "battery-low: self-requesting suspend (locks first; 30 s grace is the plug-in window)"
+        );
+        ctx.suspend_requested = true;
+        fx.request_suspend();
+        return true;
+    }
+    false
+}
+
 async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
     if fx.live_locker().await {
         info!("already locked; proceeding to suspend");
@@ -497,7 +515,13 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 info!("AC: {label} (on_ac={on_ac})");
                 fx.schedule_power_settle(&mut ctx);
             }
-            Event::PowerAcSettled => ctx.on_ac_settled = ctx.on_ac,
+            Event::PowerAcSettled => {
+                ctx.on_ac_settled = ctx.on_ac;
+                // An unplug that settles while already low must request too
+                // (decision 6); plugging in merely stops future requests -
+                // a standing one is re-derived away by evaluate_fsms.
+                maybe_request_low_battery_suspend(&mut ctx, &fx);
+            }
             Event::PowerOverrideChanged(ref word) => {
                 // Echoes of the daemon's own writes arrive with ctx already
                 // matching — those land as no-ops by design.
@@ -519,10 +543,16 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             Event::BatteryPercent(pct) => {
                 ctx.battery_percent = Some(pct);
                 let new_low = battery_low_step(ctx.low_battery, pct, ctx.battery_low_pct);
-                if new_low == ctx.low_battery {
+                let flipped = new_low != ctx.low_battery;
+                ctx.low_battery = new_low;
+                // Decided model, decision 6: battery-low self-requests
+                // suspend. Checked on every percent event, not only the
+                // flip, so a machine that woke still-low re-requests (the
+                // 30 s grace is the plug-in window).
+                let requested = maybe_request_low_battery_suspend(&mut ctx, &fx);
+                if !flipped && !requested {
                     continue; // no flip -> no event existed in v1
                 }
-                ctx.low_battery = new_low;
             }
             Event::PlatformProfileChanged(ref value) => {
                 // Self-writes (or anything inside the suppression window of

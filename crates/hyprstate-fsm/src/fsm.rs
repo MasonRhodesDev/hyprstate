@@ -66,38 +66,40 @@ pub struct WorldInputs {
     /// exists). The daemon clears it on Resumed and on cancellation;
     /// leaving it set across a resume would re-enter Countdown and loop.
     pub suspend_requested: bool,
+    /// The compositor holds the session lock. Decided model (2026-09-04,
+    /// POWER_SPEC.md): lock ends every keep-awake claim's authority, so an
+    /// inhibitor on a locked machine defers nothing.
+    pub locked: bool,
+    /// On battery below the low threshold (false whenever on AC). Overrides
+    /// keep-awake outright: a claim must not ride the battery to zero.
+    pub battery_low: bool,
 }
 
 pub fn world_state(w: &WorldInputs) -> State {
-    // Docked (lid shut, driving external monitors) is a deliberate
-    // "stay awake" - a laptop used as a workstation - and outranks an
-    // idle-suspend request: a docked laptop mid-build must not idle-suspend,
-    // exactly as before this feature. A lidless desktop is NEVER Docked
-    // (lid_closed is forced false when lid=absent, so it is LidOpen), so
-    // this early return does not block idle-suspend there - which is the
-    // whole point. Behaviour-preserving for the no-request path: every case
-    // that reached Docked below still does.
-    if w.lid_closed && w.ext_mon_count >= 1 {
-        return State::Docked;
-    }
-    // A standing request outranks the remaining lid chain (a desktop is
-    // otherwise LidOpen forever), but NOT an inhibitor - a request made
-    // while media plays parks in Deferred, exactly as a closed lid would,
-    // and proceeds when the inhibitor drops. Everything downstream (grace,
-    // lock proof, cancellation, the single do_suspend site) is the same
-    // machinery the lid uses; this only adds a way in.
+    // Decided model (2026-09-04, POWER_SPEC.md "The idle/power ladder"):
+    // a keep-awake claim governs only the UNLOCKED machine - lock ends
+    // every claim's authority - and battery-low overrides the claim
+    // outright (a paused video must not ride the battery to zero).
+    let claim = w.inhibitor && !w.locked && !w.battery_low;
+    // A standing request outranks Docked (decision 4): docking neutralizes
+    // the lid as a suspend TRIGGER - a docked laptop mid-build must not
+    // sleep on lid close - but it is not itself a keep-awake, so a
+    // genuinely idle docked laptop suspends exactly like the desktop.
+    // Everything downstream (grace, lock proof, cancellation, the single
+    // do_suspend site) is the same machinery the lid uses.
     if w.suspend_requested {
-        return if w.inhibitor {
+        return if claim {
             State::Deferred
         } else {
             State::Countdown
         };
     }
+    if w.lid_closed && w.ext_mon_count >= 1 {
+        return State::Docked;
+    }
     if !w.lid_closed {
         State::LidOpen
-    } else if w.ext_mon_count >= 1 {
-        State::Docked
-    } else if w.inhibitor {
+    } else if claim {
         State::Deferred
     } else {
         State::Countdown
@@ -209,7 +211,7 @@ mod tests {
             lid_closed,
             ext_mon_count,
             inhibitor,
-            suspend_requested: false,
+            ..WorldInputs::default()
         }
     }
 
@@ -221,6 +223,7 @@ mod tests {
             ext_mon_count: 2,
             inhibitor,
             suspend_requested: true,
+            ..WorldInputs::default()
         }
     }
 
@@ -420,21 +423,25 @@ mod tests {
     }
 
     #[test]
-    fn a_docked_laptop_with_a_request_stays_docked() {
-        // Review #6: a docked laptop (lid shut + externals) is deliberately
-        // kept awake; an idle request must not suspend it. A lidless desktop
-        // is LidOpen, not Docked, so this does not affect it.
+    fn a_docked_laptop_with_a_request_suspends() {
+        // AMENDED by the decided model (2026-09-04, decision 4), reversing
+        // review #6's "docked outranks request": docking neutralizes the
+        // LID as a suspend trigger, but it is not a keep-awake claim, so a
+        // genuinely idle docked laptop (900 s of no input -> request)
+        // suspends exactly like the desktop. Lid-close alone still parks
+        // Docked - see a_request_outranks_docked.
         let docked_request = WorldInputs {
             lid_closed: true,
             ext_mon_count: 2,
             inhibitor: false,
             suspend_requested: true,
+            ..WorldInputs::default()
         };
-        assert_eq!(world_state(&docked_request), State::Docked);
+        assert_eq!(world_state(&docked_request), State::Countdown);
         assert_eq!(
             desired_state(State::Countdown, EventKind::TimerExpired, &docked_request),
-            Some(State::Docked),
-            "a docked laptop must re-derive out of Countdown, never suspend"
+            Some(State::Suspending),
+            "an idle docked laptop rides the request to suspend"
         );
     }
 
@@ -577,5 +584,76 @@ mod tests {
             ],
         );
         assert_eq!(end, State::Countdown);
+    }
+
+    // ---- The decided ladder model (2026-09-04, POWER_SPEC.md) ----
+
+    #[test]
+    fn lock_ends_a_claims_authority() {
+        // An inhibitor on a LOCKED machine defers nothing: the request
+        // proceeds to Countdown. Claims govern only the unlocked machine.
+        let world = WorldInputs {
+            inhibitor: true,
+            suspend_requested: true,
+            locked: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&world), State::Countdown);
+        // Unlocked, the same claim still parks the request in Deferred.
+        let unlocked = WorldInputs {
+            locked: false,
+            ..world
+        };
+        assert_eq!(world_state(&unlocked), State::Deferred);
+    }
+
+    #[test]
+    fn battery_low_overrides_the_claim() {
+        // Battery-low bypasses the claim gate even unlocked: a paused video
+        // must not ride the battery to zero. The suspend machinery still
+        // locks first (request_lock in suspending_tail), so nothing is
+        // exposed by the bypass.
+        let world = WorldInputs {
+            inhibitor: true,
+            suspend_requested: true,
+            battery_low: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&world), State::Countdown);
+    }
+
+    #[test]
+    fn a_request_outranks_docked() {
+        // Decision 4: docking neutralizes the lid as a suspend trigger; it
+        // is not itself a keep-awake. A genuinely idle docked laptop (900 s
+        // -> request) suspends exactly like the desktop...
+        let idle_docked = WorldInputs {
+            lid_closed: true,
+            ext_mon_count: 2,
+            suspend_requested: true,
+            locked: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&idle_docked), State::Countdown);
+        // ...while lid-close alone, with no request, still parks Docked.
+        assert_eq!(world_state(&w(true, 2, false)), State::Docked);
+    }
+
+    #[test]
+    fn lid_close_mid_call_still_defers_until_locked() {
+        // Claims govern the unlocked machine: shutting the lid during a
+        // call (claim held, undocked, unlocked) defers. The same closed lid
+        // on a locked machine proceeds - the claim lost its authority.
+        let mid_call = WorldInputs {
+            lid_closed: true,
+            inhibitor: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&mid_call), State::Deferred);
+        let locked = WorldInputs {
+            locked: true,
+            ..mid_call
+        };
+        assert_eq!(world_state(&locked), State::Countdown);
     }
 }

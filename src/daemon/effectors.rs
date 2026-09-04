@@ -505,10 +505,62 @@ impl Effectors {
         }
     }
 
-    /// Delete the standing idle-suspend request file. Runs on Resumed so a
-    /// wake never inherits the request that put the machine to sleep, and
-    /// at startup so a daemon restart mid-request cannot suspend a user
-    /// who has since returned.
+    /// Decision 6: write the idle-suspend request file on the daemon's own
+    /// behalf (battery-low). Same file the CLI and hypridle write, so every
+    /// downstream contract (poller echo, Resumed clear, grace re-check)
+    /// applies unchanged; the "battery-low" body is the provenance token
+    /// that lets AC-return withdraw ONLY the daemon's own request. Returns
+    /// whether the file was actually written - the caller must not mark a
+    /// request standing that no reader can see (shadow, or a failed write).
+    pub fn request_suspend(&self) -> bool {
+        if self.shadow {
+            info!("[shadow] would self-request suspend (battery-low)");
+            return false;
+        }
+        let Some(path) = paths::suspend_request_file() else {
+            warn!("battery-low suspend request: no runtime dir");
+            return false;
+        };
+        match fs::write(path, "battery-low\n") {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("battery-low suspend request write failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// Withdraw a battery-low self-request when its reason is gone (AC
+    /// returned, or the battery recovered). Scoped by the provenance token:
+    /// a request hypridle or the CLI wrote ("idle") is somebody else's and
+    /// stays standing - only the daemon's own "battery-low" file is
+    /// removed. Returns whether a file was removed.
+    pub fn clear_battery_low_request(&self) -> bool {
+        if self.shadow {
+            info!("[shadow] would withdraw battery-low suspend request");
+            return false;
+        }
+        let Some(path) = paths::suspend_request_file() else {
+            return false;
+        };
+        match fs::read_to_string(&path) {
+            Ok(body) if body.starts_with("battery-low") => {
+                if let Err(e) = fs::remove_file(&path) {
+                    warn!("battery-low request withdraw failed: {e}");
+                    false
+                } else {
+                    info!("battery-low suspend request withdrawn (reason gone)");
+                    true
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Delete the standing idle-suspend request file, whoever wrote it.
+    /// Runs on Resumed so a wake never inherits the request that put the
+    /// machine to sleep, and at startup so a daemon restart mid-request
+    /// cannot suspend a user who has since returned.
     pub fn clear_suspend_request(&self) {
         if self.shadow {
             info!("[shadow] would delete idle-suspend request file");

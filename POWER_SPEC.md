@@ -154,18 +154,82 @@ therefore dead. There is no auto-probe — a mistaken "absent" is harmless
 a *false absent from a probe* on a real laptop would let logind suspend it
 unlocked on lid close, so absence must be declared, never guessed.
 
+### The idle/power ladder — decided model (2026-09-04)
+
+Reviewed and decided by Mason on the lavish decision graph
+(`~/repos/.lavish/idle-power-model.html`); this section is the recorded form
+and supersedes any earlier precedence text it contradicts.
+
+**Core rule: keep-awake has exactly one power.** A keep-awake claim — an app
+idle-inhibitor (Wayland surface, ScreenSaver D-Bus, logind idle-block) or the
+user's deliberate toggle, *indistinguishable by design* — prevents entry into
+the warn→lock ladder while the user might still be present. That is all it
+does. **Once the session is LOCKED, no claim is consulted again**: the screen
+blanks 30 s later unconditionally (toggle included), and 900 s of true input
+idle suspends unconditionally. Claims govern the unlocked machine only.
+
+The ladder (any input returns to AWAKE and cancels a warn or grace in
+flight):
+
+```
+input < 180s ─────────────────────────────▶ AWAKE
+no input 180s ── claim held? ── yes ──▶ HELD_AWAKE (lit, unlocked)
+                     │                        │ claim released: TRUE idle
+                     no                       ▼ clock — brief warn, prompt lock
+                     ▼
+                 WARN (blur ramp) ──▶ LOCK ──▶ +30s: BLANK (always)
+                                        │
+                                        └──▶ 900s total idle: GRACE (30 s,
+                                             live locker proven) ──▶ SUSPEND
+```
+
+The seven recorded decisions:
+
+1. **A locked screen always blanks**; keep-awake only prevents lock and
+   suspend. The blanker's user-toggle re-admission is removed.
+2. **Claim release acts on true input-idle.** A video ending 50 minutes after
+   the user left gets one brief blur warning, then a prompt lock; past 900 s
+   the suspend follows promptly. Release is not activity.
+3. **Lock ends every claim's authority.** The 900 s suspend trigger ignores
+   inhibitors and gates on the compositor lock instead — the same shape as
+   the blanker.
+4. **Docked follows the same ladder.** A genuinely idle docked laptop
+   suspends at 900 s like the desktop: a standing suspend request outranks
+   `Docked` in `world_state`. Lid-close while docked still triggers nothing —
+   Docked only neutralizes the lid as a suspend *trigger*. Lid-close on an
+   undocked laptop with a claim held (a call) parks in `Deferred` until the
+   claim releases: claims govern the unlocked machine, and only it.
+5. **Local input only.** Remote/SSH activity is not presence; remote users
+   claim keep-awake explicitly (toggle or `systemd-inhibit`).
+6. **Battery-low overrides keep-awake.** On battery below the low threshold
+   the daemon self-requests suspend; that request bypasses the claim gate
+   (`Countdown` even under an inhibitor), and the suspend machinery locks
+   first as always.
+7. **The awake state must explain itself.** `hyprstate status` and the
+   telemetry stream name the current ladder node and every keep-awake holder
+   (feeds the dials lit `idle_graph()`); sensing is unified so the daemon
+   sees the same claim set hypridle honors; resume re-arms the ladder
+   (hypr-DE#29).
+
+Rationale on record: the 2026-09-03 incident — hours unlocked-and-lit because
+an unnameable app claim blocked the 180 s lock — was wrong twice under this
+model: the claim outlived real absence with unlimited authority, and nothing
+could name the claimant. Decisions 2+3 bound every claim's authority at the
+lock; decision 7 makes the one remaining held state diagnosable.
+
 ### Idle-suspend request
 
 `hyprstate suspend request|cancel` writes/removes
 `$XDG_RUNTIME_DIR/hyprstate-suspend-request` (runtime dir so a reboot clears
-it). A standing request is a fourth `WorldInputs` field that drives
-`world_state` to `Countdown` (or `Deferred` under an inhibitor) ahead of the
-lid chain — the ONLY way a lidless desktop reaches suspend. It is a *request*
-into the existing machinery: grace window, `LockedHint`+`hyprctl locked`
-proof, cancellation, and the single `do_suspend` call all belong to the lid
-path already. hypridle drives it (idle timeout → request, on-resume →
-cancel); the daemon clears it on `Resumed` and at startup so a wake or a
-restart never re-suspends.
+it). A standing request is a `WorldInputs` field that drives `world_state` to
+`Countdown` ahead of the lid chain *and ahead of Docked* (decision 4); only a
+keep-awake claim on a still-unlocked machine parks it in `Deferred` — and a
+battery-low request bypasses even that (decision 6). It is a *request* into
+the existing machinery: grace window, `LockedHint`+`hyprctl locked` proof,
+cancellation, and the single `do_suspend` call all belong to the lid path
+already. hypridle drives it (900 s idle → request, on-resume → cancel); the
+daemon clears it on `Resumed` and at startup so a wake or a restart never
+re-suspends.
 
 ### Inputs (V5, V8, V10)
 

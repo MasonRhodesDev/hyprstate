@@ -327,6 +327,43 @@ pub fn edp_disable_args(monitor: &str) -> Vec<String> {
     ]
 }
 
+/// Quote `s` as a Lua double-quoted string literal.
+fn lua_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// hyprctl argv to apply a rendered profile to the running compositor
+/// without a full `reload`.
+///
+/// A profile file is nothing but `hl.monitor` / `hl.workspace_rule` calls, so
+/// running just that file in the config's own Lua state is enough. `hl.monitor`
+/// replaces the rule for an output (merging over the old one) and schedules
+/// only a monitor-state refresh, while `reload` re-runs the whole config and
+/// trips every refresh bit — including the blur-framebuffer pass, which builds
+/// a framebuffer for every monitor and aborts on one that is still 0x0 mid-
+/// hotplug (Hyprland crash reports, 2026-09-06 and 2026-09-20).
+///
+/// Not wrapped in `pcall`: a failing profile must surface as a non-`ok` reply.
+pub fn apply_profile_args(lua_path: &str) -> Vec<String> {
+    vec![
+        "eval".into(),
+        format!("dofile({})", lua_string_literal(lua_path)),
+    ]
+}
+
 /// hyprctl argv to turn every output DPMS on. Deliberately not
 /// parameterised: hyprstate never blanks (hypridle owns DPMS off,
 /// hyprstate#24), so no off form is constructible from this crate.
@@ -355,6 +392,27 @@ pub fn move_workspace_to_monitor_args(ws: i64, monitor: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_profile_is_an_eval_dofile_never_a_reload() {
+        let args = apply_profile_args("/home/u/.config/hypr/profiles/.active.lua");
+        assert_eq!(
+            args,
+            vec![
+                "eval".to_string(),
+                "dofile(\"/home/u/.config/hypr/profiles/.active.lua\")".to_string(),
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "reload"));
+    }
+
+    #[test]
+    fn apply_profile_escapes_the_path_as_a_lua_string() {
+        let args = apply_profile_args("/p/a\"b\\c\nd\re\0f.lua");
+        // One argv element (no shell), and nothing can close the literal early.
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[1], "dofile(\"/p/a\\\"b\\\\c\\nd\\re\\0f.lua\")");
+    }
 
     fn parse(name: &str, text: &str) -> Result<(Profile, Vec<String>), String> {
         parse_profile(name, ProfileFormat::Conf, text)

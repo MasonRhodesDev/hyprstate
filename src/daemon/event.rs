@@ -12,6 +12,10 @@ pub enum Event {
     MonitorHotplug { added: bool, name: String },
     /// configreloaded from socket2 -> RECONCILE re-assert.
     ConfigReloaded,
+    /// The worker applied a profile (`hyprctl eval`, no `configreloaded`
+    /// follows) -> the same RECONCILE re-assert, so the new profile's eDP
+    /// policy is enforced exactly as it was after a reload.
+    ProfileApplied,
     /// Debounced monitor-set change -> profile/gpu/power reconciliation.
     MonitorsChanged,
     /// `/etc/monitor-profiles` or the user profiles dir changed on disk.
@@ -76,7 +80,7 @@ impl Event {
             Event::Lid(false) => EventKind::LidOpen,
             Event::MonitorHotplug { added: true, .. } => EventKind::MonitorAdded,
             Event::MonitorHotplug { added: false, .. } => EventKind::MonitorRemoved,
-            Event::ConfigReloaded => EventKind::Reconcile,
+            Event::ConfigReloaded | Event::ProfileApplied => EventKind::Reconcile,
             Event::MonitorsChanged | Event::ProfilesChanged => EventKind::MonitorsChanged,
             Event::Inhibitor { active: true, .. } => EventKind::InhibitorOn,
             Event::Inhibitor { active: false, .. } => EventKind::InhibitorOff,

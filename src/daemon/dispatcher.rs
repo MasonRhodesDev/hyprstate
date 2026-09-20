@@ -516,14 +516,20 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
 
         // ---- branches that never reach the FSMs ----
         match ev {
-            Event::ConfigReloaded => {
+            Event::ConfigReloaded | Event::ProfileApplied => {
                 if ctx.state != State::Suspending {
-                    // `profile switch` repoints .active.conf and reloads;
+                    // `profile switch` repoints .active.lua and reloads;
                     // ingest BEFORE re-asserting so set_edp uses the new
-                    // profile's policy.
+                    // profile's policy. (A daemon-side apply already updated
+                    // ctx, so ingest is a no-op for ProfileApplied.)
                     fx.ingest_active_profile(&mut ctx);
                     info!(
-                        "RECONCILE (configreloaded): re-asserting {}",
+                        "RECONCILE ({}): re-asserting {}",
+                        if matches!(ev, Event::ProfileApplied) {
+                            "profile applied"
+                        } else {
+                            "configreloaded"
+                        },
                         ctx.state.as_str()
                     );
                     let _ = on_enter(ctx.state, Entry::Reassert, &mut ctx, &fx).await;

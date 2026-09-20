@@ -1,7 +1,7 @@
 //! Layer 1: narrow, idempotent world mutations.
 //!
 //! Two tiers: fire-and-forget subprocess effects go through a serialized
-//! worker task (a slow `hyprctl reload` must never stall dispatch); effects
+//! worker task (a slow `hyprctl eval`/`reload` must never stall dispatch); effects
 //! whose results feed ctx (powerd ApplyProfile, Session.Lock, Suspend,
 //! SetBrightness) are awaited inline by the dispatcher, as v1 did.
 //!
@@ -23,20 +23,26 @@ use crate::paths;
 use crate::pure::fsm::edp_may_disable;
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
-    EdpPolicy, GpuPref, dpms_on_args, edp_disable_args, move_workspace_to_monitor_args,
+    EdpPolicy, GpuPref, apply_profile_args, dpms_on_args, edp_disable_args,
+    move_workspace_to_monitor_args,
 };
 use crate::sysio::hyprctl;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 
-/// Serialized subprocess effects (ordering between reload and keyword
-/// matters for eDP handling).
+/// Serialized subprocess effects (ordering between profile apply, reload and
+/// keyword matters for eDP handling).
 #[derive(Debug)]
 pub enum Cmd {
     /// Ensure eDP enabled/disabled (read-before-write inside the worker).
     SetEdp {
         on: bool,
     },
-    Reload,
+    /// Apply the rendered profile at `lua` to the live compositor by running
+    /// just that file (`hyprctl eval dofile(..)`), never a full reload. See
+    /// `apply_profile_args` for why. `ProfileApplied` follows on success.
+    ApplyProfile {
+        lua: String,
+    },
     /// Every output DPMS on: the stuck-DPMS repair. hyprstate never blanks
     /// (hypridle owns every DPMS off), so there is no off variant to reach.
     DpmsOn,
@@ -56,7 +62,7 @@ pub enum Cmd {
     RunHook(String),
 }
 
-pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
+pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Event>) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Cmd::SetEdp { on } => {
@@ -87,8 +93,19 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>) {
                     hyprctl::hyprctl_ok(&args).await;
                 }
             }
-            Cmd::Reload => {
-                hyprctl::hyprctl_ok(&["reload"]).await;
+            Cmd::ApplyProfile { lua } => {
+                let args = apply_profile_args(&lua);
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                if !hyprctl::hyprctl_ok(&args).await {
+                    // ctx already recorded this profile as applied, so nothing
+                    // would retry: fall back to the heavy hammer rather than
+                    // leave the monitors on the wrong layout.
+                    warn!("profile eval failed for {lua}; falling back to hyprctl reload");
+                    hyprctl::hyprctl_ok(&["reload"]).await;
+                }
+                // Either path leaves the compositor on the new profile; a
+                // reload also emits configreloaded, this covers the eval path.
+                let _ = queue.send(Event::ProfileApplied).await;
             }
             Cmd::DpmsOn => {
                 let args = dpms_on_args();
@@ -316,7 +333,7 @@ impl Effectors {
 
     // ---- monitor profiles ----
 
-    /// Repoint the active-profile symlink, reload, fire hooks, update ctx.
+    /// Repoint the active-profile symlink, apply it live, fire hooks, update ctx.
     /// Idempotent on name+symlink **and** profile body — a TOML edit that
     /// keeps the same name still forces a re-render reload (#19).
     pub fn apply_profile(&self, profile: &crate::sysio::profiles::TomlProfile, ctx: &mut Context) {
@@ -333,7 +350,7 @@ impl Effectors {
         let reapply = name_same && !body_same;
         if self.shadow {
             info!(
-                "[shadow] PROFILE: {} -> {} (edp={}, hooks={}{}) — would repoint+reload",
+                "[shadow] PROFILE: {} -> {} (edp={}, hooks={}{}) — would repoint+apply",
                 ctx.current_profile.as_deref().unwrap_or("None"),
                 profile.name,
                 profile.edp.as_str(),
@@ -367,7 +384,9 @@ impl Effectors {
         ctx.edp_policy = profile.edp;
 
         if !self.shadow {
-            self.send_cmd(Cmd::Reload);
+            self.send_cmd(Cmd::ApplyProfile {
+                lua: link.to_string_lossy().into_owned(),
+            });
             for hook in &profile.hooks {
                 self.send_cmd(Cmd::RunHook(hook.clone()));
             }

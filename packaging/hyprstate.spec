@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.7.2
+Version:        2.7.3
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,13 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sun Sep 20 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.3-1
+- A daemon that started before a Hyprland crash no longer goes blind.
+  hypr-ipc 0.1.3: event-socket discovery skips an instance whose lock names a
+  dead compositor, and the hyprctl calls are pinned to the discovered
+  instance instead of the stale HYPRLAND_INSTANCE_SIGNATURE in the daemon's
+  environment. After the 2026-09-20 crash the old daemon retried the dead
+  socket 150 times and applied no monitor profiles until it was restarted.
 * Sun Sep 20 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.2-1
 - Applying a monitor profile no longer runs `hyprctl reload`. It runs the
   rendered profile in the live Lua state (`hyprctl eval dofile(...)`), which

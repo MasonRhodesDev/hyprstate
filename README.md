@@ -36,7 +36,7 @@ flowchart TD
     fsm -->|"desired state"| eff
 
     subgraph eff["Effectors"]
-        mon["hyprctl reload / eDP-2 toggle"]
+        mon["hyprctl eval (profile apply) / eDP-2 toggle"]
         media["playerctl --all-players pause"]
         dpms["DPMS on (stuck repair)"]
         sd["logind Session.Lock() / Manager.Suspend()"]

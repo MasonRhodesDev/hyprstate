@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.7.1
+Version:        2.7.2
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,16 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Sun Sep 20 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.2-1
+- Applying a monitor profile no longer runs `hyprctl reload`. It runs the
+  rendered profile in the live Lua state (`hyprctl eval dofile(...)`), which
+  only schedules a monitor-state refresh. A reload trips every refresh bit,
+  including the blur-framebuffer pass that builds a framebuffer for every
+  monitor and aborts on one still 0x0 mid-hotplug: Hyprland crashed this way
+  on 2026-09-06 and 2026-09-20 when a monitor woke just before hyprstate's
+  profile reload landed. If the eval is refused the daemon falls back to
+  `reload`. The RECONCILE re-assert that used to ride on configreloaded now
+  follows a successful apply directly.
 * Thu Sep 04 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.1-1
 - A refused Suspend() no longer wedges the FSM. logind rejecting the call
   (a masked suspend.target, transient trouble) used to park the daemon in

@@ -353,9 +353,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hypr-ipc"
-version = "0.1.1"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8eb537d70f196b66fcf5937bb90ae840dd83946ff1eefdf17fa23966506a9d6"
+checksum = "5422c64fcb2b1a07f5a3e8372a4af2300ad3c494fd108d67aaa8fff83b9f0015"
 dependencies = [
  "serde_json",
  "tokio",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "hyprstate"
-version = "2.7.2"
+version = "2.7.3"
 dependencies = [
  "anyhow",
  "chrono",

@@ -284,22 +284,21 @@ pub fn render_profile_lua(
     // Field shapes per Hyprland's Lua bindings (LuaBindingsConfigRules.cpp
     // MONITOR_FIELDS): mode/position/scale are strings (scale is
     // "auto"/number-as-string), transform is an int, disabled a bool.
+    // transform is always explicit: profiles are applied with `hyprctl eval`,
+    // and hl.monitor merges into an earlier rule of the same output name, so
+    // an omitted transform inherits a stale rotation.
     for m in &layout.enabled {
-        let mut line = format!(
-            "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\"",
+        out.push_str(&format!(
+            "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\", transform = {} }})\n",
             selector(m, &mut warnings),
             m.width,
             m.height,
             fmt_num(m.refresh),
             m.x,
             m.y,
-            fmt_num(m.scale)
-        );
-        if m.transform != 0 {
-            line.push_str(&format!(", transform = {}", m.transform));
-        }
-        line.push_str(" })\n");
-        out.push_str(&line);
+            fmt_num(m.scale),
+            m.transform
+        ));
     }
     for m in &layout.disabled {
         out.push_str(&format!(
@@ -630,7 +629,7 @@ mod tests {
         assert!(text.contains("--@ edp = auto\n"));
         assert!(text.contains("--@ gpu = dgpu\n"));
         assert!(text.contains(
-            "hl.monitor({ output = \"desc:Dell B\", mode = \"3840x2160@144\", position = \"0x0\", scale = \"1\" })\n"
+            "hl.monitor({ output = \"desc:Dell B\", mode = \"3840x2160@144\", position = \"0x0\", scale = \"1\", transform = 0 })\n"
         ));
         assert!(text.contains(
             "hl.monitor({ output = \"desc:Dell A\", mode = \"3840x2160@60\", position = \"3440x0\", scale = \"1.5\", transform = 3 })\n"

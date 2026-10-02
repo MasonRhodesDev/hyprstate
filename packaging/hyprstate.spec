@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.7.3
+Version:        2.7.4
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -44,9 +44,9 @@ profiles/) and is not part of this package.
 # too; map them so the RPM build stays offline.
 cat >> .cargo/config.toml << 'EOF'
 
-[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=64d5d1e#64d5d1ed079582a2014ebf23c403a3ca03ee9c64"]
+[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=e263f57#e263f57b8ef3b7c812a8180c31cfc275a90c825b"]
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
-rev = "64d5d1e"
+rev = "e263f57"
 replace-with = "vendored-sources"
 EOF
 
@@ -121,6 +121,14 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Fri Oct 02 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.4-1
+- Applying a profile no longer keeps a stale rotation or disable from an
+  earlier rule. Profiles are applied with `hyprctl eval`, and hl.monitor
+  merges into the existing rule of the same output name, so a transform or
+  disabled field left out of the rendered Lua kept its old value (unrotating
+  the HP E243 in dials kept transform = 1). monitor-profiles e263f57 renders
+  both fields on every enabled output; capture does the same.
+
 * Sun Sep 20 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.3-1
 - A daemon that started before a Hyprland crash no longer goes blind.
   hypr-ipc 0.1.3: event-socket discovery skips an instance whose lock names a

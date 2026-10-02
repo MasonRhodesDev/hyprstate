@@ -44,9 +44,9 @@ profiles/) and is not part of this package.
 # too; map them so the RPM build stays offline.
 cat >> .cargo/config.toml << 'EOF'
 
-[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=64d5d1e#64d5d1ed079582a2014ebf23c403a3ca03ee9c64"]
+[source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=e263f57#e263f57b8ef3b7c812a8180c31cfc275a90c825b"]
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
-rev = "64d5d1e"
+rev = "e263f57"
 replace-with = "vendored-sources"
 EOF
 

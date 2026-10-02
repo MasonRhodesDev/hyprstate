@@ -284,12 +284,12 @@ pub fn render_profile_lua(
     // Field shapes per Hyprland's Lua bindings (LuaBindingsConfigRules.cpp
     // MONITOR_FIELDS): mode/position/scale are strings (scale is
     // "auto"/number-as-string), transform is an int, disabled a bool.
-    // transform is always explicit: profiles are applied with `hyprctl eval`,
-    // and hl.monitor merges into an earlier rule of the same output name, so
-    // an omitted transform inherits a stale rotation.
+    // transform and disabled are always explicit: profiles are applied with
+    // `hyprctl eval`, and hl.monitor merges into an earlier rule of the same
+    // output name, so an omitted field inherits a stale value.
     for m in &layout.enabled {
         out.push_str(&format!(
-            "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\", transform = {} }})\n",
+            "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\", transform = {}, disabled = false }})\n",
             selector(m, &mut warnings),
             m.width,
             m.height,
@@ -629,10 +629,10 @@ mod tests {
         assert!(text.contains("--@ edp = auto\n"));
         assert!(text.contains("--@ gpu = dgpu\n"));
         assert!(text.contains(
-            "hl.monitor({ output = \"desc:Dell B\", mode = \"3840x2160@144\", position = \"0x0\", scale = \"1\", transform = 0 })\n"
+            "hl.monitor({ output = \"desc:Dell B\", mode = \"3840x2160@144\", position = \"0x0\", scale = \"1\", transform = 0, disabled = false })\n"
         ));
         assert!(text.contains(
-            "hl.monitor({ output = \"desc:Dell A\", mode = \"3840x2160@60\", position = \"3440x0\", scale = \"1.5\", transform = 3 })\n"
+            "hl.monitor({ output = \"desc:Dell A\", mode = \"3840x2160@60\", position = \"3440x0\", scale = \"1.5\", transform = 3, disabled = false })\n"
         ));
         assert!(text.contains("hl.monitor({ output = \"eDP-2\", disabled = true })\n"));
         let (profile, _) = parse_profile("desk", ProfileFormat::Lua, &text).unwrap();

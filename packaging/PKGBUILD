@@ -8,7 +8,7 @@
 
 pkgname=hyprstate
 pkgver=2.7.4
-pkgrel=1
+pkgrel=2
 pkgdesc="Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/MasonRhodesDev/hyprstate"

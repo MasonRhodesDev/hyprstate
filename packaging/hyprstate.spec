@@ -48,6 +48,11 @@ cat >> .cargo/config.toml << 'EOF'
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
 rev = "e263f57"
 replace-with = "vendored-sources"
+
+[source."git+https://github.com/MasonRhodesDev/desktop-commons?rev=266121a#266121a64beeac20e7016d1e1cb11a8a20542721"]
+git = "https://github.com/MasonRhodesDev/desktop-commons"
+rev = "266121a"
+replace-with = "vendored-sources"
 EOF
 
 %build

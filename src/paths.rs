@@ -26,6 +26,10 @@ pub const SAFETY_TICK: Duration = Duration::from_secs(300);
 /// How long a burst of reconcile triggers (a hotplug is several socket2
 /// lines plus a profile apply) settles before one snapshot is taken.
 pub const RECONCILE_SETTLE: Duration = Duration::from_secs(2);
+/// Offset from SIGRTMIN of the signal waybar's `custom/power-profile`
+/// module re-runs its exec on (hypr-DE waybar config `"signal": 9`). The
+/// daemon raises it whenever what the module renders changes.
+pub const WAYBAR_POWER_SIGNAL: i32 = 9;
 /// The one sampler left: while Deferred waits on a Wayland idle-inhibit
 /// claim (lid closed mid-call), `hyprctl clients` is asked this often
 /// whether the claim is still held. No compositor event announces release.

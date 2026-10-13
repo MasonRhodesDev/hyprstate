@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use super::ctx::Context;
+use super::ctx::{Context, WaybarView};
 use super::event::Event;
 use super::sources::ReconcileTrigger;
 use crate::dbus::powerd_client::PowerdProxy;
@@ -477,9 +477,33 @@ impl Effectors {
 
     // ---- power ----
 
+    /// Tell every waybar of this user to re-run its power-profile module
+    /// (SIGRTMIN+9) when what the module renders has changed. Called once
+    /// per dispatched event, after the effects, so the bar reads the
+    /// applied state, not the intent. Replaces the module's 5 s poll.
+    pub fn sync_waybar(&self, ctx: &mut Context) {
+        let view = WaybarView::of(ctx);
+        if ctx.waybar_view == Some(view) {
+            return;
+        }
+        ctx.waybar_view = Some(view);
+        if self.shadow {
+            info!(
+                "[shadow] would signal waybar SIGRTMIN+{}: {view:?}",
+                paths::WAYBAR_POWER_SIGNAL
+            );
+            return;
+        }
+        let n = crate::sysio::procs::signal_own_processes(
+            "waybar",
+            libc::SIGRTMIN() + paths::WAYBAR_POWER_SIGNAL,
+        );
+        debug!("signalled {n} waybar process(es): {view:?}");
+    }
+
     /// Ask powerd to apply a profile. No-op when already applied. Registers
-    /// the expected platform_profile chain BEFORE the call so the poller
-    /// can't observe sysfs ahead of the bookkeeping.
+    /// the expected platform_profile chain BEFORE the call so the sysfs
+    /// watch can't observe the write ahead of the bookkeeping.
     pub async fn apply_power_profile(&self, ctx: &mut Context, profile: PowerProfile) {
         if ctx.power_applied == Some(profile) || !ctx.powerd_available {
             return;
@@ -555,7 +579,7 @@ impl Effectors {
 
     /// Decision 6: write the idle-suspend request file on the daemon's own
     /// behalf (battery-low). Same file the CLI and hypridle write, so every
-    /// downstream contract (poller echo, Resumed clear, grace re-check)
+    /// downstream contract (inotify echo, Resumed clear, grace re-check)
     /// applies unchanged; the "battery-low" body is the provenance token
     /// that lets AC-return withdraw ONLY the daemon's own request. Returns
     /// whether the file was actually written - the caller must not mark a
@@ -624,7 +648,7 @@ impl Effectors {
         }
     }
 
-    /// Delete the override file and update ctx SYNCHRONOUSLY — the poller
+    /// Delete the override file and update ctx SYNCHRONOUSLY: the inotify
     /// echo of the deletion must arrive as a no-op.
     pub fn clear_power_override(&self, ctx: &mut Context) {
         ctx.power_override = None;

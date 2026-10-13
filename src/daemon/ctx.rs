@@ -79,6 +79,32 @@ pub struct Context {
     pub brightness_max: u32,
     pub brightness_set: Option<u32>,
     pub brightness_saved: Option<u32>,
+
+    /// What waybar's power-profile module last rendered, as far as the
+    /// daemon told it. None = not signalled yet this run.
+    pub waybar_view: Option<WaybarView>,
+}
+
+/// Everything `hyprstate power status --waybar` renders. The module runs
+/// its exec only on SIGRTMIN+9 (hypr-DE `"signal": 9`, `interval: once`),
+/// so any change here must signal it, not only a new applied profile:
+/// `power set` to the profile already applied flips the override class,
+/// and powerd going away or coming back flips the unavailable class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaybarView {
+    pub applied: Option<PowerProfile>,
+    pub override_set: bool,
+    pub powerd_available: bool,
+}
+
+impl WaybarView {
+    pub fn of(ctx: &Context) -> Self {
+        WaybarView {
+            applied: ctx.power_applied,
+            override_set: ctx.power_override.is_some(),
+            powerd_available: ctx.powerd_available,
+        }
+    }
 }
 
 impl Default for Context {
@@ -122,6 +148,7 @@ impl Default for Context {
             brightness_max: 0,
             brightness_set: None,
             brightness_saved: None,
+            waybar_view: None,
         }
     }
 }

@@ -539,258 +539,262 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             .await;
     }
 
+    fx.sync_waybar(&mut ctx);
     while let Some(ev) = rx.recv().await {
-        let kind = ev.kind();
-        let label = ev.label();
-
-        // ---- branches that never reach the FSMs ----
-        match ev {
-            Event::ConfigReloaded | Event::ProfileApplied => {
-                if ctx.state != State::Suspending {
-                    // `profile switch` repoints .active.lua and reloads;
-                    // ingest BEFORE re-asserting so set_edp uses the new
-                    // profile's policy. (A daemon-side apply already updated
-                    // ctx, so ingest is a no-op for ProfileApplied.)
-                    fx.ingest_active_profile(&mut ctx);
-                    info!(
-                        "RECONCILE ({}): re-asserting {}",
-                        if matches!(ev, Event::ProfileApplied) {
-                            "profile applied"
-                        } else {
-                            "configreloaded"
-                        },
-                        ctx.state.as_str()
-                    );
-                    let _ = on_enter(ctx.state, Entry::Reassert, &mut ctx, &fx).await;
-                }
-                fx.request_reconcile(if matches!(ev, Event::ProfileApplied) {
-                    ReconcileTrigger::ProfileApplied
-                } else {
-                    ReconcileTrigger::ConfigReloaded
-                });
-                continue;
-            }
-            Event::ReconcileTick(snap) => {
-                handle_reconcile_tick(*snap, &mut ctx, &fx, &mut telem).await;
-                continue;
-            }
-            Event::MonitorsChanged => {
-                handle_monitors_changed(&mut ctx, &fx, &mut telem).await;
-                continue; // profile reconciliation does not feed the main FSM
-            }
-            Event::ProfilesChanged => {
-                info!("PROFILE: source directory changed — re-resolving");
-                fx.schedule_profile_reconcile(&mut ctx);
-                continue;
-            }
-            Event::BacklightHotplug => {
-                super::discover_backlight(&mut ctx);
-                continue;
-            }
-
-            // ---- ctx updates that fall through to the FSMs ----
-            Event::Lid(closed) => {
-                if ctx.lid_present {
-                    ctx.lid_closed = closed;
-                    if closed {
-                        // Deferred vs Countdown turns on the claim set as
-                        // of right now.
-                        refresh_wayland_claim(&mut ctx).await;
-                    }
-                } else {
-                    warn!(
-                        "lid event on a machine declared lidless (power.conf lid=absent) — ignoring"
-                    );
-                    continue;
-                }
-            }
-            Event::MonitorHotplug { added, ref name } => {
-                debug!(
-                    "monitor {}: {name}",
-                    if added { "added" } else { "removed" }
-                );
-                ctx.ext_mon_count = hyprctl::ext_monitor_count(ctx.ext_mon_count).await;
-                // Coalesce mode/scale negotiation bursts before profile
-                // reconciliation.
-                fx.schedule_profile_reconcile(&mut ctx);
-                fx.request_reconcile(ReconcileTrigger::MonitorHotplug);
-            }
-            Event::Inhibitor { wayland, active } => {
-                if wayland {
-                    ctx.wayland_inhibitor = active;
-                } else {
-                    ctx.logind_inhibitor = active;
-                }
-            }
-            Event::LockChanged(locked) => {
-                ctx.locked = locked;
-                fx.request_reconcile(ReconcileTrigger::LockChanged);
-            }
-            Event::AcChanged(on_ac) => {
-                // Two sources report AC: UPower's OnBattery and the kernel's
-                // power_supply uevent read from sysfs. Whichever lands
-                // second says what ctx already holds; dropping it is what
-                // keeps the 5 s settle from being re-armed or bypassed.
-                if on_ac == ctx.on_ac {
-                    debug!("AC: {label} already on_ac={on_ac}; ignoring");
-                    continue;
-                }
-                ctx.on_ac = on_ac;
-                info!("AC: {label} (on_ac={on_ac})");
-                // Raw plug-in withdraws a battery-low request NOW, not
-                // after the 5 s settle: a suspend on the charger is the
-                // worse failure by far, so cancellation follows the fast
-                // signal while requests wait for both axes.
-                battery_low_request_check(&mut ctx, &fx);
-                fx.schedule_power_settle(&mut ctx);
-                fx.request_reconcile(ReconcileTrigger::AcChanged);
-            }
-            Event::PowerAcSettled => {
-                ctx.on_ac_settled = ctx.on_ac;
-                // An unplug that settles while already low must request
-                // (decision 6), and a plug-in that settles must withdraw a
-                // standing battery-low request - re-derivation alone never
-                // cancels one, because suspend_requested short-circuits
-                // world_state (review F1).
-                battery_low_request_check(&mut ctx, &fx);
-            }
-            Event::PowerOverrideChanged(ref word) => {
-                // Echoes of the daemon's own writes arrive with ctx already
-                // matching — those land as no-ops by design.
-                match word.as_deref() {
-                    None => {
-                        ctx.power_override = None;
-                        ctx.power_override_base = None;
-                    }
-                    Some(w) => match w.parse::<crate::pure::power::PowerProfile>() {
-                        Ok(p) if ctx.power_override == Some(p) => {} // own echo
-                        Ok(p) => {
-                            ctx.power_override = Some(p);
-                            ctx.power_override_base = None; // stamped at next check
-                        }
-                        Err(_) => warn!("power-override: unknown profile {w:?} — ignoring"),
-                    },
-                }
-            }
-            Event::BatteryPercent(pct) => {
-                ctx.battery_percent = Some(pct);
-                let new_low = battery_low_step(ctx.low_battery, pct, ctx.battery_low_pct);
-                let flipped = new_low != ctx.low_battery;
-                ctx.low_battery = new_low;
-                // Decided model, decision 6: battery-low requests and
-                // withdrawals ride every percent event, not only the flip,
-                // so a machine that woke still-low re-requests (the 30 s
-                // grace is the plug-in window) and a recovery withdraws.
-                let changed = battery_low_request_check(&mut ctx, &fx);
-                if flipped {
-                    fx.request_reconcile(ReconcileTrigger::BatteryLowChanged);
-                }
-                if !flipped && !changed {
-                    continue; // no flip -> no event existed in v1
-                }
-            }
-            Event::PlatformProfileChanged(ref value) => {
-                // Self-writes (or anything inside the suppression window of
-                // an apply) are ignored; external writes are adopted as a
-                // manual override — never reverted. Either way the event
-                // still falls through to the gpu-drift gate, as in v1.
-                if ctx
-                    .self_writes
-                    .is_self_write(std::time::Instant::now(), value.as_deref())
-                {
-                    debug!("platform_profile -> {value:?}: own write");
-                } else {
-                    let profile = profile_from_platform_value(value.as_deref());
-                    fx.adopt_power_override(&mut ctx, profile);
-                    power_policy_check(&mut ctx, &fx).await;
-                }
-            }
-            Event::GpuOverrideChanged(ref word) => {
-                debug!("gpu-select override -> {word:?}");
-            }
-            Event::PowerdAppeared => {
-                if !ctx.powerd_available {
-                    info!("powerd appeared on the bus — re-enabling power applies");
-                    ctx.powerd_available = true;
-                    ctx.powerd_warned = false;
-                    ctx.power_applied = None; // force a re-apply
-                    ctx.dgpu_pinned = None; // re-push the dgpu pin too
-                }
-                ctx.on_ac_settled = ctx.on_ac;
-            }
-            Event::SuspendRequestChanged(word) => {
-                let requested = word.is_some();
-                if requested != ctx.suspend_requested {
-                    info!(
-                        "idle-suspend request {}",
-                        if requested { "standing" } else { "withdrawn" }
-                    );
-                }
-                ctx.suspend_requested = requested;
-                if requested {
-                    refresh_wayland_claim(&mut ctx).await;
-                }
-            }
-            Event::TimerExpired => {
-                // Close the cancel-vs-expiry race: hypridle's on-resume
-                // deletes the request file on first input, but the poller
-                // echoes that at 2 s cadence and the grace timer can fire
-                // inside the gap. The file is the authority; a request the
-                // user just withdrew must not suspend the machine.
-                if ctx.suspend_requested && !crate::paths::suspend_request_standing() {
-                    info!("idle-suspend request withdrawn at grace expiry");
-                    ctx.suspend_requested = false;
-                }
-            }
-            Event::Resumed => {
-                // Clear BEFORE evaluate_fsms re-derives: Resumed maps
-                // Suspending back to world_state, and a stale standing
-                // request would re-enter Countdown - a wake that schedules
-                // its own next suspend, looping the machine. desktop-commons
-                // adds a conformance assertion pinning this ordering in the
-                // registry PR that follows.
-                ctx.suspend_requested = false;
-                fx.clear_suspend_request();
-                fx.request_reconcile(ReconcileTrigger::Resumed);
-            }
-        }
-
-        // Re-arm the brightness takeover guard on resume: panel raw values
-        // drift across suspend and must not read as a user adjustment.
-        if kind == EventKind::Resumed {
-            fx.brightness_rearm(&mut ctx);
-        }
-
-        // GPU drift advice on power/override changes (NOT via RECONCILE).
-        if matches!(
-            kind,
-            EventKind::AcPlugged
-                | EventKind::AcUnplugged
-                | EventKind::PlatformProfileChanged
-                | EventKind::GpuOverrideChanged
-        ) {
-            let signature = hyprctl::monitor_signature().await;
-            let profiles = load_profiles();
-            let chosen = select_profile(&signature, &profiles);
-            let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
-            let mode = gpu_drift_check(&mut ctx, &fx, label, gpu_pref);
-            fx.sync_dgpu_pin(&mut ctx, dgpu_runtime_pm_pinned(mode))
-                .await;
-        }
-
-        // Power policy evaluation on its (debounced/derived) inputs.
-        if matches!(
-            kind,
-            EventKind::BatteryLowChanged
-                | EventKind::PowerOverrideChanged
-                | EventKind::PowerAcSettled
-        ) {
-            power_policy_check(&mut ctx, &fx).await;
-            telem.emit_help(&ctx, "ctx", label, ctx.state, ctx.state, Vec::new());
-        }
-
-        evaluate_fsms(&mut ctx, &fx, kind, label, &mut telem).await;
+        dispatch(ev, &mut ctx, &fx, &mut telem).await;
+        // Everything the bar renders may have moved; tell it once per event,
+        // after the effects (the apply) have landed.
+        fx.sync_waybar(&mut ctx);
     }
+}
+
+/// One event through the exact v1 routing topology.
+async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut TelemetryEmitter) {
+    let kind = ev.kind();
+    let label = ev.label();
+
+    // ---- branches that never reach the FSMs ----
+    match ev {
+        Event::ConfigReloaded | Event::ProfileApplied => {
+            if ctx.state != State::Suspending {
+                // `profile switch` repoints .active.lua and reloads;
+                // ingest BEFORE re-asserting so set_edp uses the new
+                // profile's policy. (A daemon-side apply already updated
+                // ctx, so ingest is a no-op for ProfileApplied.)
+                fx.ingest_active_profile(ctx);
+                info!(
+                    "RECONCILE ({}): re-asserting {}",
+                    if matches!(ev, Event::ProfileApplied) {
+                        "profile applied"
+                    } else {
+                        "configreloaded"
+                    },
+                    ctx.state.as_str()
+                );
+                let _ = on_enter(ctx.state, Entry::Reassert, ctx, fx).await;
+            }
+            fx.request_reconcile(if matches!(ev, Event::ProfileApplied) {
+                ReconcileTrigger::ProfileApplied
+            } else {
+                ReconcileTrigger::ConfigReloaded
+            });
+            return;
+        }
+        Event::ReconcileTick(snap) => {
+            handle_reconcile_tick(*snap, ctx, fx, telem).await;
+            return;
+        }
+        Event::MonitorsChanged => {
+            handle_monitors_changed(ctx, fx, telem).await;
+            return; // profile reconciliation does not feed the main FSM
+        }
+        Event::ProfilesChanged => {
+            info!("PROFILE: source directory changed; re-resolving");
+            fx.schedule_profile_reconcile(ctx);
+            return;
+        }
+        Event::BacklightHotplug => {
+            super::discover_backlight(ctx);
+            return;
+        }
+
+        // ---- ctx updates that fall through to the FSMs ----
+        Event::Lid(closed) => {
+            if ctx.lid_present {
+                ctx.lid_closed = closed;
+                if closed {
+                    // Deferred vs Countdown turns on the claim set as
+                    // of right now.
+                    refresh_wayland_claim(ctx).await;
+                }
+            } else {
+                warn!("lid event on a machine declared lidless (power.conf lid=absent); ignoring");
+                return;
+            }
+        }
+        Event::MonitorHotplug { added, ref name } => {
+            debug!(
+                "monitor {}: {name}",
+                if added { "added" } else { "removed" }
+            );
+            ctx.ext_mon_count = hyprctl::ext_monitor_count(ctx.ext_mon_count).await;
+            // Coalesce mode/scale negotiation bursts before profile
+            // reconciliation.
+            fx.schedule_profile_reconcile(ctx);
+            fx.request_reconcile(ReconcileTrigger::MonitorHotplug);
+        }
+        Event::Inhibitor { wayland, active } => {
+            if wayland {
+                ctx.wayland_inhibitor = active;
+            } else {
+                ctx.logind_inhibitor = active;
+            }
+        }
+        Event::LockChanged(locked) => {
+            ctx.locked = locked;
+            fx.request_reconcile(ReconcileTrigger::LockChanged);
+        }
+        Event::AcChanged(on_ac) => {
+            // Two sources report AC: UPower's OnBattery and the kernel's
+            // power_supply uevent read from sysfs. Whichever lands
+            // second says what ctx already holds; dropping it is what
+            // keeps the 5 s settle from being re-armed or bypassed.
+            if on_ac == ctx.on_ac {
+                debug!("AC: {label} already on_ac={on_ac}; ignoring");
+                return;
+            }
+            ctx.on_ac = on_ac;
+            info!("AC: {label} (on_ac={on_ac})");
+            // Raw plug-in withdraws a battery-low request NOW, not
+            // after the 5 s settle: a suspend on the charger is the
+            // worse failure by far, so cancellation follows the fast
+            // signal while requests wait for both axes.
+            battery_low_request_check(ctx, fx);
+            fx.schedule_power_settle(ctx);
+            fx.request_reconcile(ReconcileTrigger::AcChanged);
+        }
+        Event::PowerAcSettled => {
+            ctx.on_ac_settled = ctx.on_ac;
+            // An unplug that settles while already low must request
+            // (decision 6), and a plug-in that settles must withdraw a
+            // standing battery-low request - re-derivation alone never
+            // cancels one, because suspend_requested short-circuits
+            // world_state (review F1).
+            battery_low_request_check(ctx, fx);
+        }
+        Event::PowerOverrideChanged(ref word) => {
+            // Echoes of the daemon's own writes arrive with ctx already
+            // matching; those land as no-ops by design.
+            match word.as_deref() {
+                None => {
+                    ctx.power_override = None;
+                    ctx.power_override_base = None;
+                }
+                Some(w) => match w.parse::<crate::pure::power::PowerProfile>() {
+                    Ok(p) if ctx.power_override == Some(p) => {} // own echo
+                    Ok(p) => {
+                        ctx.power_override = Some(p);
+                        ctx.power_override_base = None; // stamped at next check
+                    }
+                    Err(_) => warn!("power-override: unknown profile {w:?}; ignoring"),
+                },
+            }
+        }
+        Event::BatteryPercent(pct) => {
+            ctx.battery_percent = Some(pct);
+            let new_low = battery_low_step(ctx.low_battery, pct, ctx.battery_low_pct);
+            let flipped = new_low != ctx.low_battery;
+            ctx.low_battery = new_low;
+            // Decided model, decision 6: battery-low requests and
+            // withdrawals ride every percent event, not only the flip,
+            // so a machine that woke still-low re-requests (the 30 s
+            // grace is the plug-in window) and a recovery withdraws.
+            let changed = battery_low_request_check(ctx, fx);
+            if flipped {
+                fx.request_reconcile(ReconcileTrigger::BatteryLowChanged);
+            }
+            if !flipped && !changed {
+                return; // no flip -> no event existed in v1
+            }
+        }
+        Event::PlatformProfileChanged(ref value) => {
+            // Self-writes (or anything inside the suppression window of
+            // an apply) are ignored; external writes are adopted as a
+            // manual override, never reverted. Either way the event
+            // still falls through to the gpu-drift gate, as in v1.
+            if ctx
+                .self_writes
+                .is_self_write(std::time::Instant::now(), value.as_deref())
+            {
+                debug!("platform_profile -> {value:?}: own write");
+            } else {
+                let profile = profile_from_platform_value(value.as_deref());
+                fx.adopt_power_override(ctx, profile);
+                power_policy_check(ctx, fx).await;
+            }
+        }
+        Event::GpuOverrideChanged(ref word) => {
+            debug!("gpu-select override -> {word:?}");
+        }
+        Event::PowerdAppeared => {
+            if !ctx.powerd_available {
+                info!("powerd appeared on the bus — re-enabling power applies");
+                ctx.powerd_available = true;
+                ctx.powerd_warned = false;
+                ctx.power_applied = None; // force a re-apply
+                ctx.dgpu_pinned = None; // re-push the dgpu pin too
+            }
+            ctx.on_ac_settled = ctx.on_ac;
+        }
+        Event::SuspendRequestChanged(word) => {
+            let requested = word.is_some();
+            if requested != ctx.suspend_requested {
+                info!(
+                    "idle-suspend request {}",
+                    if requested { "standing" } else { "withdrawn" }
+                );
+            }
+            ctx.suspend_requested = requested;
+            if requested {
+                refresh_wayland_claim(ctx).await;
+            }
+        }
+        Event::TimerExpired => {
+            // Close the cancel-vs-expiry race: hypridle's on-resume
+            // deletes the request file on first input, the inotify echo
+            // of that is still in flight, and the grace timer can fire
+            // inside the gap. The file is the authority; a request the
+            // user just withdrew must not suspend the machine.
+            if ctx.suspend_requested && !crate::paths::suspend_request_standing() {
+                info!("idle-suspend request withdrawn at grace expiry");
+                ctx.suspend_requested = false;
+            }
+        }
+        Event::Resumed => {
+            // Clear BEFORE evaluate_fsms re-derives: Resumed maps
+            // Suspending back to world_state, and a stale standing
+            // request would re-enter Countdown - a wake that schedules
+            // its own next suspend, looping the machine. desktop-commons
+            // adds a conformance assertion pinning this ordering in the
+            // registry PR that follows.
+            ctx.suspend_requested = false;
+            fx.clear_suspend_request();
+            fx.request_reconcile(ReconcileTrigger::Resumed);
+        }
+    }
+
+    // Re-arm the brightness takeover guard on resume: panel raw values
+    // drift across suspend and must not read as a user adjustment.
+    if kind == EventKind::Resumed {
+        fx.brightness_rearm(ctx);
+    }
+
+    // GPU drift advice on power/override changes (NOT via RECONCILE).
+    if matches!(
+        kind,
+        EventKind::AcPlugged
+            | EventKind::AcUnplugged
+            | EventKind::PlatformProfileChanged
+            | EventKind::GpuOverrideChanged
+    ) {
+        let signature = hyprctl::monitor_signature().await;
+        let profiles = load_profiles();
+        let chosen = select_profile(&signature, &profiles);
+        let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
+        let mode = gpu_drift_check(ctx, fx, label, gpu_pref);
+        fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
+    }
+
+    // Power policy evaluation on its (debounced/derived) inputs.
+    if matches!(
+        kind,
+        EventKind::BatteryLowChanged | EventKind::PowerOverrideChanged | EventKind::PowerAcSettled
+    ) {
+        power_policy_check(ctx, fx).await;
+        telem.emit_help(ctx, "ctx", label, ctx.state, ctx.state, Vec::new());
+    }
+
+    evaluate_fsms(ctx, fx, kind, label, telem).await;
 }
 
 #[cfg(test)]

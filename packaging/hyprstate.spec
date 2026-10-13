@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.11.0
+Version:        2.12.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -126,6 +126,19 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.12.0-1
+- The daemon exits cleanly on SIGTERM, SIGINT and SIGHUP (#29). It logs one
+  line naming the signal and the state it was in, drops its Context so the
+  state.occupancy span for that last state is emitted as a completed record,
+  and exits 0. Until now the daemon only ever ended by being killed, which
+  lost that one record and left nothing in the journal to tell a stopped
+  daemon from a killed one; systemctl restart sends SIGTERM on every upgrade.
+- dpms_stuck_off's doc in hyprstate-fsm names the invariant that justifies
+  repairing an unlocked dark session (#26): nothing in the session blanks an
+  unlocked screen since hypr-DE 0.2.25 dropped hypridle's 240 s unlocked
+  blanker, and this repair is what made that blanker pointless. Doc only;
+  hyprstate-fsm stays 5.3.0.
+
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.11.0-1
 - The daemon emits each state transition as a journald record on stderr,
   beside the prose STATE line on stdout: `event=state.transition` carries

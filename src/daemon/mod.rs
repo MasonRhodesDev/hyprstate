@@ -19,10 +19,11 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use zbus::proxy::CacheProperties;
 
+use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::dbus::upower::UPowerProxy;
 use crate::paths;
-use crate::sysio::{hyprctl, hypridle_log, sysfs};
+use crate::sysio::{hyprctl, sysfs};
 use ctx::Context;
 use effectors::Effectors;
 use event::Event;
@@ -76,10 +77,29 @@ fn log_wake_state() {
     }
 }
 
-fn discover_backlight(ctx: &mut Context) {
-    let Ok(rd) = fs::read_dir("/sys/class/backlight") else {
+/// The backlight device the brightness effects drive. Runs at startup and
+/// again on a backlight add/remove uevent (a panel driver that probes after
+/// the session is up, or a DDC panel going away). A changed device drops
+/// the saved and last-set raw values: they belong to the old scale.
+pub(crate) fn discover_backlight(ctx: &mut Context) {
+    let found = find_backlight();
+    let name = found.as_ref().map(|(dev, _)| dev.as_str());
+    if name == ctx.brightness_dev.as_deref() {
         return;
-    };
+    }
+    match &found {
+        Some((dev, max)) => info!("backlight: {dev} (max={max})"),
+        None => info!("backlight: none (brightness effects are no-ops)"),
+    }
+    ctx.brightness_dev = found.as_ref().map(|(dev, _)| dev.clone());
+    ctx.brightness_max = found.map(|(_, max)| max).unwrap_or(0);
+    ctx.brightness_set = None;
+    ctx.brightness_saved = None;
+}
+
+/// `(device, max_brightness)` for the preferred backlight, if any.
+fn find_backlight() -> Option<(String, u32)> {
+    let rd = fs::read_dir("/sys/class/backlight").ok()?;
     let mut names: Vec<String> = rd
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -91,21 +111,14 @@ fn discover_backlight(ctx: &mut Context) {
             || n.starts_with("intel_backlight")
             || n.starts_with("acpi_video")
     });
-    let Some(dev) = preferred.or(names.first()).cloned() else {
-        return;
-    };
+    let dev = preferred.or(names.first()).cloned()?;
     let max = sysfs::read_int(
         &Path::new("/sys/class/backlight")
             .join(&dev)
             .join("max_brightness"),
         0,
     ) as u32;
-    if max == 0 {
-        return;
-    }
-    info!("backlight: {dev} (max={max})");
-    ctx.brightness_dev = Some(dev);
-    ctx.brightness_max = max;
+    (max > 0).then_some((dev, max))
 }
 
 /// Delete a request file left over from before a daemon restart. Standalone
@@ -142,6 +155,8 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<Event>(256);
     let (worker_tx, worker_rx) = mpsc::channel(64);
     let (locked_tx, locked_rx) = watch::channel(false);
+    let (reconcile_tx, reconcile_rx) = mpsc::channel(32);
+    let (tick_tx, tick_rx) = watch::channel(0u64);
 
     let mut ctx = Context::default();
     let conf = crate::sysio::power_conf::load_power_conf();
@@ -154,7 +169,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
 
     // A daemon restart mid-request must not suspend a user who has since
     // returned; the request is re-established only if the file still exists
-    // and the poller re-reads it.
+    // and the state-file watch reports it.
     fx_clear_stale_request(shadow);
 
     // Lid inhibitor first (held for process lifetime; dropping releases).
@@ -239,6 +254,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         powerd: PowerdProxy::new(&conn).await?,
         locked_rx,
         locked_tx: locked_tx.clone(),
+        reconcile: reconcile_tx.clone(),
     };
 
     // Decision 6 as a state, not an edge (review F6): a daemon that boots
@@ -255,8 +271,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     ctx.logind_inhibitor = sources::logind_real_inhibitor_active(&manager)
         .await
         .unwrap_or(false);
-    let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
-    ctx.wayland_inhibitor = wayland_inh;
+    ctx.wayland_inhibitor = hyprctl::wayland_idle_inhibited().await.unwrap_or(false);
     ctx.ext_mon_count = hyprctl::ext_monitor_count(0).await;
 
     // Seed the active profile from the existing symlink so reconciles can
@@ -298,10 +313,21 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     // Spawn everything; the dispatcher owns ctx from here.
     tokio::spawn(effectors::effector_worker(worker_rx, tx.clone()));
     tokio::spawn(sources::hypr_socket_reader(tx.clone()));
-    tokio::spawn(sources::inhibitor_poller(tx.clone(), manager.clone()));
-    tokio::spawn(sources::mode_poller(tx.clone()));
-    tokio::spawn(sources::reconcile_snapshot_task(
+    tokio::spawn(sources::inhibitors::logind_inhibitor_watcher(
         tx.clone(),
+        conn.clone(),
+        manager.clone(),
+        ctx.logind_inhibitor,
+    ));
+    tokio::spawn(sources::files::file_state_task(tx.clone(), tick_rx));
+    tokio::spawn(sources::uevent::uevent_task(
+        tx.clone(),
+        reconcile_tx.clone(),
+    ));
+    tokio::spawn(sources::reconciler::reconcile_task(
+        tx.clone(),
+        reconcile_rx,
+        tick_tx,
         manager_uncached,
         session_uncached,
         ctx.ext_mon_count,
@@ -312,6 +338,21 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     }
     tokio::spawn(sources::sleep_watcher(tx.clone(), manager.clone()));
     if let Some(s) = session {
+        match SessionSignalsProxy::builder(&conn)
+            .path(s.inner().path().clone())
+            .map(|b| b.build())
+        {
+            Ok(build) => match build.await {
+                Ok(signals) => {
+                    tokio::spawn(sources::session_signal_watcher(
+                        reconcile_tx.clone(),
+                        signals,
+                    ));
+                }
+                Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
+            },
+            Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
+        }
         tokio::spawn(sources::lock_watcher(tx.clone(), locked_tx, s));
     }
     if let Some(up) = upower {

@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.7.4
+Version:        2.8.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,22 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.8.0-1
+- The daemon is event driven. The 2 s inhibitor and state-file pollers and
+  the 5 s reconciler loop are gone: keep-awake claims come from logind's
+  BlockInhibited signal (then ListInhibitors) and from `hyprctl clients`,
+  state files from inotify, platform_profile from sysfs notify, the sysfs
+  AC fallback and backlight hotplug from kernel uevents. The reconciler runs
+  on compositor, lock, resume and AC events plus one safety tick every
+  5 min. hypridle's journal is no longer read: on mason-air its startup
+  lines under inhibit_sleep=3 read as a claim and every lid close parked in
+  DEFERRED.
+- waybar's power-profile module is signalled (SIGRTMIN+9) whenever the
+  applied profile, override mode or powerd reachability changes, so it can
+  run on the signal alone instead of a 5 s poll.
+- The sysfs AC fallback matches the adapter by type (Mains), not by a name
+  starting with A, so Asahi's macsmc-ac is seen.
+
 * Fri Oct 02 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.4-1
 - Applying a profile no longer keeps a stale rotation or disable from an
   earlier rule. Profiles are applied with `hyprctl eval`, and hl.monitor

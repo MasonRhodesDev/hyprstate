@@ -1,6 +1,6 @@
 //! Power policy orchestration: base state -> override stamping/expiry ->
 //! desired profile + brightness edges. Idempotent on unchanged inputs (the
-//! mode poller echoes the daemon's own override-file writes ~2s later —
+//! inotify watch echoes the daemon's own override-file writes right back;
 //! that echo must land as a no-op).
 
 use tracing::info;

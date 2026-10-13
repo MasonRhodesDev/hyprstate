@@ -5,12 +5,12 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 ## What it owns
 
 - **Lid switch.** Holds a logind `handle-lid-switch:block` inhibitor so logind doesn't suspend on lid close. The FSM decides instead.
-- **eDP-2 enable/disable.** Disabled when lid closed, re-enabled (via `hyprctl reload`) when lid opens. Hard invariant — re-asserted by a 5s reconciler and on `configreloaded` events.
+- **eDP-2 enable/disable.** Disabled when lid closed, re-enabled (via `hyprctl reload`) when lid opens. Hard invariant, re-asserted on `configreloaded` and by the reconciler, which runs on compositor, lock, resume and AC events plus one safety tick every 5 min (see [Event sources](#event-sources-not-pollers)).
 - **Monitor profiles.** Auto-applies a profile based on the set of currently-connected monitors. Profiles are neutral TOML ([monitor-profiles](https://github.com/MasonRhodesDev/monitor-profiles)) read from `~/.config/hypr/profiles/` and the shared `/etc/monitor-profiles/`, with the Hyprland config rendered from them. Legacy `.conf`/`.lua` profiles still load; `hyprstate profile migrate` converts them.
 - **Suspend grace.** Lid close → 30s window before suspending. Cancellable by lid reopen, monitor hotplug, or new idle inhibitor.
-- **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases.
+- **Idle-inhibitor awareness.** If an inhibitor is already active at lid close, media is paused (`playerctl --all-players pause`) and the countdown is deferred until the inhibitor releases. Claims are sensed from logind (idle or sleep inhibitors in block mode, with hyprstate's own lid block and the baseline daemons excluded) and from the compositor (`hyprctl clients` reporting `inhibitingIdle`), never from log text. The compositor view is sampled at lid close, at a suspend request, on each reconcile pass and, only while Deferred waits on such a claim, every 5 s. Claims made solely over D-Bus to hypridle's ScreenSaver interface (a game overlay) are not visible to the lid path.
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for a live locker (`LockedHint` plus compositor session lock). A stuck `LockedHint` aborts suspend.
-- **Stuck-DPMS repair.** hyprstate never blanks outputs: hypridle owns every DPMS-off (hypr-DE's unlocked idle listener and its locked input-idle listener). If hypridle loses its wake and a live session is left driving dark panels, the reconciler turns them back on once presence is proven (unlocked, or cursor movement while locked). Known loss versus 2.4: a panel hotplugged into a blanked, locked session stays lit until the next input→idle cycle — re-blanking it here would make hyprstate a second DPMS-off writer. Same class: Hyprland warps the cursor when a monitor disconnects, which the backstop reads as presence and relights the remaining panels. Requires hypr-DE ≥ 0.2.25 (hypr-DE#27): on older hypr-DE a locked session holding an idle inhibitor is blanked by nobody. An inhibitor appearing or releasing no longer changes a locked screen; only input (or unlock) relights it.
+- **Stuck-DPMS repair.** hyprstate never blanks outputs: hypridle owns every DPMS-off (hypr-DE's unlocked idle listener and its locked input-idle listener). If hypridle loses its wake and a live session is left driving dark panels, the reconciler turns them back on once presence is proven (unlocked, or cursor movement between two passes while locked). Passes run on events and a 5 min safety tick, so a locked dark session can take up to two ticks to relight; an unlocked one is relit on the unlock edge. Known loss versus 2.4: a panel hotplugged into a blanked, locked session stays lit until the next input→idle cycle; re-blanking it here would make hyprstate a second DPMS-off writer. Same class: Hyprland warps the cursor when a monitor disconnects, which the backstop reads as presence and relights the remaining panels. Requires hypr-DE ≥ 0.2.25 (hypr-DE#27): on older hypr-DE a locked session holding an idle inhibitor is blanked by nobody. An inhibitor appearing or releasing no longer changes a locked screen; only input (or unlock) relights it.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
 
 ## Architecture
@@ -23,13 +23,17 @@ flowchart TD
         hypr["Hyprland IPC"]
         logind["logind"]
         upower["UPower"]
-        poll["Pollers"]
+        uevent["kernel uevents"]
+        inotify["inotify"]
+        sysfs["sysfs notify"]
     end
 
     hypr -->|".socket2.sock: monitoraddedv2 / monitorremoved / configreloaded"| chan
-    logind -->|"org.freedesktop.login1 lid + LockedHint, holds handle-lid-switch:block inhibitor"| chan
-    upower -->|"AC / battery state"| chan
-    poll -->|"sysfs + hypridle log polling"| chan
+    logind -->|"lid, LockedHint, BlockInhibited (ListInhibitors on change), Lock/Unlock, PrepareForSleep; holds handle-lid-switch:block"| chan
+    upower -->|"OnBattery / Percentage PropertiesChanged"| chan
+    uevent -->|"power_supply (sysfs AC fallback), backlight add/remove"| chan
+    inotify -->|"gpu-select, power-override, suspend request, profiles/*.toml"| chan
+    sysfs -->|"platform_profile POLLPRI"| chan
 
     chan["single mpsc Event channel"] --> disp["Dispatcher: updates Context / WorldInputs"]
     disp --> fsm["hyprstate-fsm crate: pure Moore-style world_state recompute, no edge table"]
@@ -43,8 +47,9 @@ flowchart TD
         pwr["power client"]
     end
 
-    recon["5s reconciler loop"] -->|"re-asserts eDP invariant"| mon
-    pwr -->|"D-Bus org.hyprstate.Power1 ApplyProfile"| powerd["hyprstate powerd — root daemon"]
+    recon["reconciler: compositor / lock / resume / AC events + 5 min safety tick"] -->|"re-asserts eDP invariant, stuck-DPMS repair"| mon
+    pwr -->|"D-Bus org.hyprstate.Power1 ApplyProfile"| powerd["hyprstate powerd (root daemon)"]
+    pwr -->|"SIGRTMIN+9 when the applied state changes"| waybar["waybar custom/power-profile"]
     powerd -->|"sysfs writes"| knobs["platform_profile / EPP / ASPM / dpm knobs"]
 
     subgraph wake["Out-of-band wake path"]
@@ -52,6 +57,25 @@ flowchart TD
         udev["udev USB-wake rule"] --> usb
     end
 ```
+
+## Event sources, not pollers
+
+Since 2.8.0 the daemon has no periodic reader except one safety tick every
+5 min. Every input has an event source; the tick re-reads everything as the
+net under a missed event, and a reconcile pass (one `hyprctl monitors`, one
+`hyprctl clients`, three logind reads) happens only after an event that can
+have moved the world.
+
+| Input | Source | Catch-up |
+|---|---|---|
+| monitors, eDP state, DPMS | socket2 events, then one `hyprctl monitors` per reconcile pass | safety tick |
+| lid, LockedHint, sleep and resume | logind PropertiesChanged and PrepareForSleep; Session Lock/Unlock trigger a pass | reconcile re-reads |
+| keep-awake claims | logind BlockInhibited then ListInhibitors; `hyprctl clients` at lid close, at a suspend request, on each pass, and every 5 s only while Deferred waits on a claim | reconcile re-reads |
+| AC and battery | UPower PropertiesChanged; the kernel power_supply uevent read from sysfs when UPower is down (same 5 s settle path) | reconcile re-reads sysfs |
+| platform_profile | sysfs notify (POLLPRI on the open attribute) | safety tick |
+| gpu-select, power-override, suspend request, profile TOML dirs | inotify (`*.toml` only; the daemon's own renders do not echo) | safety tick |
+| backlight device | kernel backlight add/remove uevent | none needed |
+| waybar power module | SIGRTMIN+9 from the daemon when the applied profile, override mode or powerd reachability changes | none; the module runs on the signal |
 
 ## Layout
 
@@ -180,4 +204,4 @@ sudo tail -f /var/log/hyprstate-sleep.log       # sleep hook log
 
 ## Dependencies
 
-System: `hyprctl`, `playerctl`, any screen locker that sets logind's `LockedHint` and holds ext-session-lock-v1 (vigil-lock, hyprlock, swaylock, …) — hyprstate requires both `LockedHint` and `hyprctl locked` before suspend — and `hypridle` (wayland-inhibitor journal). Build: `cargo` / `rustc`.
+System: `hyprctl`, `playerctl`, any screen locker that sets logind's `LockedHint` and holds ext-session-lock-v1 (vigil-lock, hyprlock, swaylock, …); hyprstate requires both `LockedHint` and `hyprctl locked` before suspend. `hypridle` drives the idle ladder and the suspend request; its journal is not read. Build: `cargo` / `rustc`.

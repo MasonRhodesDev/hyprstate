@@ -156,10 +156,11 @@ dropped, falls through to platform_profile/auto), never `ctx.current_profile`.
 ## Daemon integration
 
 - `EventKind` gains `PLATFORM_PROFILE_CHANGED` and `GPU_OVERRIDE_CHANGED` (routed
-  identically). A poller task — sibling of `inhibitor_poller`, own `last_*` locals —
-  polls `platform_profile` content and the override file's first word, queues on
-  change. The reconciler stays event-free (its contract is silent ctx repair; the
-  existing AC sysfs fallback only mutates ctx, verified line 809-811).
+  identically). The state-file task (the one owner of the `last_*` values) queues
+  on change: inotify on the override file, sysfs_notify (POLLPRI) on
+  `platform_profile`, and the 5 min safety tick re-reads both as the net under a
+  lost event. The reconciler stays event-free (its contract is silent ctx repair;
+  the existing AC sysfs fallback only mutates ctx, verified line 809-811).
 - **Actual**: `ctx.gpu_actual` resolved *lazily* on first drift check with retry
   (mirroring `hypr_socket_reader`'s 2 s retry): PID = first line of
   `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/hyprland.lock`; validate

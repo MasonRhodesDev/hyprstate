@@ -17,8 +17,23 @@ pub const GPU_SETTLE: Duration = Duration::from_millis(500);
 
 pub const GRACE_SECONDS: Duration = Duration::from_secs(30);
 pub const LOCK_WAIT: Duration = Duration::from_secs(2);
-pub const INHIBIT_POLL: Duration = Duration::from_secs(2);
-pub const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+/// Reconnect delay for an event source whose subscription or socket
+/// dropped (D-Bus signal streams, the uevent socket).
+pub const SOURCE_RETRY: Duration = Duration::from_secs(2);
+/// The reconciler runs on events. This is the one slow timer under it: a
+/// pass this long after the last one, as the net under a missed signal.
+pub const SAFETY_TICK: Duration = Duration::from_secs(300);
+/// How long a burst of reconcile triggers (a hotplug is several socket2
+/// lines plus a profile apply) settles before one snapshot is taken.
+pub const RECONCILE_SETTLE: Duration = Duration::from_secs(2);
+/// Offset from SIGRTMIN of the signal waybar's `custom/power-profile`
+/// module re-runs its exec on (hypr-DE waybar config `"signal": 9`). The
+/// daemon raises it whenever what the module renders changes.
+pub const WAYBAR_POWER_SIGNAL: i32 = 9;
+/// The one sampler left: while Deferred waits on a Wayland idle-inhibit
+/// claim (lid closed mid-call), `hyprctl clients` is asked this often
+/// whether the claim is still held. No compositor event announces release.
+pub const DEFERRED_CLAIM_POLL: Duration = Duration::from_secs(5);
 /// Coalesce monitor add/remove bursts before profile reconciliation.
 pub const PROFILE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// AC plug-jiggle settle window before power policy reacts.

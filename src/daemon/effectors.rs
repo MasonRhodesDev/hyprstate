@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 
-use super::ctx::Context;
+use super::ctx::{Context, WaybarView};
 use super::event::Event;
+use super::sources::ReconcileTrigger;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
 use crate::pure::fsm::edp_may_disable;
@@ -203,6 +204,9 @@ pub struct Effectors {
     /// Mirror for reconciler lock repairs — state, not an effect, so never
     /// shadow-gated (same as lock_watcher's sends).
     pub locked_tx: watch::Sender<bool>,
+    /// Asks the reconciler for a pass. Not an effect: the pass only reads
+    /// the world, so shadow mode asks too.
+    pub reconcile: mpsc::Sender<ReconcileTrigger>,
 }
 
 impl Effectors {
@@ -214,6 +218,12 @@ impl Effectors {
         if self.worker.try_send(cmd).is_err() {
             warn!("effector worker queue full/closed — effect dropped");
         }
+    }
+
+    /// Prompt a reconcile pass. A full queue is fine: triggers coalesce and
+    /// a pass is already pending.
+    pub fn request_reconcile(&self, trigger: ReconcileTrigger) {
+        let _ = self.reconcile.try_send(trigger);
     }
 
     // ---- eDP / dpms / media / notify ----
@@ -310,6 +320,25 @@ impl Effectors {
         }
         self.cancel_grace_timer(ctx);
         ctx.grace_timer = Some(self.spawn_timer(paths::GRACE_SECONDS, || Event::TimerExpired));
+    }
+
+    /// Deferred on a Wayland claim: watch the claim for release (see
+    /// `sources::inhibitors::wayland_claim_watch`). Idempotent while one is
+    /// running, so a RECONCILE re-assert of Deferred does not restart it.
+    /// Sensing, not an effect: shadow mode watches too.
+    pub fn start_claim_watch(&self, ctx: &mut Context) {
+        if ctx.claim_watch.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        ctx.claim_watch = Some(tokio::spawn(
+            super::sources::inhibitors::wayland_claim_watch(self.queue.clone()),
+        ));
+    }
+
+    pub fn cancel_claim_watch(&self, ctx: &mut Context) {
+        if let Some(t) = ctx.claim_watch.take() {
+            t.abort();
+        }
     }
 
     /// Debounce monitor add/remove bursts into one MonitorsChanged.
@@ -448,9 +477,33 @@ impl Effectors {
 
     // ---- power ----
 
+    /// Tell every waybar of this user to re-run its power-profile module
+    /// (SIGRTMIN+9) when what the module renders has changed. Called once
+    /// per dispatched event, after the effects, so the bar reads the
+    /// applied state, not the intent. Replaces the module's 5 s poll.
+    pub fn sync_waybar(&self, ctx: &mut Context) {
+        let view = WaybarView::of(ctx);
+        if ctx.waybar_view == Some(view) {
+            return;
+        }
+        ctx.waybar_view = Some(view);
+        if self.shadow {
+            info!(
+                "[shadow] would signal waybar SIGRTMIN+{}: {view:?}",
+                paths::WAYBAR_POWER_SIGNAL
+            );
+            return;
+        }
+        let n = crate::sysio::procs::signal_own_processes(
+            "waybar",
+            libc::SIGRTMIN() + paths::WAYBAR_POWER_SIGNAL,
+        );
+        debug!("signalled {n} waybar process(es): {view:?}");
+    }
+
     /// Ask powerd to apply a profile. No-op when already applied. Registers
-    /// the expected platform_profile chain BEFORE the call so the poller
-    /// can't observe sysfs ahead of the bookkeeping.
+    /// the expected platform_profile chain BEFORE the call so the sysfs
+    /// watch can't observe the write ahead of the bookkeeping.
     pub async fn apply_power_profile(&self, ctx: &mut Context, profile: PowerProfile) {
         if ctx.power_applied == Some(profile) || !ctx.powerd_available {
             return;
@@ -526,7 +579,7 @@ impl Effectors {
 
     /// Decision 6: write the idle-suspend request file on the daemon's own
     /// behalf (battery-low). Same file the CLI and hypridle write, so every
-    /// downstream contract (poller echo, Resumed clear, grace re-check)
+    /// downstream contract (inotify echo, Resumed clear, grace re-check)
     /// applies unchanged; the "battery-low" body is the provenance token
     /// that lets AC-return withdraw ONLY the daemon's own request. Returns
     /// whether the file was actually written - the caller must not mark a
@@ -595,7 +648,7 @@ impl Effectors {
         }
     }
 
-    /// Delete the override file and update ctx SYNCHRONOUSLY — the poller
+    /// Delete the override file and update ctx SYNCHRONOUSLY: the inotify
     /// echo of the deletion must arrive as a no-op.
     pub fn clear_power_override(&self, ctx: &mut Context) {
         ctx.power_override = None;

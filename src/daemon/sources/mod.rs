@@ -1,6 +1,11 @@
 //! Event source tasks. Each holds an mpsc Sender<Event> clone and never
 //! touches Context — the dispatcher owns it.
 
+pub mod files;
+pub mod inhibitors;
+pub mod reconciler;
+pub mod uevent;
+
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, watch};
@@ -8,11 +13,12 @@ use tracing::{info, warn};
 use zbus::Connection;
 use zbus::proxy::CacheProperties;
 
-use super::event::{Event, ReconcileSnapshot};
+use super::event::Event;
+use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::upower::{DISPLAY_DEVICE_PATH, UPowerDeviceProxy, UPowerProxy};
 use crate::paths;
-use crate::sysio::{hyprctl, hypridle_log, sysfs};
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
+pub use reconciler::ReconcileTrigger;
 
 // =========================================================================
 // Hyprland socket2 reader
@@ -62,7 +68,7 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
 }
 
 // =========================================================================
-// Pollers
+// logind inhibitors
 // =========================================================================
 
 pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> Option<bool> {
@@ -96,204 +102,38 @@ pub(crate) fn logind_has_real_idle_block(
     false
 }
 
-pub async fn inhibitor_poller(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
-    let mut last_logind = false;
-    let mut last_wayland = false;
-    let mut last_health = hypridle_log::ParseHealth::Ok;
-    loop {
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
-        let cur_logind = logind_real_inhibitor_active(&manager)
-            .await
-            .unwrap_or(last_logind);
-        let (cur_wayland, health) = hypridle_log::wayland_inhibitor_active();
-        if health != last_health {
-            warn!(
-                "wayland inhibitor source health: {} -> {}",
-                last_health.as_str(),
-                health.as_str()
-            );
-            last_health = health;
-        }
-        if cur_logind != last_logind {
-            last_logind = cur_logind;
-            if tx
-                .send(Event::Inhibitor {
-                    wayland: false,
-                    active: cur_logind,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        if cur_wayland != last_wayland {
-            last_wayland = cur_wayland;
-            if tx
-                .send(Event::Inhibitor {
-                    wayland: true,
-                    active: cur_wayland,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    }
-}
+// =========================================================================
+// D-Bus subscriptions
+// =========================================================================
 
-/// Poll platform_profile + the gpu/power override files + monitor-profile
-/// TOML dirs; queue on change.
-pub async fn mode_poller(tx: mpsc::Sender<Event>) {
-    let mut last_platform = sysfs::read_first_word(paths::platform_profile_path());
-    let mut last_gpu = sysfs::read_first_word(&paths::gpu_override_file());
-    let mut last_power = sysfs::read_first_word(&paths::power_override_file());
-    // Existence, not content: every other reader (reconciler, TimerExpired
-    // guard, CLI) keys on the file existing, and a zero-byte file must not
-    // read as "standing" to one and "withdrawn" to another.
-    let mut last_suspend = paths::suspend_request_standing();
-    let mut last_profiles = crate::sysio::profiles::profiles_source_fingerprint();
-    loop {
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
-        let cur = sysfs::read_first_word(paths::platform_profile_path());
-        if cur != last_platform {
-            last_platform = cur.clone();
-            if tx.send(Event::PlatformProfileChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = sysfs::read_first_word(&paths::gpu_override_file());
-        if cur != last_gpu {
-            last_gpu = cur.clone();
-            if tx.send(Event::GpuOverrideChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = sysfs::read_first_word(&paths::power_override_file());
-        if cur != last_power {
-            last_power = cur.clone();
-            if tx.send(Event::PowerOverrideChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = paths::suspend_request_standing();
-        if cur != last_suspend {
-            last_suspend = cur;
-            let payload = cur.then(|| "idle".to_string());
-            if tx
-                .send(Event::SuspendRequestChanged(payload))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        let cur = crate::sysio::profiles::profiles_source_fingerprint();
-        if cur != last_profiles {
-            last_profiles = cur;
-            if tx.send(Event::ProfilesChanged).await.is_err() {
-                return;
-            }
-        }
-    }
-}
-
-/// Gather the world every RECONCILE_INTERVAL; the dispatcher diffs/repairs.
-/// `manager` and `session` must be UNCACHED proxies: catching missed
-/// PropertiesChanged signals is this task's whole purpose.
-pub async fn reconcile_snapshot_task(
-    tx: mpsc::Sender<Event>,
-    manager: LogindManagerProxy<'static>,
-    session: Option<LogindSessionProxy<'static>>,
-    mut ext_prev: u32,
-    lid_present: bool,
+/// logind's Session `Lock`/`Unlock` signals are reconcile triggers: a lock
+/// or unlock requested without input (`loginctl unlock-session` over SSH)
+/// is exactly when the stuck-DPMS repair has work and no LockedHint edge
+/// may follow quickly enough to prompt it.
+pub async fn session_signal_watcher(
+    triggers: mpsc::Sender<ReconcileTrigger>,
+    proxy: SessionSignalsProxy<'static>,
 ) {
+    let (lock, unlock) = match (proxy.receive_lock().await, proxy.receive_unlock().await) {
+        (Ok(l), Ok(u)) => (l, u),
+        (Err(e), _) | (_, Err(e)) => {
+            warn!("session Lock/Unlock subscription failed: {e}");
+            return;
+        }
+    };
+    let mut lock = lock;
+    let mut unlock = unlock;
     loop {
-        tokio::time::sleep(paths::RECONCILE_INTERVAL).await;
-        // A lidless machine never reads the lid: there is nothing to read,
-        // and a logind error here must not skip the pass that also repairs
-        // the idle-suspend request. Lid-present machines keep the existing
-        // fail-the-pass behavior (a bad lid read must not fabricate a state).
-        let lid = if lid_present {
-            match manager.lid_closed().await {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("reconciler snapshot failed: {e}");
-                    continue;
-                }
-            }
-        } else {
-            false
+        let trigger = tokio::select! {
+            Some(_) = lock.next() => ReconcileTrigger::SessionLock,
+            Some(_) = unlock.next() => ReconcileTrigger::SessionUnlock,
+            else => return,
         };
-        // One monitors payload per pass: ext count, eDP state and the
-        // stuck-blank check all read the same JSON, and spawning hyprctl
-        // three times for it was three times the process churn for nothing.
-        let monitors = hyprctl::monitors().await;
-        let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), ext_prev);
-        ext_prev = ext;
-        let logind_inh = logind_real_inhibitor_active(&manager)
-            .await
-            .unwrap_or(false);
-        let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
-        let locked = match &session {
-            Some(s) => match s.locked_hint().await {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    warn!("reconciler LockedHint read failed: {e}");
-                    None
-                }
-            },
-            None => None,
-        };
-        let on_ac = on_ac_sysfs();
-        let edp_disabled = monitors.as_deref().and_then(hyprctl::edp_is_disabled_in);
-        let dpms_off = monitors
-            .as_deref()
-            .map(hyprctl::any_enabled_monitor_dpms_off_in);
-        // The cursor is only ever needed to decide whether a *dark* session
-        // has a human in front of it. Asking for it while the screens are on
-        // is a subprocess per tick, forever, to answer a question nobody
-        // asked: sample it only when something is actually blank.
-        let cursor_pos = match dpms_off {
-            Some(true) => hyprctl::cursor_pos().await,
-            _ => None,
-        };
-        let snap = ReconcileSnapshot {
-            lid_closed: lid,
-            ext_mon_count: ext,
-            logind_inhibitor: logind_inh,
-            wayland_inhibitor: wayland_inh,
-            locked,
-            on_ac,
-            edp_disabled,
-            dpms_off,
-            cursor_pos,
-        };
-        if tx.send(Event::ReconcileTick(Box::new(snap))).await.is_err() {
+        if triggers.send(trigger).await.is_err() {
             return;
         }
     }
 }
-
-/// on_ac from /sys/class/power_supply/A*/online — UPower fallback. None on
-/// a desktop / no AC supply.
-pub fn on_ac_sysfs() -> Option<bool> {
-    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with('A') {
-            continue;
-        }
-        if let Ok(text) = std::fs::read_to_string(entry.path().join("online")) {
-            return Some(text.trim() == "1");
-        }
-    }
-    None
-}
-
-// =========================================================================
-// D-Bus subscriptions
-// =========================================================================
 
 pub async fn lid_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
     let mut stream = manager.receive_lid_closed_changed().await;
@@ -324,7 +164,7 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
             }
             Err(e) => warn!("PrepareForSleep subscription failed: {e}; retrying"),
         }
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
+        tokio::time::sleep(paths::SOURCE_RETRY).await;
     }
 }
 
@@ -460,9 +300,35 @@ pub async fn powerd_name_watcher(tx: mpsc::Sender<Event>, conn: Connection) {
 #[cfg(test)]
 mod tests {
     use super::logind_has_real_idle_block;
+    use crate::sysio::hyprctl::any_client_inhibiting_idle_in;
 
     fn row(what: &str, who: &str, mode: &str) -> (String, String, String, String, u32, u32) {
         (what.into(), who.into(), "why".into(), mode.into(), 1000, 1)
+    }
+
+    /// Regression (mason-air, hyprstate 2.7.4 with hypr-DE 0.2.36): the
+    /// keep-awake flag was true from boot with no claim anywhere, so every
+    /// lid close went LID_OPEN to DEFERRED and the laptop never suspended.
+    /// The flag came from hypridle's journal, and `inhibit_sleep=3` makes
+    /// hypridle log "Sleep inhibition enabled" and "Inhibited sleep with
+    /// fd 9" at startup while it holds a logind sleep inhibitor as
+    /// "hypridle". This is that machine's boot state as the two real
+    /// sources see it: hypridle's own inhibitor (in either mode) and the
+    /// daemon's lid block are not claims, and no client inhibits idle.
+    #[test]
+    fn mason_air_boot_state_holds_no_claim() {
+        let rows = [
+            row("sleep", "hypridle", "delay"),
+            row("sleep", "hypridle", "block"),
+            row("handle-lid-switch", "hyprstate", "block"),
+            row("sleep", "NetworkManager", "delay"),
+        ];
+        assert!(!logind_has_real_idle_block(&rows));
+        let clients = serde_json::json!([
+            {"class": "kitty", "inhibitingIdle": false},
+            {"class": "firefox", "inhibitingIdle": false}
+        ]);
+        assert!(!any_client_inhibiting_idle_in(clients.as_array().unwrap()));
     }
 
     #[test]

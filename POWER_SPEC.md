@@ -141,6 +141,8 @@ unrecognized `#@` lines):
 #@ battery-low = power-saver
 #@ battery-low-percent = 15
 #@ lid = present
+#@ lid-grace = 30
+#@ lid-ac = suspend
 ```
 
 Missing file/keys → defaults above; values validated ∈ profiles. `battery*`
@@ -153,6 +155,21 @@ therefore dead. There is no auto-probe — a mistaken "absent" is harmless
 (no lid to mishandle) but a mistaken "present" is too (today's default), while
 a *false absent from a probe* on a real laptop would let logind suspend it
 unlocked on lid close, so absence must be declared, never guessed.
+
+**`lid-grace = <seconds>`** (default `30`, clamped to 0..600). The countdown
+between a lid close and the lock-then-suspend. `0` locks and suspends at once
+(mason-air's choice). It governs the lid countdown only: a countdown started
+by a standing request (idle, battery-low) keeps the fixed 30 s, which is the
+battery-low plug-in window and hypridle's cancel window.
+
+**`lid-ac = suspend|defer`** (default `suspend`, the historical behaviour).
+`defer` neutralises the lid as a suspend trigger while the charger is
+connected, the way Docked does for an external monitor: the panel goes off,
+nothing counts down, and the ordinary countdown starts when the charger is
+pulled (raw AC signal; the grace absorbs a plug jiggle). It is a lid policy,
+not a keep-awake claim: the lock does not end it, a standing idle-suspend
+request still suspends through it, and media is not paused (that pause
+belongs to a claim parking the lid, a video nobody is watching any more).
 
 ### The idle/power ladder — decided model (2026-09-04)
 

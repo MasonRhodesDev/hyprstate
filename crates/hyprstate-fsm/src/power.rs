@@ -214,6 +214,45 @@ impl std::str::FromStr for LidMode {
     }
 }
 
+/// What a lid close does while on AC (`#@ lid-ac = suspend|defer`).
+/// `Suspend` is the historical behaviour: the lid chain runs whatever the
+/// charger is doing. `Defer` neutralises the lid as a suspend TRIGGER while
+/// on AC, the way Docked does for an external monitor: the panel goes off
+/// and nothing counts down until the charger is pulled, when the ordinary
+/// countdown starts. It is a lid policy, not a keep-awake claim: a standing
+/// idle-suspend request still suspends, and the lock does not end it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LidAcPolicy {
+    #[default]
+    Suspend,
+    Defer,
+}
+
+impl LidAcPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LidAcPolicy::Suspend => "suspend",
+            LidAcPolicy::Defer => "defer",
+        }
+    }
+}
+
+impl std::str::FromStr for LidAcPolicy {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "suspend" => Ok(LidAcPolicy::Suspend),
+            "defer" => Ok(LidAcPolicy::Defer),
+            _ => Err(()),
+        }
+    }
+}
+
+/// `#@ lid-grace` default: the lid-close countdown before lock and suspend.
+pub const DEFAULT_LID_GRACE_SECS: u16 = 30;
+/// Upper bound for `#@ lid-grace`; anything longer is a typo, not a grace.
+pub const MAX_LID_GRACE_SECS: u16 = 600;
+
 /// Everything `power.conf` declares. Additive superset of the tuple
 /// `parse_power_policy` returns, so the GUI's dependency on that signature
 /// is untouched.
@@ -222,6 +261,11 @@ pub struct PowerConf {
     pub policy: PowerPolicy,
     pub battery_low_pct: u8,
     pub lid: LidMode,
+    /// Seconds between a lid close and the lock-then-suspend. 0 locks and
+    /// suspends at once. Governs the LID countdown only; request-driven
+    /// countdowns (idle, battery-low) keep the fixed 30 s plug-in window.
+    pub lid_grace_secs: u16,
+    pub lid_ac: LidAcPolicy,
 }
 
 impl Default for PowerConf {
@@ -234,6 +278,8 @@ impl Default for PowerConf {
             policy: PowerPolicy::default(),
             battery_low_pct: DEFAULT_BATTERY_LOW_PCT,
             lid: LidMode::default(),
+            lid_grace_secs: DEFAULT_LID_GRACE_SECS,
+            lid_ac: LidAcPolicy::default(),
         }
     }
 }
@@ -248,6 +294,8 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
     let mut policy = PowerPolicy::default();
     let mut low_pct = DEFAULT_BATTERY_LOW_PCT;
     let mut lid = LidMode::default();
+    let mut lid_grace = DEFAULT_LID_GRACE_SECS;
+    let mut lid_ac = LidAcPolicy::default();
     let mut warnings = Vec::new();
 
     for line in text.lines() {
@@ -275,6 +323,25 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
             }
             continue;
         }
+        if key == "lid-grace" {
+            match val.parse::<i64>() {
+                Ok(n) => lid_grace = n.clamp(0, MAX_LID_GRACE_SECS as i64) as u16,
+                Err(_) => warnings.push(format!(
+                    "lid-grace must be seconds (0 = suspend at once), got {val:?}; using {lid_grace}"
+                )),
+            }
+            continue;
+        }
+        if key == "lid-ac" {
+            match val.parse::<LidAcPolicy>() {
+                Ok(p) => lid_ac = p,
+                Err(_) => warnings.push(format!(
+                    "lid-ac must be suspend|defer, got {val:?}; using {}",
+                    lid_ac.as_str()
+                )),
+            }
+            continue;
+        }
         let slot = match key {
             "docked-ac" => &mut policy.docked_ac,
             "ac" => &mut policy.ac,
@@ -298,6 +365,8 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
             policy,
             battery_low_pct: low_pct,
             lid,
+            lid_grace_secs: lid_grace,
+            lid_ac,
         },
         warnings,
     )
@@ -306,7 +375,7 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
 /// Self-write detection for platform_profile: tracks the expected values
 /// (full fallback chain) of in-flight applies plus a suppression window
 /// after any apply. Entries are registered BEFORE the ApplyProfile call so
-/// the poller can't observe the sysfs change ahead of the bookkeeping.
+/// the sysfs watch can't observe the change ahead of the bookkeeping.
 #[derive(Debug, Default)]
 pub struct SelfWriteTracker {
     pub entries: Vec<(Instant, &'static [&'static str])>,
@@ -542,5 +611,53 @@ mod tests {
         let (conf, _) = parse_power_conf("#@ ac = performance\n#@ lid = absent");
         assert_eq!(conf.policy.ac.as_str(), "performance");
         assert_eq!(conf.lid, LidMode::Absent);
+    }
+
+    #[test]
+    fn lid_grace_and_lid_ac_default_to_todays_behaviour() {
+        let (conf, warnings) = parse_power_conf("");
+        assert_eq!(conf.lid_grace_secs, 30);
+        assert_eq!(conf.lid_ac, LidAcPolicy::Suspend);
+        assert!(warnings.is_empty());
+        assert_eq!(PowerConf::default().lid_grace_secs, DEFAULT_LID_GRACE_SECS);
+    }
+
+    /// mason-air: no countdown at all, and a closed lid on the charger
+    /// does not suspend.
+    #[test]
+    fn lid_grace_zero_and_lid_ac_defer_parse() {
+        let (conf, warnings) = parse_power_conf("#@ lid-grace = 0\n#@ lid-ac = defer\n");
+        assert_eq!(conf.lid_grace_secs, 0);
+        assert_eq!(conf.lid_ac, LidAcPolicy::Defer);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn lid_grace_is_clamped_and_bad_values_keep_defaults() {
+        assert_eq!(
+            parse_power_conf("#@ lid-grace = 99999").0.lid_grace_secs,
+            MAX_LID_GRACE_SECS
+        );
+        assert_eq!(parse_power_conf("#@ lid-grace = -5").0.lid_grace_secs, 0);
+        let (conf, warnings) = parse_power_conf("#@ lid-grace = soon\n#@ lid-ac = maybe\n");
+        assert_eq!(conf.lid_grace_secs, DEFAULT_LID_GRACE_SECS);
+        assert_eq!(conf.lid_ac, LidAcPolicy::Suspend);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("lid-grace must be seconds"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("lid-ac must be suspend|defer"))
+        );
+    }
+
+    #[test]
+    fn parse_power_policy_wrapper_is_silent_on_the_lid_keys() {
+        let (_policy, _pct, warnings) = parse_power_policy("#@ lid-grace = 0\n#@ lid-ac = defer\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

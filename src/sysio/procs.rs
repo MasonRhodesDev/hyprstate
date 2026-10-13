@@ -52,12 +52,39 @@ pub fn signal_own_processes(comm: &str, signal: libc::c_int) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::uid_from_status;
+    use super::{signal_own_processes, uid_from_status};
 
     #[test]
     fn reads_the_real_uid() {
         let status = "Name:\twaybar\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
         assert_eq!(uid_from_status(status), Some(1000));
         assert_eq!(uid_from_status("Name:\tx\n"), None);
+    }
+
+    /// Exec `sleep` through a symlink so its comm is a name nothing else on
+    /// the box carries (15 chars max, or comm truncates), then signal by
+    /// that name: exactly one hit, and the child died of that signal.
+    #[test]
+    fn signals_exactly_the_processes_with_that_name() {
+        use std::os::unix::process::ExitStatusExt;
+        let name = "hs-sig-target";
+        let dir = std::env::temp_dir().join(format!("hyprstate-procs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join(name);
+        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
+        let mut child = std::process::Command::new(&link).arg("30").spawn().unwrap();
+        // comm is set at exec; give the child a moment to get there.
+        let comm = format!("/proc/{}/comm", child.id());
+        for _ in 0..200 {
+            if std::fs::read_to_string(&comm).is_ok_and(|c| c.trim_end() == name) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(signal_own_processes(name, libc::SIGTERM), 1);
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+        assert_eq!(signal_own_processes(name, libc::SIGTERM), 0, "gone now");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

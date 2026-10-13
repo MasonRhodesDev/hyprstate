@@ -348,7 +348,7 @@ async fn handle_reconcile_tick(
     // Re-read the file HERE, not from the snapshot: this handler runs after
     // the Resumed arm (events are processed serially), so a snapshot taken
     // before Resumed cleared the request cannot resurrect it. Existence is
-    // the signal, matching the poller and the TimerExpired guard.
+    // the signal, matching the state-file watch and the TimerExpired guard.
     let request_now = crate::paths::suspend_request_standing();
     if request_now != ctx.suspend_requested {
         drift.push(format!(

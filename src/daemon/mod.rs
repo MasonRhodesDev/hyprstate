@@ -169,7 +169,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
 
     // A daemon restart mid-request must not suspend a user who has since
     // returned; the request is re-established only if the file still exists
-    // and the poller re-reads it.
+    // and the state-file watch reports it.
     fx_clear_stale_request(shadow);
 
     // Lid inhibitor first (held for process lifetime; dropping releases).

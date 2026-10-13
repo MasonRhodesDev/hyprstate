@@ -29,7 +29,8 @@ pub fn load_profiles() -> Vec<TomlProfile> {
     load_profiles_merged(&paths::profiles_dir(), paths::system_profiles_dir())
 }
 
-/// Cheap change detector for the shared + user TOML dirs (poller input).
+/// Cheap change detector for the shared + user TOML dirs (state-file watch
+/// input: an inotify event is confirmed against it before ProfilesChanged).
 /// Paths + mtime + length; content is compared after load via Profile Eq.
 pub fn profiles_source_fingerprint() -> u64 {
     use std::collections::hash_map::DefaultHasher;

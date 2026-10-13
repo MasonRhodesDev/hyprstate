@@ -3,7 +3,7 @@
 //! Writes or removes `$XDG_RUNTIME_DIR/hyprstate-suspend-request`. This is a
 //! REQUEST into the daemon's existing Countdown machinery, driven by
 //! hypridle's idle timeout (request) and on-resume (cancel) — it never
-//! suspends anything itself. The running daemon polls the file, enters
+//! suspends anything itself. The running daemon watches the file, enters
 //! Countdown, proves a live locker, and only then calls logind Suspend.
 
 use crate::paths;

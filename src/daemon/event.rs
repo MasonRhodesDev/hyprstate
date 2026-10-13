@@ -20,7 +20,8 @@ pub enum Event {
     MonitorsChanged,
     /// `/etc/monitor-profiles` or the user profiles dir changed on disk.
     ProfilesChanged,
-    /// Inhibitor poller edge. wayland=false -> logind source.
+    /// Keep-awake claim edge. wayland=false -> logind (BlockInhibited
+    /// watcher); wayland=true -> the compositor's idle-inhibit view.
     Inhibitor { wayland: bool, active: bool },
     /// LockedHint PropertiesChanged (also mirrored into the locked watch).
     LockChanged(bool),
@@ -47,7 +48,8 @@ pub enum Event {
     /// The idle-suspend request file changed: `Some(word)` = a request is
     /// standing, `None` = withdrawn. Written by `hyprstate suspend
     /// request|cancel` (driven by hypridle's timeout/on-resume), polled by
-    /// mode_poller, and deleted by the daemon itself on Resumed.
+    /// watched by the state-file task, and deleted by the daemon itself
+    /// on Resumed.
     SuspendRequestChanged(Option<String>),
     /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,

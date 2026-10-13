@@ -621,6 +621,7 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         }
         Event::KbdIdle { idle } => {
             ctx.kbd_typing = !idle;
+            info!("KBD: {}", if idle { "input idle" } else { "typing" });
             if idle {
                 // The override lives exactly as long as typing does.
                 fx.kbd_release_override(ctx);

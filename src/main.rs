@@ -88,6 +88,13 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Keyboard backlight: manual level keys and the policy's status
+    Kbd {
+        #[arg(value_parser = ["status", "set", "up", "down", "auto"])]
+        action: String,
+        /// set: percent 0..100
+        value: Option<String>,
+    },
     /// Idle-suspend request (driven by hypridle; feeds the daemon's
     /// Countdown machinery, never suspends directly)
     Suspend {
@@ -144,6 +151,7 @@ fn main() {
             }
         },
         Cmd::Gpu { action } => cli::gpu::run(&action),
+        Cmd::Kbd { action, value } => cli::kbd::run(&action, value.as_deref()),
         Cmd::Power {
             action,
             value,

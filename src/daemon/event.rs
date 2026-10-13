@@ -47,9 +47,8 @@ pub enum Event {
     PowerOverrideChanged(Option<String>),
     /// The idle-suspend request file changed: `Some(word)` = a request is
     /// standing, `None` = withdrawn. Written by `hyprstate suspend
-    /// request|cancel` (driven by hypridle's timeout/on-resume), polled by
-    /// watched by the state-file task, and deleted by the daemon itself
-    /// on Resumed.
+    /// request|cancel` (driven by hypridle's timeout/on-resume), watched by
+    /// the state-file task, and deleted by the daemon itself on Resumed.
     SuspendRequestChanged(Option<String>),
     /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,

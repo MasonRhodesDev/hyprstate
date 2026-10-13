@@ -129,11 +129,27 @@ enum Cmd {
 ///
 /// `install` rather than `layer`: it registers with `span_lines::exit`, so
 /// the state span open at shutdown is closed and marked rather than lost.
+///
+/// The fmt layer carries its own filter. A bare `fmt::layer()` on a
+/// registry has no level cap (the `fmt()` builder this replaces defaulted
+/// to INFO), so every `debug!` in the crate would start reaching the
+/// journal; and it would also print the `hyprstate.trace` events, putting
+/// each transition on stdout twice. INFO by default, that one target off:
+/// the prose log reads exactly as it did before the records existed.
 fn init_tracing() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::{LevelFilter, Targets};
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
+    let prose = Targets::new()
+        .with_default(LevelFilter::INFO)
+        .with_target("hyprstate.trace", LevelFilter::OFF);
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(prose),
+        )
         .with(span_lines::tracing_layer::install(&["hyprstate.trace"]))
         .init();
 }

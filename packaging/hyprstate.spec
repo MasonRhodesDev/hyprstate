@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.10.0
+Version:        2.11.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -47,6 +47,11 @@ cat >> .cargo/config.toml << 'EOF'
 [source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=e263f57#e263f57b8ef3b7c812a8180c31cfc275a90c825b"]
 git = "https://github.com/MasonRhodesDev/monitor-profiles"
 rev = "e263f57"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/MasonRhodesDev/desktop-commons?rev=266121a#266121a64beeac20e7016d1e1cb11a8a20542721"]
+git = "https://github.com/MasonRhodesDev/desktop-commons"
+rev = "266121a"
 replace-with = "vendored-sources"
 EOF
 
@@ -121,6 +126,19 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.11.0-1
+- The daemon emits each state transition as a journald record on stderr,
+  beside the prose STATE line on stdout: `event=state.transition` carries
+  from, to, cause and the world that produced it (ext_mon, inhibitor,
+  locked, on_ac, suspend_requested, lid_ac_hold), and `span=state.occupancy`
+  closes with the dwell time in the state just left. Records use the target
+  `hyprstate.trace` so the prose log is never duplicated into the stream,
+  and the prose log keeps its INFO level with that target excluded, so what
+  a person reads is unchanged. span-lines (desktop-commons, rev 266121a).
+- The RPM %%prep maps the desktop-commons git source onto the vendor
+  tarball, as monitor-profiles already was, so the offline build finds
+  span-lines.
+
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.10.0-1
 - Keyboard backlight policy. The keys are lit only while the room is dark and
   the user is typing, and off when locked, going to sleep or idle for

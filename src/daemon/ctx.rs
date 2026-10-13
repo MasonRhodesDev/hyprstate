@@ -40,6 +40,10 @@ pub struct Context {
     /// Cleared on Resumed before dispatch - a stale value re-enters
     /// Countdown after wake and loops the machine back into suspend.
     pub suspend_requested: bool,
+    /// Span covering the state currently occupied; replaced on every
+    /// transition, so its duration is the dwell time in that state.
+    /// Held unentered - a daemon has no single call stack to nest under.
+    pub state_span: Option<tracing::Span>,
 
     // ---- timers (abort + respawn pattern) ----
     pub grace_timer: Option<JoinHandle<()>>,
@@ -153,6 +157,7 @@ impl Default for Context {
             on_ac: true,
             state: State::LidOpen,
             suspend_requested: false,
+            state_span: None,
             grace_timer: None,
             last_cursor_pos: None,
             profile_debounce: None,

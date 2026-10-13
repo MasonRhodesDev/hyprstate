@@ -11,7 +11,7 @@ resolver = "3"
 
 [package]
 name = "hyprstate"
-version = "2.10.0"
+version = "2.11.0"
 edition = "2024"
 license = "MIT"
 description = "Hyprland session/power state machine: lid, monitors, profiles, GPU selection, powerd"
@@ -38,6 +38,9 @@ futures-util = { version = "0.3", default-features = false }
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# The tracing feature brings the layer that turns these spans into journald
+# records; the crate core stays std-only for consumers that want that.
+span-lines = { git = "https://github.com/MasonRhodesDev/desktop-commons", rev = "266121a", features = ["tracing"] }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 wayland-client = "0.31.15"

@@ -105,13 +105,60 @@ enum Cmd {
     Status,
 }
 
+/// Human log to stdout, span-lines records to stderr.
+///
+/// Two layers on one registry rather than a `fmt` subscriber: the records
+/// have to go somewhere a machine can read them, and the existing prose log
+/// is what a person reads. They are separate streams so neither has to
+/// compromise for the other.
+///
+/// The allowlist is the single target `hyprstate.trace`, which nothing
+/// reaches by accident. Two reasons it is not simply `hyprstate`:
+///
+/// Installing a subscriber makes the process collect every instrumented
+/// crate in its tree - zbus is in there, carrying D-Bus paths and peer
+/// names - and this daemon's journal should hold its own state machine,
+/// not its dependencies' internals.
+///
+/// And `tracing`'s default target is the module path, so `hyprstate` would
+/// also admit `hyprstate::daemon` - every `info!` in the crate. That was
+/// not theoretical: the first version of this duplicated the entire prose
+/// log into the record stream as percent-encoded `event=log` lines, which
+/// is both unreadable and the exact noise the format exists to avoid. A
+/// dotted name cannot collide with a module path, which uses `::`.
+///
+/// `install` rather than `layer`: it registers with `span_lines::exit`, so
+/// the state span open at shutdown is closed and marked rather than lost.
+///
+/// The fmt layer carries its own filter. A bare `fmt::layer()` on a
+/// registry has no level cap (the `fmt()` builder this replaces defaulted
+/// to INFO), so every `debug!` in the crate would start reaching the
+/// journal; and it would also print the `hyprstate.trace` events, putting
+/// each transition on stdout twice. INFO by default, that one target off:
+/// the prose log reads exactly as it did before the records existed.
+fn init_tracing() {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::filter::{LevelFilter, Targets};
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let prose = Targets::new()
+        .with_default(LevelFilter::INFO)
+        .with_target("hyprstate.trace", LevelFilter::OFF);
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stdout)
+                .with_filter(prose),
+        )
+        .with(span_lines::tracing_layer::install(&["hyprstate.trace"]))
+        .init();
+}
+
 fn main() {
     let cli = Cli::parse();
     let rc = match cli.cmd {
         Cmd::Daemon { shadow } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stdout)
-                .init();
+            init_tracing();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -125,9 +172,7 @@ fn main() {
             }
         }
         Cmd::Powerd { session } => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::stdout)
-                .init();
+            init_tracing();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -187,5 +232,8 @@ fn main() {
         Cmd::Suspend { action } => cli::suspend::run(&action),
         Cmd::Status => cli::status::run(),
     };
-    std::process::exit(rc);
+    // Closes the state span still open at shutdown; a bare process::exit
+    // runs no destructors, so it would otherwise be lost - and a daemon's
+    // last state is the one worth having.
+    span_lines::exit(rc);
 }

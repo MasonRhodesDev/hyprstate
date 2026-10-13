@@ -232,8 +232,10 @@ fn main() {
         Cmd::Suspend { action } => cli::suspend::run(&action),
         Cmd::Status => cli::status::run(),
     };
-    // Closes the state span still open at shutdown; a bare process::exit
-    // runs no destructors, so it would otherwise be lost - and a daemon's
-    // last state is the one worth having.
+    // Closes any span still open; a bare process::exit runs no destructors,
+    // so it would otherwise be lost - and a daemon's last state is the one
+    // worth having. On a signal the dispatcher has already dropped its
+    // Context, so the final occupancy span arrives as a completed record
+    // and this call finds nothing open; it is the error paths that need it.
     span_lines::exit(rc);
 }

@@ -4,7 +4,7 @@
 //! answer; the sensor is read only when asked (a resume, a manual key press,
 //! an LED hotplug, startup), never on a timer.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::ctx::Context;
@@ -15,7 +15,7 @@ use crate::sysio::kbd::read_lux;
 
 /// What `hyprstate kbd status` shows for the daemon-side fields. Written
 /// tmp+rename to `kbd_status_file()` whenever it changes.
-#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KbdStatus {
     pub lit: bool,
     pub level: u8,

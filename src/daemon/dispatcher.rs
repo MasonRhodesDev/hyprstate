@@ -540,6 +540,10 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     }
 
     fx.sync_waybar(&mut ctx);
+    // The first pass runs RECONCILE_SETTLE after start instead of waiting
+    // for an event or the safety tick: it is what repairs on_ac from sysfs
+    // when UPower is down at boot (V8) and takes the first cursor sample.
+    fx.request_reconcile(ReconcileTrigger::Startup);
     while let Some(ev) = rx.recv().await {
         dispatch(ev, &mut ctx, &fx, &mut telem).await;
         // Everything the bar renders may have moved; tell it once per event,

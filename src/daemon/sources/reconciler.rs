@@ -20,6 +20,10 @@ use logind_session::{LogindManagerProxy, LogindSessionProxy};
 /// traced back to the event that exposed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileTrigger {
+    /// One pass shortly after start: the 5 s loop used to repair a
+    /// boot-on-battery with UPower down within seconds (V8), and the
+    /// stuck-DPMS cursor baseline wants an early first sample.
+    Startup,
     MonitorHotplug,
     ConfigReloaded,
     ProfileApplied,
@@ -37,6 +41,7 @@ pub enum ReconcileTrigger {
 impl ReconcileTrigger {
     pub fn as_str(self) -> &'static str {
         match self {
+            ReconcileTrigger::Startup => "startup",
             ReconcileTrigger::MonitorHotplug => "monitor hotplug",
             ReconcileTrigger::ConfigReloaded => "configreloaded",
             ReconcileTrigger::ProfileApplied => "profile applied",

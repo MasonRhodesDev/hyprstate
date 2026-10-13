@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.8.0
+Version:        2.9.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,16 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.9.0-1
+- power.conf gains two lid keys. `lid-grace` is the countdown between a lid
+  close and the lock-then-suspend (default 30; 0 locks and suspends at once;
+  request-driven countdowns keep 30 s). `lid-ac = suspend|defer` decides what
+  a closed lid does on the charger: `suspend` (default, as before) or `defer`,
+  which parks the lid like Docked does until the charger is pulled. The hold
+  is a lid policy, not a keep-awake claim: the lock does not end it, a
+  standing idle-suspend request still suspends, and media is not paused.
+  hyprstate-fsm 5.2.0 carries the new WorldInputs field and PowerConf keys.
+
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.8.0-1
 - The daemon is event driven. The 2 s inhibitor and state-file pollers and
   the 5 s reconciler loop are gone: keep-awake claims come from logind's

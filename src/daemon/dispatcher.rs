@@ -223,6 +223,12 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
         inhibitor = ctx.inhibitor(),
         locked = ctx.locked,
         on_ac = ctx.on_ac,
+        // The two inputs world_state reads that the prose line does not
+        // show. A standing request short-circuits straight to COUNTDOWN
+        // and a lid-ac hold parks a closed lid; without them a reader
+        // cannot tell either transition from a plain lid or timer one.
+        suspend_requested = ctx.suspend_requested,
+        lid_ac_hold = ctx.world().lid_ac_hold,
     );
 }
 
@@ -950,6 +956,7 @@ mod battery_low_tests {
 #[cfg(test)]
 mod trace_tests {
     use super::*;
+    use crate::pure::power::LidAcPolicy;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::prelude::*;
 
@@ -987,7 +994,13 @@ mod trace_tests {
         );
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
-            let ctx = Context::default();
+            // Both set, so a field wired to the wrong input (every other
+            // bool here defaults to false) cannot pass by accident.
+            let ctx = Context {
+                suspend_requested: true,
+                lid_ac: LidAcPolicy::Defer,
+                ..Context::default()
+            };
             log_state_transition(&ctx, State::LidOpen, State::Docked, "monitor-added");
             // Prose, at the module-path target. This is the line that used
             // to be duplicated into the record stream as `event=log`,
@@ -1007,5 +1020,7 @@ mod trace_tests {
         assert_eq!(field(record, "to"), "DOCKED");
         assert_eq!(field(record, "cause"), "monitor-added");
         assert_eq!(field(record, "on_ac"), "true");
+        assert_eq!(field(record, "suspend_requested"), "true");
+        assert_eq!(field(record, "lid_ac_hold"), "true");
     }
 }

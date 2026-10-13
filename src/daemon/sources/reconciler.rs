@@ -140,6 +140,7 @@ async fn gather(
     let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), *ext_prev);
     *ext_prev = ext;
     let logind_inh = logind_real_inhibitor_active(manager).await.unwrap_or(false);
+    let wayland_inh = hyprctl::wayland_idle_inhibited().await;
     let locked = match session {
         Some(s) => match s.locked_hint().await {
             Ok(v) => Some(v),
@@ -166,7 +167,7 @@ async fn gather(
         lid_closed: lid,
         ext_mon_count: ext,
         logind_inhibitor: logind_inh,
-        wayland_inhibitor: None,
+        wayland_inhibitor: wayland_inh,
         locked,
         on_ac,
         edp_disabled,

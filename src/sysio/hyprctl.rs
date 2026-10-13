@@ -170,3 +170,45 @@ pub async fn first_external_monitor() -> Option<String> {
         (!name.starts_with("eDP")).then(|| name.to_string())
     })
 }
+
+/// Whether any client holds a Wayland idle inhibitor
+/// (zwp_idle_inhibit_manager_v1), as `hyprctl clients` reports it in
+/// `inhibitingIdle`. This is the compositor's own view of keep-awake
+/// claims: a browser playing video, a call. None when undeterminable.
+/// Claims made only over D-Bus to hypridle's ScreenSaver interface (a game
+/// overlay) are not visible here; hypr-DE's no-keep-awake.sh covers those
+/// for the idle ladder with a process check.
+pub async fn wayland_idle_inhibited() -> Option<bool> {
+    let clients = hyprctl_json(&["-j", "clients"]).await?;
+    Some(any_client_inhibiting_idle_in(&clients))
+}
+
+pub fn any_client_inhibiting_idle_in(clients: &[serde_json::Value]) -> bool {
+    clients
+        .iter()
+        .any(|c| c.get("inhibitingIdle").and_then(|v| v.as_bool()) == Some(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::any_client_inhibiting_idle_in;
+
+    #[test]
+    fn a_video_client_is_a_claim() {
+        let clients = serde_json::json!([
+            {"class": "kitty", "inhibitingIdle": false},
+            {"class": "firefox", "inhibitingIdle": true}
+        ]);
+        assert!(any_client_inhibiting_idle_in(clients.as_array().unwrap()));
+    }
+
+    #[test]
+    fn no_inhibiting_client_is_no_claim() {
+        let clients = serde_json::json!([
+            {"class": "kitty", "inhibitingIdle": false},
+            {"class": "firefox"}
+        ]);
+        assert!(!any_client_inhibiting_idle_in(clients.as_array().unwrap()));
+        assert!(!any_client_inhibiting_idle_in(&[]));
+    }
+}

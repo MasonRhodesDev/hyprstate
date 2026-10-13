@@ -38,6 +38,14 @@ pub enum Entry {
 }
 
 async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors) -> bool {
+    // The Deferred claim watch exists only while Deferred holds a Wayland
+    // claim; every other state (and a Deferred held by a logind claim,
+    // which is event-driven) stops it.
+    if state == State::Deferred && ctx.wayland_inhibitor {
+        fx.start_claim_watch(ctx);
+    } else {
+        fx.cancel_claim_watch(ctx);
+    }
     match state {
         State::LidOpen => {
             fx.cancel_grace_timer(ctx);
@@ -67,6 +75,23 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
             fx.cancel_grace_timer(ctx);
             suspending_tail(ctx, fx).await
         }
+    }
+}
+
+/// Sample the compositor's idle-inhibit claims right before a decision that
+/// turns on them (lid close, a suspend request). No event announces a
+/// client taking or dropping its inhibitor, so the flag is refreshed at the
+/// moment it matters instead of being polled for ever.
+async fn refresh_wayland_claim(ctx: &mut Context) {
+    let Some(held) = hyprctl::wayland_idle_inhibited().await else {
+        return;
+    };
+    if held != ctx.wayland_inhibitor {
+        info!(
+            "wayland idle-inhibit claim {} (sampled)",
+            if held { "held" } else { "released" }
+        );
+        ctx.wayland_inhibitor = held;
     }
 }
 
@@ -563,6 +588,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             Event::Lid(closed) => {
                 if ctx.lid_present {
                     ctx.lid_closed = closed;
+                    if closed {
+                        // Deferred vs Countdown turns on the claim set as
+                        // of right now.
+                        refresh_wayland_claim(&mut ctx).await;
+                    }
                 } else {
                     warn!(
                         "lid event on a machine declared lidless (power.conf lid=absent) — ignoring"
@@ -685,6 +715,9 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     );
                 }
                 ctx.suspend_requested = requested;
+                if requested {
+                    refresh_wayland_claim(&mut ctx).await;
+                }
             }
             Event::TimerExpired => {
                 // Close the cancel-vs-expiry race: hypridle's on-resume

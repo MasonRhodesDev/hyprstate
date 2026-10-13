@@ -23,7 +23,7 @@ use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::dbus::upower::UPowerProxy;
 use crate::paths;
-use crate::sysio::{hyprctl, hypridle_log, sysfs};
+use crate::sysio::{hyprctl, sysfs};
 use ctx::Context;
 use effectors::Effectors;
 use event::Event;
@@ -258,8 +258,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     ctx.logind_inhibitor = sources::logind_real_inhibitor_active(&manager)
         .await
         .unwrap_or(false);
-    let (wayland_inh, _health) = hypridle_log::wayland_inhibitor_active();
-    ctx.wayland_inhibitor = wayland_inh;
+    ctx.wayland_inhibitor = hyprctl::wayland_idle_inhibited().await.unwrap_or(false);
     ctx.ext_mon_count = hyprctl::ext_monitor_count(0).await;
 
     // Seed the active profile from the existing symlink so reconciles can
@@ -301,7 +300,12 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     // Spawn everything; the dispatcher owns ctx from here.
     tokio::spawn(effectors::effector_worker(worker_rx, tx.clone()));
     tokio::spawn(sources::hypr_socket_reader(tx.clone()));
-    tokio::spawn(sources::inhibitor_poller(tx.clone(), manager.clone()));
+    tokio::spawn(sources::inhibitors::logind_inhibitor_watcher(
+        tx.clone(),
+        conn.clone(),
+        manager.clone(),
+        ctx.logind_inhibitor,
+    ));
     tokio::spawn(sources::mode_poller(tx.clone()));
     tokio::spawn(sources::reconciler::reconcile_task(
         tx.clone(),

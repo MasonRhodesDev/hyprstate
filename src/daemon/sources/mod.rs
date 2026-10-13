@@ -1,6 +1,7 @@
 //! Event source tasks. Each holds an mpsc Sender<Event> clone and never
 //! touches Context — the dispatcher owns it.
 
+pub mod inhibitors;
 pub mod reconciler;
 
 use futures_util::StreamExt;
@@ -14,7 +15,7 @@ use super::event::Event;
 use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::upower::{DISPLAY_DEVICE_PATH, UPowerDeviceProxy, UPowerProxy};
 use crate::paths;
-use crate::sysio::{hypridle_log, sysfs};
+use crate::sysio::sysfs;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 pub use reconciler::ReconcileTrigger;
 
@@ -98,53 +99,6 @@ pub(crate) fn logind_has_real_idle_block(
         return true;
     }
     false
-}
-
-pub async fn inhibitor_poller(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
-    let mut last_logind = false;
-    let mut last_wayland = false;
-    let mut last_health = hypridle_log::ParseHealth::Ok;
-    loop {
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
-        let cur_logind = logind_real_inhibitor_active(&manager)
-            .await
-            .unwrap_or(last_logind);
-        let (cur_wayland, health) = hypridle_log::wayland_inhibitor_active();
-        if health != last_health {
-            warn!(
-                "wayland inhibitor source health: {} -> {}",
-                last_health.as_str(),
-                health.as_str()
-            );
-            last_health = health;
-        }
-        if cur_logind != last_logind {
-            last_logind = cur_logind;
-            if tx
-                .send(Event::Inhibitor {
-                    wayland: false,
-                    active: cur_logind,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        if cur_wayland != last_wayland {
-            last_wayland = cur_wayland;
-            if tx
-                .send(Event::Inhibitor {
-                    wayland: true,
-                    active: cur_wayland,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-    }
 }
 
 /// Poll platform_profile + the gpu/power override files + monitor-profile
@@ -401,9 +355,35 @@ pub async fn powerd_name_watcher(tx: mpsc::Sender<Event>, conn: Connection) {
 #[cfg(test)]
 mod tests {
     use super::logind_has_real_idle_block;
+    use crate::sysio::hyprctl::any_client_inhibiting_idle_in;
 
     fn row(what: &str, who: &str, mode: &str) -> (String, String, String, String, u32, u32) {
         (what.into(), who.into(), "why".into(), mode.into(), 1000, 1)
+    }
+
+    /// Regression (mason-air, hyprstate 2.7.4 with hypr-DE 0.2.36): the
+    /// keep-awake flag was true from boot with no claim anywhere, so every
+    /// lid close went LID_OPEN to DEFERRED and the laptop never suspended.
+    /// The flag came from hypridle's journal, and `inhibit_sleep=3` makes
+    /// hypridle log "Sleep inhibition enabled" and "Inhibited sleep with
+    /// fd 9" at startup while it holds a logind sleep inhibitor as
+    /// "hypridle". This is that machine's boot state as the two real
+    /// sources see it: hypridle's own inhibitor (in either mode) and the
+    /// daemon's lid block are not claims, and no client inhibits idle.
+    #[test]
+    fn mason_air_boot_state_holds_no_claim() {
+        let rows = [
+            row("sleep", "hypridle", "delay"),
+            row("sleep", "hypridle", "block"),
+            row("handle-lid-switch", "hyprstate", "block"),
+            row("sleep", "NetworkManager", "delay"),
+        ];
+        assert!(!logind_has_real_idle_block(&rows));
+        let clients = serde_json::json!([
+            {"class": "kitty", "inhibitingIdle": false},
+            {"class": "firefox", "inhibitingIdle": false}
+        ]);
+        assert!(!any_client_inhibiting_idle_in(clients.as_array().unwrap()));
     }
 
     #[test]

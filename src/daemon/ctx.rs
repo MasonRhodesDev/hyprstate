@@ -35,6 +35,8 @@ pub struct Context {
     pub grace_timer: Option<JoinHandle<()>>,
     pub profile_debounce: Option<JoinHandle<()>>,
     pub power_debounce: Option<JoinHandle<()>>,
+    /// The Deferred-state sampler watching a Wayland claim for release.
+    pub claim_watch: Option<JoinHandle<()>>,
 
     /// Cursor position at the previous reconciler pass; a change is the
     /// presence signal for the stuck-DPMS backstop. None = not sampled yet.
@@ -95,6 +97,7 @@ impl Default for Context {
             last_cursor_pos: None,
             profile_debounce: None,
             power_debounce: None,
+            claim_watch: None,
             current_profile: None,
             active_profile_rev: None,
             edp_policy: EdpPolicy::Auto,

@@ -322,6 +322,25 @@ impl Effectors {
         ctx.grace_timer = Some(self.spawn_timer(paths::GRACE_SECONDS, || Event::TimerExpired));
     }
 
+    /// Deferred on a Wayland claim: watch the claim for release (see
+    /// `sources::inhibitors::wayland_claim_watch`). Idempotent while one is
+    /// running, so a RECONCILE re-assert of Deferred does not restart it.
+    /// Sensing, not an effect: shadow mode watches too.
+    pub fn start_claim_watch(&self, ctx: &mut Context) {
+        if ctx.claim_watch.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
+        ctx.claim_watch = Some(tokio::spawn(
+            super::sources::inhibitors::wayland_claim_watch(self.queue.clone()),
+        ));
+    }
+
+    pub fn cancel_claim_watch(&self, ctx: &mut Context) {
+        if let Some(t) = ctx.claim_watch.take() {
+            t.abort();
+        }
+    }
+
     /// Debounce monitor add/remove bursts into one MonitorsChanged.
     pub fn schedule_profile_reconcile(&self, ctx: &mut Context) {
         if let Some(t) = ctx.profile_debounce.take() {

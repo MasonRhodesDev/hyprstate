@@ -583,6 +583,10 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 fx.schedule_profile_reconcile(&mut ctx);
                 continue;
             }
+            Event::BacklightHotplug => {
+                super::discover_backlight(&mut ctx);
+                continue;
+            }
 
             // ---- ctx updates that fall through to the FSMs ----
             Event::Lid(closed) => {
@@ -623,6 +627,14 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 fx.request_reconcile(ReconcileTrigger::LockChanged);
             }
             Event::AcChanged(on_ac) => {
+                // Two sources report AC: UPower's OnBattery and the kernel's
+                // power_supply uevent read from sysfs. Whichever lands
+                // second says what ctx already holds; dropping it is what
+                // keeps the 5 s settle from being re-armed or bypassed.
+                if on_ac == ctx.on_ac {
+                    debug!("AC: {label} already on_ac={on_ac}; ignoring");
+                    continue;
+                }
                 ctx.on_ac = on_ac;
                 info!("AC: {label} (on_ac={on_ac})");
                 // Raw plug-in withdraws a battery-low request NOW, not

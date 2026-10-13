@@ -29,6 +29,8 @@ pub enum ReconcileTrigger {
     Resumed,
     AcChanged,
     BatteryLowChanged,
+    /// The uevent socket overflowed; something may have been missed.
+    UeventsLost,
     SafetyTick,
 }
 
@@ -44,6 +46,7 @@ impl ReconcileTrigger {
             ReconcileTrigger::Resumed => "resumed",
             ReconcileTrigger::AcChanged => "AC changed",
             ReconcileTrigger::BatteryLowChanged => "battery-low changed",
+            ReconcileTrigger::UeventsLost => "uevents lost",
             ReconcileTrigger::SafetyTick => "safety tick",
         }
     }

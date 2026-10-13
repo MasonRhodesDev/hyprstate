@@ -77,10 +77,29 @@ fn log_wake_state() {
     }
 }
 
-fn discover_backlight(ctx: &mut Context) {
-    let Ok(rd) = fs::read_dir("/sys/class/backlight") else {
+/// The backlight device the brightness effects drive. Runs at startup and
+/// again on a backlight add/remove uevent (a panel driver that probes after
+/// the session is up, or a DDC panel going away). A changed device drops
+/// the saved and last-set raw values: they belong to the old scale.
+pub(crate) fn discover_backlight(ctx: &mut Context) {
+    let found = find_backlight();
+    let name = found.as_ref().map(|(dev, _)| dev.as_str());
+    if name == ctx.brightness_dev.as_deref() {
         return;
-    };
+    }
+    match &found {
+        Some((dev, max)) => info!("backlight: {dev} (max={max})"),
+        None => info!("backlight: none (brightness effects are no-ops)"),
+    }
+    ctx.brightness_dev = found.as_ref().map(|(dev, _)| dev.clone());
+    ctx.brightness_max = found.map(|(_, max)| max).unwrap_or(0);
+    ctx.brightness_set = None;
+    ctx.brightness_saved = None;
+}
+
+/// `(device, max_brightness)` for the preferred backlight, if any.
+fn find_backlight() -> Option<(String, u32)> {
+    let rd = fs::read_dir("/sys/class/backlight").ok()?;
     let mut names: Vec<String> = rd
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -92,21 +111,14 @@ fn discover_backlight(ctx: &mut Context) {
             || n.starts_with("intel_backlight")
             || n.starts_with("acpi_video")
     });
-    let Some(dev) = preferred.or(names.first()).cloned() else {
-        return;
-    };
+    let dev = preferred.or(names.first()).cloned()?;
     let max = sysfs::read_int(
         &Path::new("/sys/class/backlight")
             .join(&dev)
             .join("max_brightness"),
         0,
     ) as u32;
-    if max == 0 {
-        return;
-    }
-    info!("backlight: {dev} (max={max})");
-    ctx.brightness_dev = Some(dev);
-    ctx.brightness_max = max;
+    (max > 0).then_some((dev, max))
 }
 
 /// Delete a request file left over from before a daemon restart. Standalone
@@ -308,6 +320,10 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         ctx.logind_inhibitor,
     ));
     tokio::spawn(sources::files::file_state_task(tx.clone(), tick_rx));
+    tokio::spawn(sources::uevent::uevent_task(
+        tx.clone(),
+        reconcile_tx.clone(),
+    ));
     tokio::spawn(sources::reconciler::reconcile_task(
         tx.clone(),
         reconcile_rx,

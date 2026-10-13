@@ -51,6 +51,9 @@ pub enum Event {
     SuspendRequestChanged(Option<String>),
     /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,
+    /// A backlight class device was added or removed (kernel uevent):
+    /// re-discover the brightness device.
+    BacklightHotplug,
 }
 
 /// What the reconciler snapshot task gathered. Option fields = source
@@ -103,13 +106,18 @@ impl Event {
             Event::SuspendRequestChanged(Some(_)) => EventKind::SuspendRequested,
             Event::SuspendRequestChanged(None) => EventKind::SuspendCancelled,
             Event::PowerdAppeared => EventKind::PowerAcSettled,
+            // Never reaches the FSMs (handled before the fall-through); the
+            // kind only names what it is, a ctx repair.
+            Event::BacklightHotplug => EventKind::CtxRepaired,
         }
     }
 
     /// v1 log label (EventKind value strings).
     pub fn label(&self) -> &'static str {
-        if matches!(self, Event::ProfilesChanged) {
-            return "ProfilesChanged";
+        match self {
+            Event::ProfilesChanged => return "ProfilesChanged",
+            Event::BacklightHotplug => return "BacklightHotplug",
+            _ => {}
         }
         match self.kind() {
             EventKind::LidClose => "LidClose",

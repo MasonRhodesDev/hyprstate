@@ -4,6 +4,7 @@
 pub mod files;
 pub mod inhibitors;
 pub mod reconciler;
+pub mod uevent;
 
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;

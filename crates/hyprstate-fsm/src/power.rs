@@ -375,7 +375,7 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
 /// Self-write detection for platform_profile: tracks the expected values
 /// (full fallback chain) of in-flight applies plus a suppression window
 /// after any apply. Entries are registered BEFORE the ApplyProfile call so
-/// the poller can't observe the sysfs change ahead of the bookkeeping.
+/// the sysfs watch can't observe the change ahead of the bookkeeping.
 #[derive(Debug, Default)]
 pub struct SelfWriteTracker {
     pub entries: Vec<(Instant, &'static [&'static str])>,

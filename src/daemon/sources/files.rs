@@ -245,7 +245,7 @@ async fn platform_ready(watch: Option<&PlatformWatch>) -> std::io::Result<()> {
 
 pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<u64>) {
     let mut last = Last::read_now();
-    let platform = PlatformWatch::open();
+    let mut platform = PlatformWatch::open();
     if platform.is_none() && paths::platform_profile_path().exists() {
         warn!(
             "platform_profile present but not watchable; changes are seen on the safety tick only"
@@ -289,6 +289,7 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
     );
 
     loop {
+        let mut platform_failed = false;
         let check = tokio::select! {
             ev = next_inotify(stream.as_mut()) => match ev {
                 Some(ev) => {
@@ -310,7 +311,10 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
             },
             res = platform_ready(platform.as_ref()) => {
                 if let Err(e) = res {
-                    warn!("platform_profile readiness failed: {e}");
+                    // A readiness error would recur every iteration and spin;
+                    // fall back to the tick for this input instead.
+                    warn!("platform_profile readiness failed ({e}); safety tick only");
+                    platform_failed = true;
                 }
                 Check { platform: true, ..Check::default() }
             }
@@ -322,6 +326,9 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
             }
         };
 
+        if platform_failed {
+            platform = None;
+        }
         if check.rewatch
             && let Some(w) = watches.as_mut()
         {

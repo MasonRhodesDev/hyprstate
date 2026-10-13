@@ -143,6 +143,9 @@ unrecognized `#@` lines):
 #@ lid = present
 #@ lid-grace = 30
 #@ lid-ac = suspend
+#@ kbd = auto
+#@ kbd-idle = 10
+#@ kbd-dark-lux = 10
 ```
 
 Missing file/keys → defaults above; values validated ∈ profiles. `battery*`
@@ -347,6 +350,67 @@ from the local view and exits 0; plain status prints `powerd: unavailable`.
 - Mechanism: logind `Session.SetBrightness("backlight", dev, raw)` —
   unprivileged for the session owner.
 
+### Keyboard backlight (2.10.0)
+
+The keyboard backlight LED is on only while two things are true at once: the
+room is dark and the user is typing. It is off whenever the session is locked,
+the machine is going to sleep, or input has gone idle, and it never costs
+battery while nobody is at the keys. Rules, in order (`hyprstate-fsm::kbd`):
+
+1. locked (`LockedHint`) or sleeping (`PrepareForSleep` start, until `Resumed`): off
+2. not typing (no input for `kbd-idle` seconds): off
+3. typing and dark: on, at `level`
+4. typing and not dark: off, unless a manual override is armed
+
+Inputs. `typing` is ext-idle-notify-v1 on a Wayland connection of the daemon's
+own: the compositor sends idled after `kbd-idle` seconds without input and
+resumed on the next input, nothing polls. Version 2's
+`get_input_idle_notification` is used when the compositor offers it, so idle
+inhibitors do not count (a video playing in a dark room must not keep the
+keys lit); a version 1 compositor gets the inhibitor-aware request and a log
+line. The socket is the live instance's (line 2 of `hyprland.lock` under the
+instance dir hypr-ipc resolves), then `WAYLAND_DISPLAY`; the connection is
+re-made after any error, so a compositor restart costs one retry. `dark` is
+one read of the ambient light sensor (`/sys/bus/iio/devices/*/
+in_illuminance_input`, `_raw` as the fallback) compared with `kbd-dark-lux`,
+taken only on a resume, a manual key press, an LED hotplug and at startup;
+never on a timer. `locked` and `sleeping` are the existing logind
+subscriptions. Typing starts false, so the keys stay off at boot until the
+first idle period and the first input after it.
+
+Level. One stored percent (`~/.config/hypr/kbd-level`, 50 until a key writes
+it) is the only brightness the policy uses; raw = round(max * level / 100),
+never 0 for a non-zero level. There is no lux to level curve; the sensor is a
+boolean.
+
+Manual override. `hyprstate kbd set|up|down` write the level and then create
+`$XDG_RUNTIME_DIR/hyprstate-kbd-override`, in that order so the daemon never
+lights the old level for one event. The new level applies at once, and while
+the marker stands rule 4 keeps the keys lit in a lit room. The daemon removes
+the marker when typing stops (the same `kbd-idle` window); `kbd auto` removes
+it now. A reboot clears the marker (runtime dir); the level persists next to
+`power-override`.
+
+Mechanism. logind `Session.SetBrightness("leds", <name>, raw)`, the LED being
+any `/sys/class/leds` entry whose name contains `kbd_backlight` (Asahi
+`kbd_backlight`, ThinkPad `tpacpi::kbd_backlight`); idempotent on the last
+raw written, seeded from the LED's current value at startup; re-discovered on
+a leds uevent. The daemon writes `$XDG_RUNTIME_DIR/hyprstate/kbd-status.json`
+(a subdirectory: the runtime-dir inotify watch must not see it) with lit,
+level, override, typing, dark and the last lux, which `kbd status` prints.
+
+Config. `#@ kbd = auto|off` (default auto; off never touches the LED and opens
+no Wayland connection), `#@ kbd-idle = 10` (seconds, 1..600),
+`#@ kbd-dark-lux = N` (sensor value at or below which the room is dark).
+PLACEHOLDER: the `kbd-dark-lux` default is 10 pending the lit-room reading on
+mason-air, whose sensor reads 1 to 2 in a dim room; the measured value
+replaces `DEFAULT_KBD_DARK_LUX`. Inert hosts (no LED, no sensor, or
+`kbd = off`) log once and write nothing; the CLI still stores the level and
+`kbd status` says why the policy is inert.
+
+Not in this release: a profile rule (cap or disable on power-saver or
+battery-low).
+
 ### Dispatcher integration
 
 - `power_policy_check(ctx, fx)` from: MONITORS_CHANGED branch (after gpu
@@ -360,6 +424,9 @@ from the local view and exits 0; plain status prints `powerd: unavailable`.
 ### CLI
 
 `hyprstate power set <profile>|auto · get · cycle · status [--waybar]`.
+`hyprstate kbd status · set <pct> · up · down · auto` (keyboard backlight:
+`up` and `down` move the level by 10 and print the resulting percent for the
+OSD; `set`, `up` and `down` arm the override; `auto` drops it).
 cycle: auto→power-saver→balanced→performance→auto. status queries powerd
 (GetProfile/GetKnobs) with the V11 failure path. `status_main` gains a power
 section.
@@ -410,5 +477,10 @@ section.
   on the unlock edge.
 - Release of a Wayland claim while Deferred is sampled (`hyprctl clients`
   every 5 s, only in that state); no compositor event announces it.
+- Keyboard backlight: the `kbd-dark-lux` default is a placeholder until the
+  lit-room reading from mason-air lands; typing starts false at daemon start
+  (keys off until the first idle period and the first input after it); on a
+  compositor with only ext-idle-notify-v1 version 1, idle inhibitors count as
+  typing.
 - powerd code updates ship as a package update (`dnf`/`pacman`); the systemd
   scriptlets restart the root-owned unit (V3).

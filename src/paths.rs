@@ -163,6 +163,34 @@ pub fn power_override_file() -> PathBuf {
     hypr_config("power-override")
 }
 
+// ---- keyboard backlight ----
+
+/// The stored level (percent) the keyboard backlight policy lights the keys
+/// at. Written by `hyprstate kbd set|up|down`, persistent like power-override.
+pub fn kbd_level_file() -> PathBuf {
+    hypr_config("kbd-level")
+}
+
+/// The manual override marker: present while a key press keeps the keys lit
+/// in a lit room. Runtime dir so a reboot clears it; the daemon removes it
+/// when typing stops.
+pub fn kbd_override_file() -> Option<PathBuf> {
+    match xdg_paths::BaseDirs::from_env() {
+        Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate-kbd-override")),
+        Err(_) => None,
+    }
+}
+
+/// Daemon-written snapshot for `hyprstate kbd status`. In a subdirectory on
+/// purpose: the state-file task watches the runtime dir itself (inotify is
+/// not recursive), and a status write must not wake it.
+pub fn kbd_status_file() -> Option<PathBuf> {
+    match xdg_paths::BaseDirs::from_env() {
+        Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate").join("kbd-status.json")),
+        Err(_) => None,
+    }
+}
+
 // ---- sleep hook / usb wake ----
 
 pub const SLEEP_HOOK_LOG: &str = "/var/log/hyprstate-sleep.log";

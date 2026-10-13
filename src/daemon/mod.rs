@@ -8,6 +8,7 @@ pub mod dispatcher;
 pub mod effectors;
 pub mod event;
 pub mod gpu_drift;
+pub mod kbd_policy;
 pub mod power_policy;
 pub mod sources;
 pub mod telemetry;
@@ -96,6 +97,35 @@ pub(crate) fn discover_backlight(ctx: &mut Context) {
     ctx.brightness_max = found.map(|(_, max)| max).unwrap_or(0);
     ctx.brightness_set = None;
     ctx.brightness_saved = None;
+}
+
+/// The keyboard backlight LED and ambient light sensor. Runs at startup and
+/// on a leds uevent. Logs once what the policy has to work with; without
+/// both pieces it stays inert.
+pub(crate) fn discover_kbd(ctx: &mut Context) {
+    let led = crate::sysio::kbd::find_kbd_led();
+    if led != ctx.kbd_led {
+        // Seed idempotence from what the LED shows now, so a value it is
+        // already at is not rewritten at startup.
+        ctx.kbd_applied = led
+            .as_ref()
+            .and_then(|(name, _)| crate::sysio::kbd::led_brightness(name));
+    }
+    ctx.kbd_led = led;
+    ctx.kbd_als = crate::sysio::kbd::find_als();
+    match (&ctx.kbd_led, &ctx.kbd_als, ctx.kbd_mode) {
+        (_, _, crate::pure::power::KbdMode::Off) => {
+            info!("kbd: policy off (power.conf kbd = off); the LED is never touched")
+        }
+        (Some((name, max)), Some(als), _) => info!(
+            "kbd: LED {name} (max {max}), sensor {}, idle {} s, dark at or below {} lux",
+            als.display(),
+            ctx.kbd_idle.as_secs(),
+            ctx.kbd_dark_lux
+        ),
+        (None, _, _) => info!("kbd: no kbd_backlight LED under /sys/class/leds; policy inert"),
+        (_, None, _) => info!("kbd: no illuminance sensor under /sys/bus/iio; policy inert"),
+    }
 }
 
 /// `(device, max_brightness)` for the preferred backlight, if any.
@@ -252,6 +282,15 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     }
 
     discover_backlight(&mut ctx);
+    ctx.kbd_mode = conf.kbd;
+    ctx.kbd_idle = Duration::from_secs(conf.kbd_idle_secs as u64);
+    ctx.kbd_dark_lux = conf.kbd_dark_lux;
+    ctx.kbd_level = sysfs::read_first_word(&paths::kbd_level_file())
+        .and_then(|w| w.parse::<i64>().ok())
+        .map(crate::pure::kbd::clamp_level)
+        .unwrap_or(crate::pure::kbd::DEFAULT_KBD_LEVEL_PCT);
+    ctx.kbd_override = paths::kbd_override_file().is_some_and(|p| p.exists());
+    discover_kbd(&mut ctx);
 
     let fx = Effectors {
         shadow,
@@ -332,6 +371,12 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         tx.clone(),
         reconcile_tx.clone(),
     ));
+    if ctx.kbd_active() {
+        tokio::spawn(sources::wayland_idle::idle_notify_task(
+            tx.clone(),
+            ctx.kbd_idle,
+        ));
+    }
     tokio::spawn(sources::reconciler::reconcile_task(
         tx.clone(),
         reconcile_rx,

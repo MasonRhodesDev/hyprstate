@@ -18,6 +18,7 @@ use super::ctx::Context;
 use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
+use super::kbd_policy::kbd_policy_check;
 use super::power_policy::power_policy_check;
 use super::sources::ReconcileTrigger;
 use super::telemetry::TelemetryEmitter;
@@ -25,6 +26,7 @@ use crate::pure::fsm::{
     EventKind, State, StuckScreenInputs, claim_governs, desired_state, dpms_stuck_off, world_state,
 };
 use crate::pure::gpu::dgpu_runtime_pm_pinned;
+use crate::pure::kbd::DEFAULT_KBD_LEVEL_PCT;
 use crate::pure::power::{battery_low_step, profile_from_platform_value};
 use crate::pure::profiles::{EdpPolicy, GpuPref};
 use crate::sysio::hyprctl;
@@ -548,6 +550,9 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     }
 
     fx.sync_waybar(&mut ctx);
+    // Keyboard backlight: decide once at startup (keys off until typing in
+    // a dark room; also the first sensor sample).
+    kbd_policy_check(&mut ctx, &fx, true).await;
     // The first pass runs RECONCILE_SETTLE after start instead of waiting
     // for an event or the safety tick: it is what repairs on_ac from sysfs
     // when UPower is down at boot (V8) and takes the first cursor sample.
@@ -609,6 +614,39 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             super::discover_backlight(ctx);
             return;
         }
+        Event::Sleeping => {
+            ctx.kbd_sleeping = true;
+            kbd_policy_check(ctx, fx, false).await;
+            return;
+        }
+        Event::KbdIdle { idle } => {
+            ctx.kbd_typing = !idle;
+            info!("KBD: {}", if idle { "input idle" } else { "typing" });
+            if idle {
+                // The override lives exactly as long as typing does.
+                fx.kbd_release_override(ctx);
+            }
+            // A resume is the moment the spec reads the sensor.
+            kbd_policy_check(ctx, fx, !idle).await;
+            return;
+        }
+        Event::KbdLevelChanged(level) => {
+            ctx.kbd_level = level.unwrap_or(DEFAULT_KBD_LEVEL_PCT);
+            info!("KBD: level {}%", ctx.kbd_level);
+            kbd_policy_check(ctx, fx, true).await;
+            return;
+        }
+        Event::KbdOverrideChanged(armed) => {
+            ctx.kbd_override = armed;
+            info!("KBD: override {}", if armed { "armed" } else { "cleared" });
+            kbd_policy_check(ctx, fx, armed).await;
+            return;
+        }
+        Event::KbdLedHotplug => {
+            super::discover_kbd(ctx);
+            kbd_policy_check(ctx, fx, true).await;
+            return;
+        }
 
         // ---- ctx updates that fall through to the FSMs ----
         Event::Lid(closed) => {
@@ -645,6 +683,8 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         Event::LockChanged(locked) => {
             ctx.locked = locked;
             fx.request_reconcile(ReconcileTrigger::LockChanged);
+            // Rule 1: a locked session never lights the keys.
+            kbd_policy_check(ctx, fx, false).await;
         }
         Event::AcChanged(on_ac) => {
             // Two sources report AC: UPower's OnBattery and the kernel's
@@ -772,6 +812,8 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             ctx.suspend_requested = false;
             fx.clear_suspend_request();
             fx.request_reconcile(ReconcileTrigger::Resumed);
+            ctx.kbd_sleeping = false;
+            kbd_policy_check(ctx, fx, false).await;
         }
     }
 

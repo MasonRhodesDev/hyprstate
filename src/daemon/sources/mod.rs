@@ -5,6 +5,7 @@ pub mod files;
 pub mod inhibitors;
 pub mod reconciler;
 pub mod uevent;
+pub mod wayland_idle;
 
 use futures_util::StreamExt;
 use tokio::io::AsyncBufReadExt;
@@ -156,7 +157,12 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
             Ok(mut stream) => {
                 while let Some(signal) = stream.next().await {
                     let Ok(args) = signal.args() else { continue };
-                    if !args.start && tx.send(Event::Resumed).await.is_err() {
+                    let ev = if args.start {
+                        Event::Sleeping
+                    } else {
+                        Event::Resumed
+                    };
+                    if tx.send(ev).await.is_err() {
                         return;
                     }
                 }

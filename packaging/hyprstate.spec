@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.9.0
+Version:        2.10.0
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -121,6 +121,19 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.10.0-1
+- Keyboard backlight policy. The keys are lit only while the room is dark and
+  the user is typing, and off when locked, going to sleep or idle for
+  `kbd-idle` seconds. Typing comes from ext-idle-notify-v1 on a Wayland
+  connection of the daemon's own (version 2's input-idle request where the
+  compositor offers it), darkness from one ambient light sensor read per
+  resume, the LED is written through logind SetBrightness on the leds class.
+  `hyprstate kbd status|set|up|down|auto` manage the one stored level and a
+  manual override that lasts while typing continues. power.conf keys `kbd`,
+  `kbd-idle`, `kbd-dark-lux` (the lux default is a placeholder pending the
+  lit-room reading on mason-air). Inert without a kbd_backlight LED and an
+  illuminance sensor. hyprstate-fsm 5.3.0 carries the rule table and keys.
+
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.9.0-1
 - power.conf gains two lid keys. `lid-grace` is the countdown between a lid
   close and the lock-then-suspend (default 30; 0 locks and suspends at once;

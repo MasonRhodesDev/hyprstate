@@ -5,6 +5,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::kbd::{DEFAULT_KBD_DARK_LUX, DEFAULT_KBD_IDLE_SECS, MAX_KBD_IDLE_SECS};
+
 pub const BATTERY_LOW_EXIT_DELTA: u8 = 3;
 pub const DEFAULT_BATTERY_LOW_PCT: u8 = 15;
 /// Adoption suppression window after any ApplyProfile call.
@@ -248,6 +250,35 @@ impl std::str::FromStr for LidAcPolicy {
     }
 }
 
+/// `#@ kbd = auto|off`. `Off` means hyprstate never touches the keyboard
+/// backlight LED (and opens no Wayland connection for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KbdMode {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl KbdMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KbdMode::Auto => "auto",
+            KbdMode::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for KbdMode {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "auto" => Ok(KbdMode::Auto),
+            "off" => Ok(KbdMode::Off),
+            _ => Err(()),
+        }
+    }
+}
+
 /// `#@ lid-grace` default: the lid-close countdown before lock and suspend.
 pub const DEFAULT_LID_GRACE_SECS: u16 = 30;
 /// Upper bound for `#@ lid-grace`; anything longer is a typo, not a grace.
@@ -266,6 +297,12 @@ pub struct PowerConf {
     /// countdowns (idle, battery-low) keep the fixed 30 s plug-in window.
     pub lid_grace_secs: u16,
     pub lid_ac: LidAcPolicy,
+    /// Keyboard backlight policy (see `crate::kbd`).
+    pub kbd: KbdMode,
+    /// Seconds of no input before the keys go dark.
+    pub kbd_idle_secs: u16,
+    /// Sensor reading at or below which the room counts as dark.
+    pub kbd_dark_lux: u32,
 }
 
 impl Default for PowerConf {
@@ -280,6 +317,9 @@ impl Default for PowerConf {
             lid: LidMode::default(),
             lid_grace_secs: DEFAULT_LID_GRACE_SECS,
             lid_ac: LidAcPolicy::default(),
+            kbd: KbdMode::default(),
+            kbd_idle_secs: DEFAULT_KBD_IDLE_SECS,
+            kbd_dark_lux: DEFAULT_KBD_DARK_LUX,
         }
     }
 }
@@ -296,6 +336,9 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
     let mut lid = LidMode::default();
     let mut lid_grace = DEFAULT_LID_GRACE_SECS;
     let mut lid_ac = LidAcPolicy::default();
+    let mut kbd = KbdMode::default();
+    let mut kbd_idle = DEFAULT_KBD_IDLE_SECS;
+    let mut kbd_dark_lux = DEFAULT_KBD_DARK_LUX;
     let mut warnings = Vec::new();
 
     for line in text.lines() {
@@ -342,6 +385,34 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
             }
             continue;
         }
+        if key == "kbd" {
+            match val.parse::<KbdMode>() {
+                Ok(m) => kbd = m,
+                Err(_) => warnings.push(format!(
+                    "kbd must be auto|off, got {val:?}; using {}",
+                    kbd.as_str()
+                )),
+            }
+            continue;
+        }
+        if key == "kbd-idle" {
+            match val.parse::<i64>() {
+                Ok(n) => kbd_idle = n.clamp(1, MAX_KBD_IDLE_SECS as i64) as u16,
+                Err(_) => warnings.push(format!(
+                    "kbd-idle must be seconds, got {val:?}; using {kbd_idle}"
+                )),
+            }
+            continue;
+        }
+        if key == "kbd-dark-lux" {
+            match val.parse::<i64>() {
+                Ok(n) => kbd_dark_lux = n.clamp(0, 1_000_000) as u32,
+                Err(_) => warnings.push(format!(
+                    "kbd-dark-lux must be a sensor reading, got {val:?}; using {kbd_dark_lux}"
+                )),
+            }
+            continue;
+        }
         let slot = match key {
             "docked-ac" => &mut policy.docked_ac,
             "ac" => &mut policy.ac,
@@ -367,6 +438,9 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
             lid,
             lid_grace_secs: lid_grace,
             lid_ac,
+            kbd,
+            kbd_idle_secs: kbd_idle,
+            kbd_dark_lux,
         },
         warnings,
     )
@@ -653,6 +727,38 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("lid-ac must be suspend|defer"))
         );
+    }
+
+    #[test]
+    fn kbd_keys_default_to_auto_ten_seconds_and_the_placeholder_lux() {
+        let (conf, warnings) = parse_power_conf("");
+        assert_eq!(conf.kbd, KbdMode::Auto);
+        assert_eq!(conf.kbd_idle_secs, DEFAULT_KBD_IDLE_SECS);
+        assert_eq!(conf.kbd_dark_lux, DEFAULT_KBD_DARK_LUX);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn kbd_keys_parse_clamp_and_warn() {
+        let (conf, warnings) =
+            parse_power_conf("#@ kbd = off\n#@ kbd-idle = 30\n#@ kbd-dark-lux = 40\n");
+        assert_eq!(conf.kbd, KbdMode::Off);
+        assert_eq!(conf.kbd_idle_secs, 30);
+        assert_eq!(conf.kbd_dark_lux, 40);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parse_power_conf("#@ kbd-idle = 0").0.kbd_idle_secs, 1);
+        assert_eq!(
+            parse_power_conf("#@ kbd-idle = 99999").0.kbd_idle_secs,
+            MAX_KBD_IDLE_SECS
+        );
+        let (conf, warnings) =
+            parse_power_conf("#@ kbd = maybe\n#@ kbd-idle = soon\n#@ kbd-dark-lux = dim\n");
+        assert_eq!(conf.kbd, KbdMode::Auto);
+        assert_eq!(conf.kbd_idle_secs, DEFAULT_KBD_IDLE_SECS);
+        assert_eq!(conf.kbd_dark_lux, DEFAULT_KBD_DARK_LUX);
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        let (_p, _pct, wrapper) = parse_power_policy("#@ kbd = off\n#@ kbd-idle = 5\n");
+        assert!(wrapper.is_empty(), "{wrapper:?}");
     }
 
     #[test]

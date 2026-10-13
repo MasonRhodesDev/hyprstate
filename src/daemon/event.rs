@@ -55,6 +55,20 @@ pub enum Event {
     /// A backlight class device was added or removed (kernel uevent):
     /// re-discover the brightness device.
     BacklightHotplug,
+    /// PrepareForSleep(true): the machine is going to sleep. Only the
+    /// keyboard backlight policy consumes it (rule 1); the lid FSM leaves
+    /// Suspending on Resumed as before.
+    Sleeping,
+    /// ext-idle-notify edge for the keyboard backlight: `idle` = no input
+    /// for `kbd-idle` seconds; false = input resumed.
+    KbdIdle { idle: bool },
+    /// `~/.config/hypr/kbd-level` changed (payload = parsed percent).
+    KbdLevelChanged(Option<u8>),
+    /// The runtime kbd override marker appeared (true) or went (false).
+    KbdOverrideChanged(bool),
+    /// A leds class device was added or removed: re-discover the keyboard
+    /// backlight LED.
+    KbdLedHotplug,
 }
 
 /// What the reconciler snapshot task gathered. Option fields = source
@@ -107,9 +121,14 @@ impl Event {
             Event::SuspendRequestChanged(Some(_)) => EventKind::SuspendRequested,
             Event::SuspendRequestChanged(None) => EventKind::SuspendCancelled,
             Event::PowerdAppeared => EventKind::PowerAcSettled,
-            // Never reaches the FSMs (handled before the fall-through); the
-            // kind only names what it is, a ctx repair.
-            Event::BacklightHotplug => EventKind::CtxRepaired,
+            // Never reach the FSMs (handled before the fall-through); the
+            // kind only names what they are, a ctx repair.
+            Event::BacklightHotplug
+            | Event::Sleeping
+            | Event::KbdIdle { .. }
+            | Event::KbdLevelChanged(_)
+            | Event::KbdOverrideChanged(_)
+            | Event::KbdLedHotplug => EventKind::CtxRepaired,
         }
     }
 
@@ -118,6 +137,12 @@ impl Event {
         match self {
             Event::ProfilesChanged => return "ProfilesChanged",
             Event::BacklightHotplug => return "BacklightHotplug",
+            Event::Sleeping => return "Sleeping",
+            Event::KbdIdle { idle: true } => return "KbdIdled",
+            Event::KbdIdle { idle: false } => return "KbdResumed",
+            Event::KbdLevelChanged(_) => return "KbdLevelChanged",
+            Event::KbdOverrideChanged(_) => return "KbdOverrideChanged",
+            Event::KbdLedHotplug => return "KbdLedHotplug",
             _ => {}
         }
         match self.kind() {

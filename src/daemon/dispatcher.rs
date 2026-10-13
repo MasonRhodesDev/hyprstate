@@ -718,7 +718,7 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         }
         Event::PowerdAppeared => {
             if !ctx.powerd_available {
-                info!("powerd appeared on the bus — re-enabling power applies");
+                info!("powerd appeared on the bus; re-enabling power applies");
                 ctx.powerd_available = true;
                 ctx.powerd_warned = false;
                 ctx.power_applied = None; // force a re-apply

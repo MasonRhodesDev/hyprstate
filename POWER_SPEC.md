@@ -267,6 +267,12 @@ re-suspends.
   `ext_mon_count` drift it enqueues POWER_AC_SETTLED — the one documented
   exception to its event-free contract; the event feeds only power policy.
   Covers boot-on-battery with UPower down.
+- **Kernel uevent (2.8.0)**: the `power_supply` uevent re-reads the sysfs AC
+  view (the supply whose `type` is `Mains`; name filters miss Asahi's
+  `macsmc-ac`) and sends the same raw AC event UPower's signal sends. The
+  dispatcher drops a value ctx already holds, so whichever source lands
+  second neither re-arms nor bypasses the 5 s settle. This is the UPower-down
+  path; the V8 reconciler repair stays as the net under both.
 - **Battery (V10)**: `setup_upower_watcher` does an initial DisplayDevice
   GetAll (Percentage, IsPresent, Type) before the startup policy evaluation.
   IsPresent=false or Type ∉ {battery, ups} → `battery_percent=None`,
@@ -287,7 +293,7 @@ re-suspends.
   silently delete explicit user intent). Expiry deletes the file, updates ctx
   **synchronously**, and notify-sends.
 - **Idempotence invariant (V19)**: ctx is updated synchronously on any daemon
-  file delete/adopt; the poller echo ≤2 s later is expected and must be a
+  file delete/adopt; the inotify echo that follows is expected and must be a
   no-op (`power_policy_check` is idempotent on unchanged inputs).
 
 ### Self-write detection (V7)
@@ -296,7 +302,8 @@ re-suspends.
 the matrix value **plus its full fallback chain** (power-saver → {low-power,
 quiet}) — appended before each ApplyProfile call; matched entries removed;
 additionally ALL adoption is suppressed within 5 s of any ApplyProfile call.
-PLATFORM_PROFILE_CHANGED with a non-expected value outside the window → adopt
+PLATFORM_PROFILE_CHANGED (raised by sysfs_notify on the attribute, not by a
+poll) with a non-expected value outside the window → adopt
 as override (map back: low-power|quiet→power-saver, performance→performance,
 else balanced), write file + ctx synchronously, notify. Never revert.
 GPU-coherence note: on firmware without low-power/quiet, power-saver implies
@@ -344,8 +351,11 @@ section.
 
 - `dot_config/hypr/power.conf` (new, defaults above).
 - `dot_config/waybar/config.tmpl`: `custom/power-profile` (exec `hyprstate
-  power status --waybar`, exec-if, json, interval 5, signal 9, on-click
-  `hyprstate power cycle; pkill -SIGRTMIN+9 waybar`), before battery.
+  power status --waybar`, exec-if, json, `interval: once`, signal 9, on-click
+  `hyprstate power cycle`), before battery. The daemon raises SIGRTMIN+9 to
+  every waybar process of the user whenever the applied profile, the override
+  mode or powerd reachability changes, after the apply has landed, so the
+  module runs on the signal alone and reads the applied state.
 - `dot_config/waybar/style.css`: per-profile + unavailable classes.
 - hyprstate ships (from `dist/`, installed by the RPM spec / Arch PKGBUILD):
   `hyprstate-powerd.service`, `org.hyprstate.Power1.conf`,
@@ -371,7 +381,17 @@ section.
 - hypridle timeout switching deferred (restart races lock pipeline + inhibit
   log).
 - Charge thresholds / kbd backlight: EC/QMK, future.
-- Waybar applied-state lag ≤2 s after click (poller tick); optimistic
-  SIGRTMIN+9 refresh covers display.
+- Keep-awake claims made only over D-Bus to hypridle's ScreenSaver interface
+  (a game overlay) are invisible to the lid path since 2.8.0: claims are
+  sensed from logind block inhibitors and the compositor's idle-inhibit
+  surfaces, never from hypridle's journal (whose startup lines under
+  `inhibit_sleep=3` read as a claim on mason-air and parked every lid close
+  in DEFERRED). hypr-DE's no-keep-awake.sh covers games for the idle ladder.
+- A locked, dark session whose blank hypridle lost is relit only once cursor
+  movement is seen between two reconcile passes, which run on events and a
+  5 min safety tick (so up to two ticks). An unlocked dark session is relit
+  on the unlock edge.
+- Release of a Wayland claim while Deferred is sampled (`hyprctl clients`
+  every 5 s, only in that state); no compositor event announces it.
 - powerd code updates ship as a package update (`dnf`/`pacman`); the systemd
   scriptlets restart the root-owned unit (V3).

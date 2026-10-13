@@ -89,8 +89,8 @@ Consumers must skip frames with an unknown `version` instead of misparsing.
 ## Editing (later phase)
 
 Property panels write through existing surfaces only, atomically (tmp+rename),
-validated against the daemon's own whitelists; the daemon's pollers pick up file
-changes — the GUI never writes daemon-owned runtime state:
+validated against the daemon's own whitelists; the daemon's inotify watches pick up
+file changes; the GUI never writes daemon-owned runtime state:
 - power node → rewrite `~/.config/hypr/power.conf`; live changes via `hyprstate power set`.
 - gpu node → write `~/.config/hypr/gpu-select`.
 - monitor-profile nodes → edit `profiles/*.conf`.

@@ -161,13 +161,14 @@ pub struct StuckScreenInputs {
 
 /// Whether an observed DPMS-off state is *unowned* and must be repaired.
 ///
-/// hypridle, not hyprstate, does every blank -- the unlocked idle listener
-/// and the locked input-idle listener in hypr-DE's hypridle.conf -- so an
-/// observed DPMS off is normally legitimate and must be left alone (v1 fired
-/// dpms(on) on every config reload and fought hypridle for exactly this
-/// reason; 2.x blanked locked sessions itself on an input-blind timer and
-/// re-blanked them under the user's hands, hyprstate#24). Turning outputs
-/// on is the only DPMS effect hyprstate has.
+/// hypridle, not hyprstate, does every blank: since hypr-DE 0.2.25 its one
+/// DPMS listener is the input-idle listener that runs only while the
+/// compositor holds the lock. An observed DPMS off is therefore normally
+/// legitimate and must be left alone (v1 fired dpms(on) on every config
+/// reload and fought hypridle for exactly this reason; 2.x blanked locked
+/// sessions itself on an input-blind timer and re-blanked them under the
+/// user's hands, hyprstate#24). Turning outputs on is the only DPMS effect
+/// hyprstate has.
 ///
 /// This backstop exists because hypridle can *lose* its wake: `CHypridle::
 /// onInhibit` recreates the idle-notify listeners when the systemd idle
@@ -180,10 +181,15 @@ pub struct StuckScreenInputs {
 /// The guard is what keeps this from fighting a legitimate blank:
 /// - Only LidOpen/Docked are meant to be showing anything; a machine on its
 ///   way to suspend stays dark.
-/// - Unlocked + dark is unambiguous: hypridle locks at 180s and blanks at
-///   240s, so it never blanks a session it has not already locked.
+/// - Unlocked + dark is unambiguous because nothing in the session blanks
+///   an unlocked screen: hypridle's listener is gated on the compositor
+///   lock and hyprstate never blanks. An unlocked dark session is always
+///   unowned and always repairable, no presence proof needed. hypridle used
+///   to carry a 240 s unlocked blanker behind its 180 s lock; this repair
+///   relit it within one reconcile pass, which made it pointless and is why
+///   hypr-DE 0.2.25 deleted it.
 /// - Locked + dark needs positive evidence a human is present, or every
-///   ordinary idle blank would be undone 5 seconds later.
+///   ordinary idle blank would be undone on the next reconcile pass.
 ///
 /// Known gap: cursor movement is the only presence signal available without
 /// hyprstate becoming a Wayland client itself, so a keyboard-only wake of a
@@ -409,9 +415,10 @@ mod tests {
 
     #[test]
     fn test_stuck_dpms_repairs_unlocked_dark_session_without_cursor_proof() {
-        // hypridle locks at 180s before its unlocked listener blanks at 240s,
-        // and its locked listener needs the compositor lock, so an unlocked
-        // session is never blanked on purpose — unlocked + dark is repairable.
+        // Nothing in the session blanks an unlocked screen: hypridle's only
+        // listener needs the compositor lock (hypr-DE 0.2.25 deleted the
+        // unlocked blanker) and hyprstate never blanks, so unlocked + dark
+        // is always unowned and repairable without a presence proof.
         assert!(dpms_stuck_off(State::LidOpen, &stuck(true, false, false)));
     }
 

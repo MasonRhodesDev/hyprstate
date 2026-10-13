@@ -48,6 +48,8 @@ const DIR_MASK: WatchMask = WatchMask::CREATE
 const GPU_OVERRIDE_NAME: &str = "gpu-select";
 const POWER_OVERRIDE_NAME: &str = "power-override";
 const SUSPEND_REQUEST_NAME: &str = "hyprstate-suspend-request";
+const KBD_LEVEL_NAME: &str = "kbd-level";
+const KBD_OVERRIDE_NAME: &str = "hyprstate-kbd-override";
 const PROFILES_DIR_NAME: &str = "profiles";
 
 /// The last value reported for each input. Reads here are the same ones
@@ -58,6 +60,8 @@ struct Last {
     power: Option<String>,
     suspend: bool,
     profiles: u64,
+    kbd_level: Option<u8>,
+    kbd_override: bool,
 }
 
 impl Last {
@@ -71,8 +75,21 @@ impl Last {
             // one and "withdrawn" to another.
             suspend: paths::suspend_request_standing(),
             profiles: profiles_source_fingerprint(),
+            kbd_level: read_kbd_level(),
+            kbd_override: kbd_override_standing(),
         }
     }
+}
+
+/// Percent from the kbd-level file; None when absent or unparsable.
+fn read_kbd_level() -> Option<u8> {
+    read_first_word(&paths::kbd_level_file())
+        .and_then(|w| w.parse::<i64>().ok())
+        .map(crate::pure::kbd::clamp_level)
+}
+
+fn kbd_override_standing() -> bool {
+    paths::kbd_override_file().is_some_and(|p| p.exists())
 }
 
 /// Which inputs an inotify event (or the tick) says to re-read.
@@ -83,6 +100,8 @@ struct Check {
     suspend: bool,
     profiles: bool,
     platform: bool,
+    kbd_level: bool,
+    kbd_override: bool,
     /// Re-add any directory watch that was missing (a dir created later).
     rewatch: bool,
 }
@@ -94,6 +113,8 @@ impl Check {
         suspend: true,
         profiles: true,
         platform: true,
+        kbd_level: true,
+        kbd_override: true,
         rewatch: true,
     };
 }
@@ -123,17 +144,18 @@ fn route(dir: Dir, mask: EventMask, name: Option<&str>) -> Check {
         Dir::HyprConfig => match name {
             GPU_OVERRIDE_NAME => check.gpu = true,
             POWER_OVERRIDE_NAME => check.power = true,
+            KBD_LEVEL_NAME => check.kbd_level = true,
             PROFILES_DIR_NAME if mask.intersects(EventMask::CREATE | EventMask::MOVED_TO) => {
                 check.profiles = true;
                 check.rewatch = true;
             }
             _ => {}
         },
-        Dir::Runtime => {
-            if name == SUSPEND_REQUEST_NAME {
-                check.suspend = true;
-            }
-        }
+        Dir::Runtime => match name {
+            SUSPEND_REQUEST_NAME => check.suspend = true,
+            KBD_OVERRIDE_NAME => check.kbd_override = true,
+            _ => {}
+        },
         Dir::UserProfiles | Dir::SystemProfiles => {
             if Path::new(name).extension().and_then(|e| e.to_str()) == Some("toml") {
                 check.profiles = true;
@@ -378,6 +400,24 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
                 }
             }
         }
+        if check.kbd_level {
+            let cur = read_kbd_level();
+            if cur != last.kbd_level {
+                last.kbd_level = cur;
+                if tx.send(Event::KbdLevelChanged(cur)).await.is_err() {
+                    return;
+                }
+            }
+        }
+        if check.kbd_override {
+            let cur = kbd_override_standing();
+            if cur != last.kbd_override {
+                last.kbd_override = cur;
+                if tx.send(Event::KbdOverrideChanged(cur)).await.is_err() {
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -516,6 +556,36 @@ mod tests {
                 profiles: true,
                 ..Check::default()
             }
+        );
+    }
+
+    #[test]
+    fn kbd_files_route_to_their_inputs() {
+        let c = route(Dir::HyprConfig, EventMask::CLOSE_WRITE, Some("kbd-level"));
+        assert_eq!(
+            c,
+            Check {
+                kbd_level: true,
+                ..Check::default()
+            }
+        );
+        let c = route(
+            Dir::Runtime,
+            EventMask::CREATE,
+            Some("hyprstate-kbd-override"),
+        );
+        assert_eq!(
+            c,
+            Check {
+                kbd_override: true,
+                ..Check::default()
+            }
+        );
+        // The daemon's own status file lives in a subdirectory; its name
+        // never appears in the runtime dir watch.
+        assert_eq!(
+            route(Dir::Runtime, EventMask::CREATE, Some("hyprstate")),
+            Check::default()
         );
     }
 

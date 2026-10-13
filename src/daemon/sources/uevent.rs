@@ -183,6 +183,13 @@ async fn handle(ev: &Uevent, tx: &mpsc::Sender<Event>, last_ac: &mut Option<bool
             info!("backlight {} {}", ev.action, ev.devpath);
             tx.send(Event::BacklightHotplug).await.is_ok()
         }
+        "leds"
+            if matches!(ev.action.as_str(), "add" | "remove")
+                && ev.devpath.contains("kbd_backlight") =>
+        {
+            info!("keyboard backlight LED {} {}", ev.action, ev.devpath);
+            tx.send(Event::KbdLedHotplug).await.is_ok()
+        }
         _ => true,
     }
 }

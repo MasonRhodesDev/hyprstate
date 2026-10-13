@@ -2,13 +2,15 @@
 //! never touch it; they send events. The one cross-task read is `locked`,
 //! mirrored into a watch channel so the suspending tail can wait on it.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 
 use crate::pure::fsm::{State, WorldInputs};
+use crate::pure::kbd::{DEFAULT_KBD_DARK_LUX, DEFAULT_KBD_IDLE_SECS, DEFAULT_KBD_LEVEL_PCT};
 use crate::pure::power::{
-    DEFAULT_LID_GRACE_SECS, LidAcPolicy, PowerPolicy, PowerProfile, SelfWriteTracker,
+    DEFAULT_LID_GRACE_SECS, KbdMode, LidAcPolicy, PowerPolicy, PowerProfile, SelfWriteTracker,
 };
 use crate::pure::profiles::EdpPolicy;
 
@@ -91,6 +93,28 @@ pub struct Context {
     /// What waybar's power-profile module last rendered, as far as the
     /// daemon told it. None = not signalled yet this run.
     pub waybar_view: Option<WaybarView>,
+
+    // ---- keyboard backlight (POWER_SPEC "Keyboard backlight") ----
+    pub kbd_mode: KbdMode,
+    pub kbd_idle: Duration,
+    pub kbd_dark_lux: u32,
+    /// `(leds name, max_brightness)`; None = no keyboard backlight LED.
+    pub kbd_led: Option<(String, u32)>,
+    /// Illuminance attribute of the ambient light sensor; None = no sensor.
+    pub kbd_als: Option<PathBuf>,
+    /// Input seen within the last `kbd_idle` (ext-idle-notify). Starts
+    /// false: the first typing after the first idle period lights the keys.
+    pub kbd_typing: bool,
+    /// PrepareForSleep(true) seen, no Resumed yet.
+    pub kbd_sleeping: bool,
+    pub kbd_dark: bool,
+    pub kbd_last_lux: Option<f64>,
+    /// Percent the keys are lit at (the kbd-level file, else the default).
+    pub kbd_level: u8,
+    /// The runtime override marker is present.
+    pub kbd_override: bool,
+    /// Raw value last written to the LED; None = not written this run.
+    pub kbd_applied: Option<u32>,
 }
 
 /// Everything `hyprstate power status --waybar` renders. The module runs
@@ -159,11 +183,29 @@ impl Default for Context {
             brightness_set: None,
             brightness_saved: None,
             waybar_view: None,
+            kbd_mode: KbdMode::Auto,
+            kbd_idle: Duration::from_secs(DEFAULT_KBD_IDLE_SECS as u64),
+            kbd_dark_lux: DEFAULT_KBD_DARK_LUX,
+            kbd_led: None,
+            kbd_als: None,
+            kbd_typing: false,
+            kbd_sleeping: false,
+            kbd_dark: false,
+            kbd_last_lux: None,
+            kbd_level: DEFAULT_KBD_LEVEL_PCT,
+            kbd_override: false,
+            kbd_applied: None,
         }
     }
 }
 
 impl Context {
+    /// The keyboard backlight policy acts only with `kbd = auto`, an LED and
+    /// a sensor. Anything less is inert: logged once, never written.
+    pub fn kbd_active(&self) -> bool {
+        self.kbd_mode == KbdMode::Auto && self.kbd_led.is_some() && self.kbd_als.is_some()
+    }
+
     pub fn inhibitor(&self) -> bool {
         self.logind_inhibitor || self.wayland_inhibitor
     }

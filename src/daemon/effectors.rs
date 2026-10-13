@@ -797,6 +797,77 @@ impl Effectors {
         }
     }
 
+    // ---- keyboard backlight (logind SetBrightness on the leds class) ----
+
+    /// Light the keyboard at `pct` (0 = off). Idempotent on the raw value
+    /// last written; a missing LED or session is a logged no-op.
+    pub async fn kbd_set(&self, ctx: &mut Context, pct: u8) {
+        let Some((name, max)) = ctx.kbd_led.clone() else {
+            return;
+        };
+        let raw = crate::pure::kbd::level_to_raw(pct, max);
+        if ctx.kbd_applied == Some(raw) {
+            return;
+        }
+        let Some(session) = &self.session else {
+            debug!("kbd: no session; cannot set {name}");
+            return;
+        };
+        if self.shadow {
+            info!("[shadow] would set keyboard backlight {name} = {raw} ({pct}%)");
+            ctx.kbd_applied = Some(raw);
+            return;
+        }
+        match session.set_brightness("leds", &name, raw).await {
+            Ok(()) => {
+                info!("KBD: {name} = {raw} ({pct}%)");
+                ctx.kbd_applied = Some(raw);
+            }
+            Err(e) => warn!("KBD: SetBrightness leds/{name} failed: {e}"),
+        }
+    }
+
+    /// Typing stopped: the manual override is over. Removes the runtime
+    /// marker; its inotify echo lands with ctx already matching.
+    pub fn kbd_release_override(&self, ctx: &mut Context) {
+        if !ctx.kbd_override {
+            return;
+        }
+        ctx.kbd_override = false;
+        info!("KBD: override released (typing stopped)");
+        if self.shadow {
+            return;
+        }
+        if let Some(path) = paths::kbd_override_file()
+            && let Err(e) = fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("kbd override marker remove failed: {e}");
+        }
+    }
+
+    /// Publish the status snapshot for `hyprstate kbd status`. Not in
+    /// shadow mode: a shadow daemon beside the live one must not speak for
+    /// it.
+    pub fn kbd_write_status(&self, ctx: &Context, lit: bool) {
+        if self.shadow {
+            return;
+        }
+        let Some(path) = super::kbd_policy::status_path() else {
+            return;
+        };
+        let status = super::kbd_policy::KbdStatus::of(ctx, lit);
+        let Ok(body) = serde_json::to_string_pretty(&status) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = crate::sysio::profiles::write_if_changed_atomic(&path, &body) {
+            warn!("kbd status write failed: {e}");
+        }
+    }
+
     // ---- lock / suspend ----
 
     pub async fn request_lock(&self) {

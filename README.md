@@ -12,6 +12,7 @@ Single-process session state machine for Hyprland on Framework 16. Owns lid, mon
 - **Lock-before-suspend.** Calls `Session.Lock()` before `Manager.Suspend()`, waits up to 2s for a live locker (`LockedHint` plus compositor session lock). A stuck `LockedHint` aborts suspend.
 - **Stuck-DPMS repair.** hyprstate never blanks outputs: hypridle owns every DPMS-off (hypr-DE's unlocked idle listener and its locked input-idle listener). If hypridle loses its wake and a live session is left driving dark panels, the reconciler turns them back on once presence is proven (unlocked, or cursor movement between two passes while locked). Passes run on events and a 5 min safety tick, so a locked dark session can take up to two ticks to relight; an unlocked one is relit on the unlock edge. Known loss versus 2.4: a panel hotplugged into a blanked, locked session stays lit until the next input→idle cycle; re-blanking it here would make hyprstate a second DPMS-off writer. Same class: Hyprland warps the cursor when a monitor disconnects, which the backstop reads as presence and relights the remaining panels. Requires hypr-DE ≥ 0.2.25 (hypr-DE#27): on older hypr-DE a locked session holding an idle inhibitor is blanked by nobody. An inhibitor appearing or releasing no longer changes a locked screen; only input (or unlock) relights it.
 - **Input-device wake.** A pre/post systemd-sleep hook keeps `/sys/.../power/wakeup` enabled on USB hubs, the ZSA Voyager keyboard, and the Logitech Lightspeed mouse.
+- **Keyboard backlight.** On only while the room is dark and the user is typing; off when locked, going to sleep, or idle for `#@ kbd-idle` seconds. Typing comes from ext-idle-notify-v1 on the daemon's own Wayland connection, darkness from one ambient light sensor read at each resume (never on a timer), the LED is written through logind `SetBrightness("leds", ...)`. `hyprstate kbd up|down|set` change the one stored level and arm an override that keeps the keys lit in a lit room until typing stops. Inert (one log line) without a `kbd_backlight` LED and an illuminance sensor, or with `#@ kbd = off`. See POWER_SPEC "Keyboard backlight".
 
 ## Architecture
 
@@ -76,6 +77,8 @@ have moved the world.
 | gpu-select, power-override, suspend request, profile TOML dirs | inotify (`*.toml` only; the daemon's own renders do not echo) | safety tick |
 | backlight device | kernel backlight add/remove uevent | none needed |
 | waybar power module | SIGRTMIN+9 from the daemon when the applied profile, override mode or powerd reachability changes | none; the module runs on the signal |
+| keyboard backlight typing | ext-idle-notify-v1 (version 2's input-idle request, so a playing video is not typing) on the daemon's own Wayland connection; the sensor is read on each resume | reconnect after a compositor restart |
+| keyboard backlight level and override | inotify on `kbd-level` and the runtime override marker | safety tick |
 
 ## Layout
 
@@ -93,6 +96,7 @@ hyprstate powerd                  # root power effector (systemd system, org.hyp
 hyprstate sleep-hook pre|post     # invoked by systemd-suspend (root)
 hyprstate status                  # systemctl + journalctl + gpu + power summary
 hyprstate power set|get|cycle|status [--waybar]
+hyprstate kbd status|set <pct>|up|down|auto   # keyboard backlight level keys + policy status
 hyprstate gpu select|check|status # GPU-primary selection (see GPU_SPEC.md)
 hyprstate profile list|current|switch|save [NAME]
 hyprstate profile migrate [NAME]  # legacy .conf/.lua -> neutral TOML

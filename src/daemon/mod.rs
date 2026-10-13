@@ -14,6 +14,7 @@ pub mod telemetry;
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
@@ -163,6 +164,13 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     ctx.power_policy = conf.policy;
     ctx.battery_low_pct = conf.battery_low_pct;
     ctx.lid_present = conf.lid == crate::pure::power::LidMode::Present;
+    ctx.lid_grace = Duration::from_secs(conf.lid_grace_secs as u64);
+    ctx.lid_ac = conf.lid_ac;
+    info!(
+        "lid policy: grace {} s, on AC {}",
+        conf.lid_grace_secs,
+        conf.lid_ac.as_str()
+    );
     if !ctx.lid_present {
         info!("power.conf declares lid absent — the lid FSM route and its inhibitor are disabled");
     }

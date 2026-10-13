@@ -22,7 +22,7 @@ use super::power_policy::power_policy_check;
 use super::sources::ReconcileTrigger;
 use super::telemetry::TelemetryEmitter;
 use crate::pure::fsm::{
-    EventKind, State, StuckScreenInputs, desired_state, dpms_stuck_off, world_state,
+    EventKind, State, StuckScreenInputs, claim_governs, desired_state, dpms_stuck_off, world_state,
 };
 use crate::pure::gpu::dgpu_runtime_pm_pinned;
 use crate::pure::power::{battery_low_step, profile_from_platform_value};
@@ -60,7 +60,12 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
         State::Deferred => {
             fx.cancel_grace_timer(ctx);
             fx.set_edp(false, ctx);
-            fx.pause_media();
+            // Media is paused when a claim parked the lid (a video nobody
+            // is watching any more). A lid-ac hold is not a claim: a laptop
+            // closed on its charger keeps playing.
+            if claim_governs(&ctx.world()) {
+                fx.pause_media();
+            }
             true
         }
         State::Countdown => {
@@ -240,7 +245,7 @@ async fn evaluate_fsms(
             from,
             ctx.state,
             if entered {
-                on_enter_effector_names(new)
+                on_enter_effector_names(new, ctx)
             } else {
                 vec!["request_lock", "start_grace_timer"]
             },
@@ -260,11 +265,14 @@ async fn evaluate_fsms(
 }
 
 /// Map state to the effector names fired during on_enter (for telemetry).
-fn on_enter_effector_names(state: State) -> Vec<&'static str> {
+fn on_enter_effector_names(state: State, ctx: &Context) -> Vec<&'static str> {
     match state {
         State::LidOpen => vec!["cancel_grace_timer", "set_edp_on"],
         State::Docked => vec!["cancel_grace_timer", "set_edp_off"],
-        State::Deferred => vec!["cancel_grace_timer", "set_edp_off", "pause_media"],
+        State::Deferred if claim_governs(&ctx.world()) => {
+            vec!["cancel_grace_timer", "set_edp_off", "pause_media"]
+        }
+        State::Deferred => vec!["cancel_grace_timer", "set_edp_off"],
         State::Countdown => vec!["set_edp_off", "start_grace_timer"],
         State::Suspending => vec!["cancel_grace_timer", "lock_then_suspend"],
     }
@@ -520,7 +528,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         "Startup",
         ctx.state,
         ctx.state,
-        on_enter_effector_names(ctx.state),
+        on_enter_effector_names(ctx.state, &ctx),
     );
 
     // Initial dgpu runtime-PM pin. dgpu mode must block D3cold from login

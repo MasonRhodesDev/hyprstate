@@ -2,12 +2,14 @@
 //! never touch it; they send events. The one cross-task read is `locked`,
 //! mirrored into a watch channel so the suspending tail can wait on it.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 
 use crate::pure::fsm::{State, WorldInputs};
-use crate::pure::power::{PowerPolicy, PowerProfile, SelfWriteTracker};
+use crate::pure::power::{
+    DEFAULT_LID_GRACE_SECS, LidAcPolicy, PowerPolicy, PowerProfile, SelfWriteTracker,
+};
 use crate::pure::profiles::EdpPolicy;
 
 pub struct Context {
@@ -19,6 +21,12 @@ pub struct Context {
     /// never become true, so WorldInputs does not carry it. Gates the
     /// handle-lid-switch inhibitor, the lid watcher, and Lid events.
     pub lid_present: bool,
+    /// power.conf `#@ lid-grace`: the lid-close countdown. Zero locks and
+    /// suspends at once. Request-driven countdowns keep `GRACE_SECONDS`.
+    pub lid_grace: Duration,
+    /// power.conf `#@ lid-ac`: whether a closed lid on the charger suspends
+    /// (default) or parks until the charger is pulled.
+    pub lid_ac: LidAcPolicy,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
     pub wayland_inhibitor: bool,
@@ -112,6 +120,8 @@ impl Default for Context {
         Context {
             lid_closed: false,
             lid_present: true,
+            lid_grace: Duration::from_secs(DEFAULT_LID_GRACE_SECS as u64),
+            lid_ac: LidAcPolicy::Suspend,
             ext_mon_count: 0,
             logind_inhibitor: false,
             wayland_inhibitor: false,
@@ -169,6 +179,10 @@ impl Context {
             // battery. The settled AC signal, so a plug-in during the 30 s
             // grace (settles in ~5 s) withdraws the bypass before expiry.
             battery_low: self.low_battery && !self.on_ac_settled,
+            // The raw AC signal: pulling the charger from a parked lid
+            // should start the countdown now, and the grace absorbs a
+            // plug jiggle on its own.
+            lid_ac_hold: self.lid_ac == LidAcPolicy::Defer && self.on_ac,
         }
     }
 }

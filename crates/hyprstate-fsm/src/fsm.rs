@@ -73,14 +73,25 @@ pub struct WorldInputs {
     /// On battery below the low threshold (false whenever on AC). Overrides
     /// keep-awake outright: a claim must not ride the battery to zero.
     pub battery_low: bool,
+    /// `power.conf` `lid-ac = defer` and the charger is connected: the lid
+    /// is neutralised as a suspend TRIGGER, like Docked, so a closed lid
+    /// parks in Deferred until the charger is pulled. A lid policy, not a
+    /// claim: a standing request still suspends and the lock does not end
+    /// it (an unattended charging laptop does not sleep because it locked).
+    pub lid_ac_hold: bool,
+}
+
+/// Whether a keep-awake claim has authority right now. Decided model
+/// (2026-09-04, POWER_SPEC.md "The idle/power ladder"): a claim governs only
+/// the UNLOCKED machine, lock ends every claim's authority, and battery-low
+/// overrides the claim outright (a paused video must not ride the battery
+/// to zero).
+pub fn claim_governs(w: &WorldInputs) -> bool {
+    w.inhibitor && !w.locked && !w.battery_low
 }
 
 pub fn world_state(w: &WorldInputs) -> State {
-    // Decided model (2026-09-04, POWER_SPEC.md "The idle/power ladder"):
-    // a keep-awake claim governs only the UNLOCKED machine - lock ends
-    // every claim's authority - and battery-low overrides the claim
-    // outright (a paused video must not ride the battery to zero).
-    let claim = w.inhibitor && !w.locked && !w.battery_low;
+    let claim = claim_governs(w);
     // A standing request outranks Docked (decision 4): docking neutralizes
     // the lid as a suspend TRIGGER - a docked laptop mid-build must not
     // sleep on lid close - but it is not itself a keep-awake, so a
@@ -99,7 +110,7 @@ pub fn world_state(w: &WorldInputs) -> State {
     }
     if !w.lid_closed {
         State::LidOpen
-    } else if claim {
+    } else if claim || w.lid_ac_hold {
         State::Deferred
     } else {
         State::Countdown
@@ -674,5 +685,55 @@ mod tests {
             ..mid_call
         };
         assert_eq!(world_state(&locked), State::Countdown);
+    }
+
+    /// `lid-ac = defer`: a closed lid on the charger parks instead of
+    /// counting down, and the ordinary countdown starts the moment the
+    /// charger is pulled.
+    #[test]
+    fn lid_ac_hold_defers_the_lid_until_unplugged() {
+        let on_charger = WorldInputs {
+            lid_closed: true,
+            lid_ac_hold: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&on_charger), State::Deferred);
+        let unplugged = WorldInputs {
+            lid_ac_hold: false,
+            ..on_charger
+        };
+        drive(
+            State::Deferred,
+            &[
+                (EventKind::AcUnplugged, unplugged, Some(State::Countdown)),
+                (EventKind::TimerExpired, unplugged, Some(State::Suspending)),
+            ],
+        );
+    }
+
+    /// The hold is a lid policy, not a keep-awake claim: the lock does not
+    /// end it (an unattended charging laptop does not sleep because it
+    /// locked), a standing request still suspends through it, and an
+    /// external monitor still makes the state Docked.
+    #[test]
+    fn lid_ac_hold_is_not_a_claim() {
+        let held = WorldInputs {
+            lid_closed: true,
+            lid_ac_hold: true,
+            locked: true,
+            ..WorldInputs::default()
+        };
+        assert_eq!(world_state(&held), State::Deferred);
+        let requested = WorldInputs {
+            suspend_requested: true,
+            ..held
+        };
+        assert_eq!(world_state(&requested), State::Countdown);
+        let docked = WorldInputs {
+            ext_mon_count: 1,
+            ..held
+        };
+        assert_eq!(world_state(&docked), State::Docked);
+        assert!(!claim_governs(&held), "the hold must not read as a claim");
     }
 }

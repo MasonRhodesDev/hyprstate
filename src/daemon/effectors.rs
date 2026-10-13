@@ -314,12 +314,26 @@ impl Effectors {
 
     /// `fresh` = entering COUNTDOWN; a RECONCILE re-assert must NOT restart
     /// (and thereby extend) a live countdown.
+    ///
+    /// A standing request outranks the lid in `world_state`, so a countdown
+    /// with a request standing is request-driven and keeps the fixed 30 s
+    /// (the battery-low plug-in window, hypridle's cancel window). Only a
+    /// countdown the lid alone started runs on `lid-grace`, which may be
+    /// zero: the timer then fires at once and the lock-then-suspend follows.
     pub fn start_grace_timer(&self, ctx: &mut Context, fresh: bool) {
         if !fresh && ctx.grace_timer.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
         }
         self.cancel_grace_timer(ctx);
-        ctx.grace_timer = Some(self.spawn_timer(paths::GRACE_SECONDS, || Event::TimerExpired));
+        let grace = if ctx.suspend_requested {
+            paths::GRACE_SECONDS
+        } else {
+            ctx.lid_grace
+        };
+        if fresh && grace.is_zero() {
+            info!("lid-grace is 0: locking and suspending now");
+        }
+        ctx.grace_timer = Some(self.spawn_timer(grace, || Event::TimerExpired));
     }
 
     /// Deferred on a Wayland claim: watch the claim for release (see

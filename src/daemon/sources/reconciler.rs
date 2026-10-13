@@ -7,7 +7,7 @@
 //! resume, AC changes) and otherwise once per `SAFETY_TICK` as the net under
 //! a missed signal. A burst of triggers coalesces into one pass.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
 use super::logind_real_inhibitor_active;
@@ -63,10 +63,12 @@ pub fn describe(reasons: &[ReconcileTrigger]) -> String {
 /// Wait for a trigger (or the safety tick), let the burst settle, gather one
 /// snapshot and hand it to the dispatcher. `manager` and `session` must be
 /// UNCACHED proxies: catching missed PropertiesChanged signals is this
-/// task's whole purpose.
+/// task's whole purpose. `tick` is bumped on every safety tick so the
+/// state-file task re-reads its inputs on the same cadence.
 pub async fn reconcile_task(
     tx: mpsc::Sender<Event>,
     mut triggers: mpsc::Receiver<ReconcileTrigger>,
+    tick: watch::Sender<u64>,
     manager: LogindManagerProxy<'static>,
     session: Option<LogindSessionProxy<'static>>,
     mut ext_prev: u32,
@@ -82,6 +84,9 @@ pub async fn reconcile_task(
             },
             _ = tokio::time::sleep(paths::SAFETY_TICK) => ReconcileTrigger::SafetyTick,
         };
+        if first == ReconcileTrigger::SafetyTick {
+            tick.send_modify(|n| *n += 1);
+        }
         let mut reasons = vec![first];
         // Coalesce: a hotplug is several socket2 lines, a profile apply, and
         // a reload within a second or two. One pass after the dust settles

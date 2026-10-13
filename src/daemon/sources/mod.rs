@@ -1,6 +1,7 @@
 //! Event source tasks. Each holds an mpsc Sender<Event> clone and never
 //! touches Context — the dispatcher owns it.
 
+pub mod files;
 pub mod inhibitors;
 pub mod reconciler;
 
@@ -15,7 +16,6 @@ use super::event::Event;
 use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::upower::{DISPLAY_DEVICE_PATH, UPowerDeviceProxy, UPowerProxy};
 use crate::paths;
-use crate::sysio::sysfs;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 pub use reconciler::ReconcileTrigger;
 
@@ -67,7 +67,7 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
 }
 
 // =========================================================================
-// Pollers
+// logind inhibitors
 // =========================================================================
 
 pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> Option<bool> {
@@ -99,62 +99,6 @@ pub(crate) fn logind_has_real_idle_block(
         return true;
     }
     false
-}
-
-/// Poll platform_profile + the gpu/power override files + monitor-profile
-/// TOML dirs; queue on change.
-pub async fn mode_poller(tx: mpsc::Sender<Event>) {
-    let mut last_platform = sysfs::read_first_word(paths::platform_profile_path());
-    let mut last_gpu = sysfs::read_first_word(&paths::gpu_override_file());
-    let mut last_power = sysfs::read_first_word(&paths::power_override_file());
-    // Existence, not content: every other reader (reconciler, TimerExpired
-    // guard, CLI) keys on the file existing, and a zero-byte file must not
-    // read as "standing" to one and "withdrawn" to another.
-    let mut last_suspend = paths::suspend_request_standing();
-    let mut last_profiles = crate::sysio::profiles::profiles_source_fingerprint();
-    loop {
-        tokio::time::sleep(paths::INHIBIT_POLL).await;
-        let cur = sysfs::read_first_word(paths::platform_profile_path());
-        if cur != last_platform {
-            last_platform = cur.clone();
-            if tx.send(Event::PlatformProfileChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = sysfs::read_first_word(&paths::gpu_override_file());
-        if cur != last_gpu {
-            last_gpu = cur.clone();
-            if tx.send(Event::GpuOverrideChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = sysfs::read_first_word(&paths::power_override_file());
-        if cur != last_power {
-            last_power = cur.clone();
-            if tx.send(Event::PowerOverrideChanged(cur)).await.is_err() {
-                return;
-            }
-        }
-        let cur = paths::suspend_request_standing();
-        if cur != last_suspend {
-            last_suspend = cur;
-            let payload = cur.then(|| "idle".to_string());
-            if tx
-                .send(Event::SuspendRequestChanged(payload))
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        let cur = crate::sysio::profiles::profiles_source_fingerprint();
-        if cur != last_profiles {
-            last_profiles = cur;
-            if tx.send(Event::ProfilesChanged).await.is_err() {
-                return;
-            }
-        }
-    }
 }
 
 // =========================================================================

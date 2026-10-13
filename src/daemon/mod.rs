@@ -144,6 +144,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let (worker_tx, worker_rx) = mpsc::channel(64);
     let (locked_tx, locked_rx) = watch::channel(false);
     let (reconcile_tx, reconcile_rx) = mpsc::channel(32);
+    let (tick_tx, tick_rx) = watch::channel(0u64);
 
     let mut ctx = Context::default();
     let conf = crate::sysio::power_conf::load_power_conf();
@@ -306,10 +307,11 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         manager.clone(),
         ctx.logind_inhibitor,
     ));
-    tokio::spawn(sources::mode_poller(tx.clone()));
+    tokio::spawn(sources::files::file_state_task(tx.clone(), tick_rx));
     tokio::spawn(sources::reconciler::reconcile_task(
         tx.clone(),
         reconcile_rx,
+        tick_tx,
         manager_uncached,
         session_uncached,
         ctx.ext_mon_count,

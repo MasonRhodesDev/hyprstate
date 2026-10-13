@@ -25,6 +25,9 @@ hyprstate-fsm = { path = "crates/hyprstate-fsm" }
 xdg-paths = "0.2.0"
 logind-session = "0.2.0"
 hypr-ipc = "0.1.3"
+# State-file watches (override files, suspend request, profile dirs); the
+# `stream` default feature is the tokio EventStream.
+inotify = "0.11.5"
 monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles", rev = "e263f57", features = ["hyprland-render"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

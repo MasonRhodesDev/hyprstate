@@ -17,7 +17,6 @@ pub const GPU_SETTLE: Duration = Duration::from_millis(500);
 
 pub const GRACE_SECONDS: Duration = Duration::from_secs(30);
 pub const LOCK_WAIT: Duration = Duration::from_secs(2);
-pub const INHIBIT_POLL: Duration = Duration::from_secs(2);
 /// Reconnect delay for an event source whose subscription or socket
 /// dropped (D-Bus signal streams, the uevent socket).
 pub const SOURCE_RETRY: Duration = Duration::from_secs(2);

@@ -11,6 +11,7 @@
 //! - power policy fall-through gate: BatteryLowChanged flips,
 //!   PowerOverrideChanged, PowerAcSettled.
 
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -606,12 +607,71 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     // for an event or the safety tick: it is what repairs on_ac from sysfs
     // when UPower is down at boot (V8) and takes the first cursor sample.
     fx.request_reconcile(ReconcileTrigger::Startup);
-    while let Some(ev) = rx.recv().await {
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    loop {
+        let ev = tokio::select! {
+            ev = rx.recv() => match ev {
+                Some(ev) => ev,
+                // Every sender is gone, so nothing can arrive. Unreachable
+                // in practice (fx holds one), kept so the loop has an end.
+                None => break,
+            },
+            name = &mut shutdown => {
+                info!("{name}: shutting down in {}", ctx.state.as_str());
+                break;
+            }
+        };
         dispatch(ev, &mut ctx, &fx, &mut telem).await;
         // Everything the bar renders may have moved; tell it once per event,
         // after the effects (the apply) have landed.
         fx.sync_waybar(&mut ctx);
     }
+    // ctx owns the occupancy span of the state the daemon is leaving in.
+    // Dropping it here, with the subscriber still up and before main
+    // reaches span_lines::exit, emits that span as a completed record; the
+    // exit path would only mark it cut short (status=exit), and a kill
+    // would lose it outright.
+    drop(ctx);
+}
+
+/// Resolves with the name of the first SIGTERM, SIGINT or SIGHUP to arrive.
+///
+/// `systemctl restart hyprstate` sends SIGTERM on every package upgrade, so
+/// this is the ordinary way the daemon ends, not an edge case. tokio's
+/// signal streams keep the handler itself trivial (a byte into a pipe); the
+/// loop then returns on its own, which is what lets destructors run. A
+/// stream that cannot be registered is logged and skipped: that signal then
+/// kills the daemon as before, and the loop runs on.
+async fn shutdown_signal() -> &'static str {
+    let hook = |name: &'static str, kind: SignalKind| match signal(kind) {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            warn!(
+                "{name} handler unavailable ({e}); {name} will end the daemon without a clean exit"
+            );
+            None
+        }
+    };
+    let mut term = hook("SIGTERM", SignalKind::terminate());
+    let mut int = hook("SIGINT", SignalKind::interrupt());
+    let mut hup = hook("SIGHUP", SignalKind::hangup());
+    tokio::select! {
+        _ = recv_or_pending(term.as_mut()) => "SIGTERM",
+        _ = recv_or_pending(int.as_mut()) => "SIGINT",
+        _ = recv_or_pending(hup.as_mut()) => "SIGHUP",
+    }
+}
+
+/// One delivery of `sig`; never resolves when the stream is missing or
+/// has closed, so `shutdown_signal` can select over whichever registered.
+async fn recv_or_pending(sig: Option<&mut Signal>) {
+    if let Some(sig) = sig
+        && sig.recv().await.is_some()
+    {
+        return;
+    }
+    std::future::pending::<()>().await
 }
 
 /// One event through the exact v1 routing topology.

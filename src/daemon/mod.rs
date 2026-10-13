@@ -416,6 +416,9 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     }
     tokio::spawn(sources::powerd_name_watcher(tx.clone(), conn.clone()));
 
+    // Returns on SIGTERM, SIGINT or SIGHUP with ctx (and its state span)
+    // already dropped. Ok, so main takes the same span_lines::exit(0) path
+    // as any clean exit; the inhibitor fd releases on the way out.
     dispatcher::run(rx, ctx, fx).await;
     Ok(())
 }

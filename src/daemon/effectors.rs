@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 use super::ctx::Context;
 use super::event::Event;
+use super::sources::ReconcileTrigger;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
 use crate::pure::fsm::edp_may_disable;
@@ -203,6 +204,9 @@ pub struct Effectors {
     /// Mirror for reconciler lock repairs — state, not an effect, so never
     /// shadow-gated (same as lock_watcher's sends).
     pub locked_tx: watch::Sender<bool>,
+    /// Asks the reconciler for a pass. Not an effect: the pass only reads
+    /// the world, so shadow mode asks too.
+    pub reconcile: mpsc::Sender<ReconcileTrigger>,
 }
 
 impl Effectors {
@@ -214,6 +218,12 @@ impl Effectors {
         if self.worker.try_send(cmd).is_err() {
             warn!("effector worker queue full/closed — effect dropped");
         }
+    }
+
+    /// Prompt a reconcile pass. A full queue is fine: triggers coalesce and
+    /// a pass is already pending.
+    pub fn request_reconcile(&self, trigger: ReconcileTrigger) {
+        let _ = self.reconcile.try_send(trigger);
     }
 
     // ---- eDP / dpms / media / notify ----

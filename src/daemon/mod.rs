@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 use zbus::proxy::CacheProperties;
 
+use crate::dbus::logind_signals::SessionSignalsProxy;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::dbus::upower::UPowerProxy;
 use crate::paths;
@@ -142,6 +143,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<Event>(256);
     let (worker_tx, worker_rx) = mpsc::channel(64);
     let (locked_tx, locked_rx) = watch::channel(false);
+    let (reconcile_tx, reconcile_rx) = mpsc::channel(32);
 
     let mut ctx = Context::default();
     let conf = crate::sysio::power_conf::load_power_conf();
@@ -239,6 +241,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         powerd: PowerdProxy::new(&conn).await?,
         locked_rx,
         locked_tx: locked_tx.clone(),
+        reconcile: reconcile_tx.clone(),
     };
 
     // Decision 6 as a state, not an edge (review F6): a daemon that boots
@@ -300,8 +303,9 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     tokio::spawn(sources::hypr_socket_reader(tx.clone()));
     tokio::spawn(sources::inhibitor_poller(tx.clone(), manager.clone()));
     tokio::spawn(sources::mode_poller(tx.clone()));
-    tokio::spawn(sources::reconcile_snapshot_task(
+    tokio::spawn(sources::reconciler::reconcile_task(
         tx.clone(),
+        reconcile_rx,
         manager_uncached,
         session_uncached,
         ctx.ext_mon_count,
@@ -312,6 +316,21 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     }
     tokio::spawn(sources::sleep_watcher(tx.clone(), manager.clone()));
     if let Some(s) = session {
+        match SessionSignalsProxy::builder(&conn)
+            .path(s.inner().path().clone())
+            .map(|b| b.build())
+        {
+            Ok(build) => match build.await {
+                Ok(signals) => {
+                    tokio::spawn(sources::session_signal_watcher(
+                        reconcile_tx.clone(),
+                        signals,
+                    ));
+                }
+                Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
+            },
+            Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
+        }
         tokio::spawn(sources::lock_watcher(tx.clone(), locked_tx, s));
     }
     if let Some(up) = upower {

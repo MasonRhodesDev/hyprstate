@@ -81,6 +81,33 @@ pub fn connected_outputs() -> Vec<(String, String)> {
     out
 }
 
+/// AC state from /sys/class/power_supply, the UPower-down fallback. `Some`
+/// for the first supply whose `type` is `Mains`; `None` when there is none
+/// (desktop, VM, or no adapter driver). Matched on `type`, not on the
+/// name: Framework's adapter is `ACAD`, the Asahi macsmc driver's is
+/// `macsmc-ac`, and a name filter that fits one misses the other.
+pub fn on_ac_sysfs() -> Option<bool> {
+    let entries = fs::read_dir("/sys/class/power_supply").ok()?;
+    let mut supplies: Vec<(String, String)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let kind = fs::read_to_string(entry.path().join("type")).ok()?;
+            let online = fs::read_to_string(entry.path().join("online")).unwrap_or_default();
+            Some((kind, online))
+        })
+        .collect();
+    supplies.sort();
+    on_ac_from_supplies(&supplies)
+}
+
+/// Pure half of `on_ac_sysfs`: `(type, online)` file contents per supply.
+pub fn on_ac_from_supplies(supplies: &[(String, String)]) -> Option<bool> {
+    supplies
+        .iter()
+        .find(|(kind, _)| kind.trim() == "Mains")
+        .map(|(_, online)| online.trim() == "1")
+}
+
 /// Lid state without logind (D-Bus is unavailable at `gpu select` time).
 pub fn lid_closed_sysfs() -> bool {
     let Ok(entries) = fs::read_dir(paths::LID_STATE_GLOB_DIR) else {
@@ -158,5 +185,35 @@ pub fn gpu_snapshot() -> GpuSnapshot {
         cards,
         non_pci_display,
         lid_closed: lid_closed_sysfs(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_ac_from_supplies;
+
+    fn s(kind: &str, online: &str) -> (String, String) {
+        (format!("{kind}\n"), format!("{online}\n"))
+    }
+
+    /// Framework 16: the adapter is `ACAD`; a USB-C source may sit beside it.
+    #[test]
+    fn framework_adapter_is_matched_by_type() {
+        let supplies = [s("Battery", ""), s("Mains", "1"), s("USB", "0")];
+        assert_eq!(on_ac_from_supplies(&supplies), Some(true));
+    }
+
+    /// Asahi: `macsmc-ac` starts with no `A`; a name filter never saw it.
+    #[test]
+    fn asahi_adapter_is_matched_by_type_not_name() {
+        let supplies = [s("Mains", "0"), s("Battery", "")];
+        assert_eq!(on_ac_from_supplies(&supplies), Some(false));
+    }
+
+    /// A desktop has no Mains supply: unknown, not "on battery".
+    #[test]
+    fn no_mains_supply_is_unknown() {
+        assert_eq!(on_ac_from_supplies(&[s("Battery", "")]), None);
+        assert_eq!(on_ac_from_supplies(&[]), None);
     }
 }

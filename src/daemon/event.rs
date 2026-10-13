@@ -33,7 +33,8 @@ pub enum Event {
     TimerExpired,
     /// PrepareForSleep(false).
     Resumed,
-    /// 5s reconciler world snapshot; the dispatcher diffs and repairs.
+    /// Reconciler world snapshot (event-triggered, plus the safety tick);
+    /// the dispatcher diffs and repairs.
     ReconcileTick(Box<ReconcileSnapshot>),
     /// platform_profile content changed (payload = first word).
     PlatformProfileChanged(Option<String>),
@@ -53,13 +54,16 @@ pub enum Event {
 }
 
 /// What the reconciler snapshot task gathered. Option fields = source
-/// failed this pass (keep the previous ctx value).
+/// failed this pass, or no independent source exists for it (keep the
+/// previous ctx value).
 #[derive(Debug, Default)]
 pub struct ReconcileSnapshot {
+    /// The triggers that prompted this pass, for the drift log.
+    pub reasons: String,
     pub lid_closed: bool,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
-    pub wayland_inhibitor: bool,
+    pub wayland_inhibitor: Option<bool>,
     /// LockedHint via an uncached session read; None = no session or the
     /// read failed this pass.
     pub locked: Option<bool>,

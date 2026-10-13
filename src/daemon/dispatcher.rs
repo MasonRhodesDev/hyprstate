@@ -19,6 +19,7 @@ use super::effectors::Effectors;
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::power_policy::power_policy_check;
+use super::sources::ReconcileTrigger;
 use super::telemetry::TelemetryEmitter;
 use crate::pure::fsm::{
     EventKind, State, StuckScreenInputs, desired_state, dpms_stuck_off, world_state,
@@ -352,12 +353,11 @@ async fn handle_reconcile_tick(
         ctx.logind_inhibitor = snap.logind_inhibitor;
         fsm_drift = true;
     }
-    if snap.wayland_inhibitor != ctx.wayland_inhibitor {
-        drift.push(format!(
-            "wayland_inh {}->{}",
-            ctx.wayland_inhibitor, snap.wayland_inhibitor
-        ));
-        ctx.wayland_inhibitor = snap.wayland_inhibitor;
+    if let Some(wayland) = snap.wayland_inhibitor
+        && wayland != ctx.wayland_inhibitor
+    {
+        drift.push(format!("wayland_inh {}->{wayland}", ctx.wayland_inhibitor));
+        ctx.wayland_inhibitor = wayland;
         fsm_drift = true;
     }
     if let Some(locked) = snap.locked
@@ -380,7 +380,11 @@ async fn handle_reconcile_tick(
     }
 
     if !drift.is_empty() {
-        warn!("reconciler ctx drift: {}", drift.join("; "));
+        warn!(
+            "reconciler ctx drift ({}): {}",
+            snap.reasons,
+            drift.join("; ")
+        );
     }
 
     // Repaired power inputs must reach power policy — covers
@@ -534,6 +538,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     );
                     let _ = on_enter(ctx.state, Entry::Reassert, &mut ctx, &fx).await;
                 }
+                fx.request_reconcile(if matches!(ev, Event::ProfileApplied) {
+                    ReconcileTrigger::ProfileApplied
+                } else {
+                    ReconcileTrigger::ConfigReloaded
+                });
                 continue;
             }
             Event::ReconcileTick(snap) => {
@@ -570,6 +579,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // Coalesce mode/scale negotiation bursts before profile
                 // reconciliation.
                 fx.schedule_profile_reconcile(&mut ctx);
+                fx.request_reconcile(ReconcileTrigger::MonitorHotplug);
             }
             Event::Inhibitor { wayland, active } => {
                 if wayland {
@@ -578,7 +588,10 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                     ctx.logind_inhibitor = active;
                 }
             }
-            Event::LockChanged(locked) => ctx.locked = locked,
+            Event::LockChanged(locked) => {
+                ctx.locked = locked;
+                fx.request_reconcile(ReconcileTrigger::LockChanged);
+            }
             Event::AcChanged(on_ac) => {
                 ctx.on_ac = on_ac;
                 info!("AC: {label} (on_ac={on_ac})");
@@ -588,6 +601,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // signal while requests wait for both axes.
                 battery_low_request_check(&mut ctx, &fx);
                 fx.schedule_power_settle(&mut ctx);
+                fx.request_reconcile(ReconcileTrigger::AcChanged);
             }
             Event::PowerAcSettled => {
                 ctx.on_ac_settled = ctx.on_ac;
@@ -626,6 +640,9 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // so a machine that woke still-low re-requests (the 30 s
                 // grace is the plug-in window) and a recovery withdraws.
                 let changed = battery_low_request_check(&mut ctx, &fx);
+                if flipped {
+                    fx.request_reconcile(ReconcileTrigger::BatteryLowChanged);
+                }
                 if !flipped && !changed {
                     continue; // no flip -> no event existed in v1
                 }
@@ -689,6 +706,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
                 // registry PR that follows.
                 ctx.suspend_requested = false;
                 fx.clear_suspend_request();
+                fx.request_reconcile(ReconcileTrigger::Resumed);
             }
         }
 

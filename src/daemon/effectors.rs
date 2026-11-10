@@ -193,6 +193,12 @@ async fn run_cmd(cmd: &str, args: &[&str]) {
     }
 }
 
+/// Whether the internal panel has to be on, given what the policy and the
+/// lid ask for. The only output is always on, whatever they ask.
+pub fn edp_must_be_on(wanted_on: bool, ext_mon_count: u32) -> bool {
+    wanted_on || !edp_may_disable(ext_mon_count)
+}
+
 pub struct Effectors {
     pub shadow: bool,
     pub worker: mpsc::Sender<Cmd>,
@@ -230,7 +236,7 @@ impl Effectors {
 
     /// The active profile's edp policy overrides the lid-driven default.
     pub fn set_edp(&self, on: bool, ctx: &Context) {
-        let resolved = match ctx.edp_policy {
+        let wanted = match ctx.edp_policy {
             EdpPolicy::Disable => false,
             EdpPolicy::Enable => true,
             EdpPolicy::Auto => on,
@@ -240,9 +246,15 @@ impl Effectors {
         // crashes refocusing windows onto one that no longer exists. Countdown
         // (lid close while undocked) is the path that reaches here with no
         // external attached.
-        if !resolved && !edp_may_disable(ctx.ext_mon_count) {
+        //
+        // The guard sends an enable rather than dropping the request. The
+        // panel may already be off when the last external leaves (an undock
+        // with the lid closed, or one that happened across a suspend), and
+        // then nothing else would turn it back on. The worker no-ops when the
+        // panel is already on.
+        let resolved = edp_must_be_on(wanted, ctx.ext_mon_count);
+        if resolved && !wanted {
             warn!("keeping {} on: it is the only output", hyprctl::EDP_MONITOR);
-            return;
         }
         self.send_cmd(Cmd::SetEdp { on: resolved });
     }
@@ -929,5 +941,24 @@ impl Effectors {
                 false
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edp_must_be_on;
+
+    #[test]
+    fn edp_follows_the_request_while_an_external_is_present() {
+        assert!(edp_must_be_on(true, 1));
+        assert!(!edp_must_be_on(false, 1));
+        assert!(!edp_must_be_on(false, 3));
+    }
+
+    #[test]
+    fn edp_is_forced_on_when_it_is_the_only_output() {
+        // Off was requested (docked, lid closed), then the externals left.
+        assert!(edp_must_be_on(false, 0));
+        assert!(edp_must_be_on(true, 0));
     }
 }

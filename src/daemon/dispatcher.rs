@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::ctx::Context;
-use super::effectors::Effectors;
+use super::effectors::{Effectors, edp_must_be_on};
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::kbd_policy::kbd_policy_check;
@@ -497,6 +497,11 @@ async fn handle_reconcile_tick(
         EdpPolicy::Enable => true,
         EdpPolicy::Auto => ctx.state == State::LidOpen,
     };
+    // The only output is on regardless (see `Effectors::set_edp`). Folding
+    // that in here makes this pass the backstop that turns a disabled panel
+    // back on once the externals are gone, and stops it asking every tick
+    // for a disable that set_edp would refuse.
+    let should_be_enabled = edp_must_be_on(should_be_enabled, ctx.ext_mon_count);
     if let Some(disabled) = snap.edp_disabled {
         if should_be_enabled && disabled {
             warn!(
@@ -920,6 +925,11 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             // registry PR that follows.
             ctx.suspend_requested = false;
             fx.clear_suspend_request();
+            // The dock can leave while the machine sleeps, and no hotplug
+            // event is delivered for it until after this one. Re-read the
+            // count so the state derived below, and the only-output guard in
+            // set_edp, do not act on the monitors from before the suspend.
+            ctx.ext_mon_count = hyprctl::ext_monitor_count(ctx.ext_mon_count).await;
             fx.request_reconcile(ReconcileTrigger::Resumed);
             ctx.kbd_sleeping = false;
             kbd_policy_check(ctx, fx, false).await;

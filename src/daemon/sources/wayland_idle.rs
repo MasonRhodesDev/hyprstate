@@ -134,7 +134,9 @@ fn connect(timeout_ms: u32) -> Result<(Session, bool), String> {
         .poll_fd()
         .try_clone_to_owned()
         .map_err(|e| format!("dup socket: {e}"))?;
-    let fd = AsyncFd::new(fd).map_err(|e| format!("register socket: {e}"))?;
+    // SAFETY: `fd` is an OwnedFd duplicated just above. The AsyncFd takes
+    // ownership of it, so it stays open and unchanged for the AsyncFd's life.
+    let fd = unsafe { AsyncFd::register(fd) }.map_err(|e| format!("register socket: {e}"))?;
     Ok((
         Session {
             conn,

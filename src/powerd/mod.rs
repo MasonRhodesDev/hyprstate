@@ -122,13 +122,13 @@ pub async fn run(session_bus: bool) -> anyhow::Result<()> {
     };
 
     let builder = if session_bus {
-        zbus::connection::Builder::session()?
+        zbus::connection::Builder::session()
     } else {
-        zbus::connection::Builder::system()?
+        zbus::connection::Builder::system()
     };
     let conn = builder
-        .name(paths::POWERD_BUS)?
-        .serve_at(paths::POWERD_PATH, iface)?
+        .name(paths::POWERD_BUS)
+        .serve_at(paths::POWERD_PATH, iface)
         .build()
         .await?;
     info!("powerd up as {}", paths::POWERD_BUS);

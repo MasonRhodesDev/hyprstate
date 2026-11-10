@@ -144,6 +144,9 @@ fi
 - The reconciler no longer asks every pass for a disable that set_edp
   refuses, which logged a re-disabling warning every tick while undocked
   with the lid closed.
+- zbus 6, logind-session 0.3 and tokio 1.54.1 (#48). They clear the four
+  advisories the Security audit has failed on since 2026-10-26
+  (RUSTSEC-2026-0370, 0371, 0372 and 0386) with no ignore entry.
 
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.12.0-1
 - The daemon exits cleanly on SIGTERM, SIGINT and SIGHUP (#29). It logs one

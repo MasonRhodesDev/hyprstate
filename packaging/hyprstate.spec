@@ -137,6 +137,10 @@ fi
 - Resumed re-reads the external monitor count before the state is derived.
   The count from before the suspend made a machine undocked in its sleep
   resume into DOCKED, and let the only-output guard pass on stale monitors.
+- Hyprland's FALLBACK placeholder output no longer counts as an external
+  monitor. `hyprctl -j monitors` lists it while no real output is enabled,
+  so an undocked machine with its panel off read as docked with one
+  external, and the only-output rule above could never fire.
 - The reconciler no longer asks every pass for a disable that set_edp
   refuses, which logged a re-disabling warning every tick while undocked
   with the lid closed.

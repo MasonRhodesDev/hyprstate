@@ -6,7 +6,7 @@
 %bcond_without check
 
 Name:           hyprstate
-Version:        2.12.0
+Version:        2.12.1
 Release:        1%{?dist}
 Summary:        Hyprland session/power state machine (lid, monitors, profiles, GPU, powerd)
 License:        MIT
@@ -126,6 +126,28 @@ fi
 %dir %attr(2775,root,monitor-profiles) %{_sysconfdir}/monitor-profiles
 
 %changelog
+* Tue Nov 10 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.12.1-1
+- The internal panel comes back on when it becomes the only output. The
+  only-output guard refused to turn the panel off but never turned it on, so
+  a panel that was already off when the last external left (an undock with
+  the lid closed, or one that happened while the machine slept) stayed off
+  and the compositor sat with no outputs until the lid opened. set_edp now
+  sends an enable in that case, and the reconciler treats a disabled sole
+  output as drift, so a missed event is repaired within one pass.
+- Resumed re-reads the external monitor count before the state is derived.
+  The count from before the suspend made a machine undocked in its sleep
+  resume into DOCKED, and let the only-output guard pass on stale monitors.
+- Hyprland's FALLBACK placeholder output no longer counts as an external
+  monitor. `hyprctl -j monitors` lists it while no real output is enabled,
+  so an undocked machine with its panel off read as docked with one
+  external, and the only-output rule above could never fire.
+- The reconciler no longer asks every pass for a disable that set_edp
+  refuses, which logged a re-disabling warning every tick while undocked
+  with the lid closed.
+- zbus 6, logind-session 0.3 and tokio 1.54.1 (#48). They clear the four
+  advisories the Security audit has failed on since 2026-10-26
+  (RUSTSEC-2026-0370, 0371, 0372 and 0386) with no ignore entry.
+
 * Tue Oct 13 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.12.0-1
 - The daemon exits cleanly on SIGTERM, SIGINT and SIGHUP (#29). It logs one
   line naming the signal and the state it was in, drops its Context so the

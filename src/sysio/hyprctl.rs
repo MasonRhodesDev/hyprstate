@@ -6,6 +6,18 @@ use tracing::warn;
 
 pub const EDP_MONITOR: &str = "eDP-2";
 
+/// Hyprland's placeholder output. It stands in while no real monitor is
+/// enabled and `monitors` lists it like any other, so it must never count as
+/// an external: it would make an undocked machine look docked in exactly the
+/// state where the panel has to come back on.
+pub const FALLBACK_MONITOR: &str = "FALLBACK";
+
+/// Whether a monitor name is a real external output: not the internal panel
+/// and not the compositor's placeholder.
+pub fn is_external(name: &str) -> bool {
+    !name.starts_with("eDP") && name != FALLBACK_MONITOR
+}
+
 async fn hyprctl_json(args: &[&str]) -> Option<Vec<serde_json::Value>> {
     let value = hypr_ipc::hyprctl_json(args, hypr_ipc::HYPRCTL_TIMEOUT)
         .await
@@ -44,10 +56,7 @@ pub async fn monitors() -> Option<Vec<MonitorSnapshot>> {
 /// power overrides and flip profiles).
 pub fn ext_monitor_count_in(monitors: Option<&[MonitorSnapshot]>, prev: u32) -> u32 {
     match monitors {
-        Some(monitors) => monitors
-            .iter()
-            .filter(|m| !m.name.starts_with("eDP"))
-            .count() as u32,
+        Some(monitors) => monitors.iter().filter(|m| is_external(&m.name)).count() as u32,
         None => {
             warn!("ext_monitor_count failed (keeping {prev})");
             prev
@@ -167,7 +176,7 @@ pub async fn first_external_monitor() -> Option<String> {
     let monitors = hyprctl_json(&["-j", "monitors"]).await?;
     monitors.iter().find_map(|m| {
         let name = m.get("name").and_then(|n| n.as_str())?;
-        (!name.starts_with("eDP")).then(|| name.to_string())
+        is_external(name).then(|| name.to_string())
     })
 }
 
@@ -191,7 +200,33 @@ pub fn any_client_inhibiting_idle_in(clients: &[serde_json::Value]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::any_client_inhibiting_idle_in;
+    use super::{MonitorSnapshot, any_client_inhibiting_idle_in, ext_monitor_count_in};
+
+    fn monitors(names: &[&str]) -> Vec<MonitorSnapshot> {
+        let json: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({ "name": n }))
+            .collect();
+        serde_json::from_value(serde_json::Value::Array(json)).unwrap()
+    }
+
+    #[test]
+    fn externals_exclude_the_panel() {
+        let m = monitors(&["DP-1", "eDP-2", "DP-4"]);
+        assert_eq!(ext_monitor_count_in(Some(&m), 0), 2);
+    }
+
+    #[test]
+    fn the_fallback_placeholder_is_not_an_external() {
+        // What the compositor reports once every real output is gone.
+        let m = monitors(&["FALLBACK"]);
+        assert_eq!(ext_monitor_count_in(Some(&m), 2), 0);
+    }
+
+    #[test]
+    fn a_failed_query_keeps_the_previous_count() {
+        assert_eq!(ext_monitor_count_in(None, 2), 2);
+    }
 
     #[test]
     fn a_video_client_is_a_claim() {

@@ -111,7 +111,12 @@ pub async fn uevent_task(tx: mpsc::Sender<Event>, triggers: mpsc::Sender<Reconci
     // and not an event.
     let mut last_ac = sysfs::on_ac_sysfs();
     loop {
-        let fd = match open_socket().and_then(AsyncFd::new) {
+        // SAFETY: open_socket returns an OwnedFd it just created. The AsyncFd
+        // takes ownership of it, so it stays open and unchanged for the
+        // AsyncFd's life.
+        let registered =
+            open_socket().and_then(|fd| unsafe { AsyncFd::register(fd) }.map_err(io::Error::from));
+        let fd = match registered {
             Ok(fd) => fd,
             Err(e) => {
                 warn!("uevent socket unavailable ({e}); retrying");

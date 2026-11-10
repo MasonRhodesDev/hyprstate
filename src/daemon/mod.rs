@@ -393,17 +393,15 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     if let Some(s) = session {
         match SessionSignalsProxy::builder(&conn)
             .path(s.inner().path().clone())
-            .map(|b| b.build())
+            .build()
+            .await
         {
-            Ok(build) => match build.await {
-                Ok(signals) => {
-                    tokio::spawn(sources::session_signal_watcher(
-                        reconcile_tx.clone(),
-                        signals,
-                    ));
-                }
-                Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
-            },
+            Ok(signals) => {
+                tokio::spawn(sources::session_signal_watcher(
+                    reconcile_tx.clone(),
+                    signals,
+                ));
+            }
             Err(e) => warn!("session Lock/Unlock proxy unavailable: {e}"),
         }
         tokio::spawn(sources::lock_watcher(tx.clone(), locked_tx, s));

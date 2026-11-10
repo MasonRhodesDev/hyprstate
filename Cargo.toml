@@ -23,7 +23,7 @@ publish = false
 [dependencies]
 hyprstate-fsm = { path = "crates/hyprstate-fsm" }
 xdg-paths = "0.2.0"
-logind-session = "0.2.0"
+logind-session = "0.3.0"
 hypr-ipc = "0.1.3"
 # State-file watches (override files, suspend request, profile dirs); the
 # `stream` default feature is the tokio EventStream.
@@ -32,7 +32,7 @@ monitor-profiles = { git = "https://github.com/MasonRhodesDev/monitor-profiles",
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net", "process", "io-util", "signal"] }
 futures-util = { version = "0.3", default-features = false }
 libc = "0.2"

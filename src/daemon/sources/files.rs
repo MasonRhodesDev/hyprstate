@@ -220,7 +220,10 @@ impl PlatformWatch {
     fn open() -> Option<Self> {
         let path = paths::platform_profile_path();
         let file = File::open(path).ok()?;
-        match AsyncFd::with_interest(file, Interest::PRIORITY) {
+        // SAFETY: `file` is a File opened just above. The AsyncFd takes
+        // ownership of it, so its descriptor stays open and unchanged for the
+        // AsyncFd's life.
+        match unsafe { AsyncFd::register_with_interest(file, Interest::PRIORITY) } {
             Ok(fd) => Some(PlatformWatch { fd }),
             Err(e) => {
                 warn!("platform_profile cannot be watched ({e}); tick only");

@@ -44,8 +44,8 @@ pub async fn logind_inhibitor_watcher(
     loop {
         let stream = async {
             let props = PropertiesProxy::builder(&conn)
-                .destination(LOGIN1)?
-                .path(logind_session::MANAGER_PATH)?
+                .destination(LOGIN1)
+                .path(logind_session::MANAGER_PATH)
                 .build()
                 .await?;
             props.receive_properties_changed().await

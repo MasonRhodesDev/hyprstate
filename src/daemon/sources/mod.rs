@@ -191,7 +191,6 @@ pub async fn resolve_session(
     let path = session.path().clone();
     let cached = LogindSessionProxy::builder(conn)
         .path(path.clone())
-        .ok()?
         .build()
         .await
         .ok()?;
@@ -199,7 +198,6 @@ pub async fn resolve_session(
     // same reasoning as manager_uncached in daemon::run.
     let uncached = LogindSessionProxy::builder(conn)
         .path(path.clone())
-        .ok()?
         .cache_properties(CacheProperties::No)
         .build()
         .await
@@ -269,7 +267,6 @@ pub async fn battery_watcher(tx: mpsc::Sender<Event>, device: UPowerDeviceProxy<
 pub async fn battery_initial(conn: &Connection) -> Option<(f64, UPowerDeviceProxy<'static>)> {
     let device = UPowerDeviceProxy::builder(conn)
         .path(DISPLAY_DEVICE_PATH)
-        .ok()?
         .build()
         .await
         .ok()?;

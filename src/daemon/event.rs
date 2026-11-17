@@ -1,101 +1,49 @@
-//! The daemon's typed event enum (replaces v1's `Event(kind, payload)`).
-//! Each variant projects to a `pure::fsm::EventKind` for the transition
-//! maps and for v1-compatible log labels.
-
 use crate::pure::fsm::EventKind;
 
 #[derive(Debug)]
 pub enum Event {
-    /// LidClosed PropertiesChanged (true = closed).
     Lid(bool),
-    /// monitoraddedv2 / monitorremoved from socket2.
     MonitorHotplug { added: bool, name: String },
-    /// configreloaded from socket2 -> RECONCILE re-assert.
     ConfigReloaded,
-    /// The worker applied a profile (`hyprctl eval`, no `configreloaded`
-    /// follows) -> the same RECONCILE re-assert, so the new profile's eDP
-    /// policy is enforced exactly as it was after a reload.
     ProfileApplied,
-    /// Debounced monitor-set change -> profile/gpu/power reconciliation.
     MonitorsChanged,
-    /// `/etc/monitor-profiles` or the user profiles dir changed on disk.
     ProfilesChanged,
-    /// Keep-awake claim edge. wayland=false -> logind (BlockInhibited
-    /// watcher); wayland=true -> the compositor's idle-inhibit view.
     Inhibitor { wayland: bool, active: bool },
-    /// LockedHint PropertiesChanged (also mirrored into the locked watch).
     LockChanged(bool),
-    /// Raw UPower OnBattery flip (true = on AC). Power policy consumes the
-    /// debounced PowerAcSettled, never this.
     AcChanged(bool),
-    /// The 5s AC settle window elapsed.
     PowerAcSettled,
-    /// Grace timer fired.
     TimerExpired,
-    /// PrepareForSleep(false).
     Resumed,
-    /// Reconciler world snapshot (event-triggered, plus the safety tick);
-    /// the dispatcher diffs and repairs.
     ReconcileTick(Box<ReconcileSnapshot>),
-    /// platform_profile content changed (payload = first word).
     PlatformProfileChanged(Option<String>),
-    /// gpu-select override file changed.
     GpuOverrideChanged(Option<String>),
-    /// UPower DisplayDevice percentage sample.
     BatteryPercent(f64),
-    /// power-override file changed (payload = first word).
     PowerOverrideChanged(Option<String>),
-    /// The idle-suspend request file changed: `Some(word)` = a request is
-    /// standing, `None` = withdrawn. Written by `hyprstate suspend
-    /// request|cancel` (driven by hypridle's timeout/on-resume), watched by
-    /// the state-file task, and deleted by the daemon itself on Resumed.
     SuspendRequestChanged(Option<String>),
-    /// org.hyprstate.Power1 (re)appeared on the bus.
     PowerdAppeared,
-    /// A backlight class device was added or removed (kernel uevent):
-    /// re-discover the brightness device.
     BacklightHotplug,
-    /// PrepareForSleep(true): the machine is going to sleep. Only the
-    /// keyboard backlight policy consumes it (rule 1); the lid FSM leaves
-    /// Suspending on Resumed as before.
     Sleeping,
-    /// ext-idle-notify edge for the keyboard backlight: `idle` = no input
-    /// for `kbd-idle` seconds; false = input resumed.
     KbdIdle { idle: bool },
-    /// `~/.config/hypr/kbd-level` changed (payload = parsed percent).
     KbdLevelChanged(Option<u8>),
-    /// The runtime kbd override marker appeared (true) or went (false).
     KbdOverrideChanged(bool),
-    /// A leds class device was added or removed: re-discover the keyboard
-    /// backlight LED.
     KbdLedHotplug,
 }
 
-/// What the reconciler snapshot task gathered. Option fields = source
-/// failed this pass, or no independent source exists for it (keep the
-/// previous ctx value).
 #[derive(Debug, Default)]
 pub struct ReconcileSnapshot {
-    /// The triggers that prompted this pass, for the drift log.
     pub reasons: String,
     pub lid_closed: bool,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
     pub wayland_inhibitor: Option<bool>,
-    /// LockedHint via an uncached session read; None = no session or the
-    /// read failed this pass.
     pub locked: Option<bool>,
     pub on_ac: Option<bool>,
     pub edp_disabled: Option<bool>,
-    /// Any enabled output reporting DPMS off (stuck-blank backstop).
     pub dpms_off: Option<bool>,
-    /// Cursor position this pass; the dispatcher diffs it against the
-    /// previous one for a presence signal.
     pub cursor_pos: Option<(i64, i64)>,
 }
 
 impl Event {
-    /// Projection for the pure transition maps + v1-style log labels.
     pub fn kind(&self) -> EventKind {
         match self {
             Event::Lid(true) => EventKind::LidClose,
@@ -121,8 +69,6 @@ impl Event {
             Event::SuspendRequestChanged(Some(_)) => EventKind::SuspendRequested,
             Event::SuspendRequestChanged(None) => EventKind::SuspendCancelled,
             Event::PowerdAppeared => EventKind::PowerAcSettled,
-            // Never reach the FSMs (handled before the fall-through); the
-            // kind only names what they are, a ctx repair.
             Event::BacklightHotplug
             | Event::Sleeping
             | Event::KbdIdle { .. }
@@ -132,7 +78,6 @@ impl Event {
         }
     }
 
-    /// v1 log label (EventKind value strings).
     pub fn label(&self) -> &'static str {
         match self {
             Event::ProfilesChanged => return "ProfilesChanged",

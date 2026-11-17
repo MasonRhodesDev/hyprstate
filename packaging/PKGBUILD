@@ -1,10 +1,4 @@
 # Maintainer: Mason Rhodes <mrhodesdev@gmail.com>
-#
-# Arch package for hyprstate. Same payload as the Fedora RPM
-# (packaging/hyprstate.spec); all paths are identical across both distros.
-# Usable directly with makepkg from this directory after a release tag is
-# pushed, or published to the AUR (regenerate .SRCINFO with
-# `makepkg --printsrcinfo > .SRCINFO` on every change).
 
 pkgname=hyprstate
 pkgver=2.12.1
@@ -20,9 +14,6 @@ optdepends=(
   'playerctl: media auto-pause on deferred lid close'
   'hypridle: lock pipeline + idle-inhibit detection'
 )
-# The powerd unit Conflicts= with power-profiles-daemon/tuned/tlp at
-# runtime; no pacman-level conflicts (parallel installs are fine, only one
-# may own platform_profile).
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
 sha256sums=('1fd33796892ee170487c85ecba0f93058b15a3fabb78a433ed3815e554e40b9e')
 
@@ -56,10 +47,7 @@ package() {
   install -Dm755 dist/sleep-hook-wrapper.sh "$pkgdir/usr/lib/systemd/system-sleep/hyprstate"
   install -Dm644 dist/90-hyprstate.system.preset "$pkgdir/usr/lib/systemd/system-preset/90-hyprstate.preset"
   install -Dm644 dist/90-hyprstate.user.preset "$pkgdir/usr/lib/systemd/user-preset/90-hyprstate.preset"
-  # Shared monitor-profile directory (see hyprstate.install for the group).
   install -dm2775 "$pkgdir/etc/monitor-profiles"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
-  install -Dm644 POWER_SPEC.md "$pkgdir/usr/share/doc/$pkgname/POWER_SPEC.md"
-  install -Dm644 GPU_SPEC.md "$pkgdir/usr/share/doc/$pkgname/GPU_SPEC.md"
 }

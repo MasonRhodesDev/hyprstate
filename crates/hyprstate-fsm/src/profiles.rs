@@ -1,16 +1,5 @@
-//! Monitor-profile parsing and selection.
-//!
-//! A profile is a Hyprland .conf snippet with `#@ key = value` directive
-//! comments in its leading comment block. Parsing here is pure over `&str`;
-//! the io layer globs the profiles dir, feeds file contents in, and logs the
-//! returned warnings.
-
 pub use monitor_profiles::{EdpPolicy, GpuPref};
 
-/// Source dialect of a legacy hand-written profile file, for `profile
-/// migrate` only: hyprstate reads the directive metadata, which is identical
-/// in both dialects modulo the comment leader (`#@` vs `--@`). Renders are
-/// Lua only — Hyprland 0.56 removed the hyprlang parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProfileFormat {
     Conf,
@@ -35,14 +24,9 @@ pub struct Profile {
     pub edp: EdpPolicy,
     pub gpu: GpuPref,
     pub hooks: Vec<String>,
-    /// Explicit `#@ priority`; defaults to matches.len().
     pub priority: i64,
 }
 
-/// Parse one `#@ key = value` (or Lua-dialect `--@ key = value`) line.
-/// Mirrors v1's directive regexes: profile keys are `[a-z]+` (NO hyphens —
-/// "battery-low" must not be a legal monitor-profile key); power.conf keys
-/// are `[a-z][a-z-]*`.
 pub fn parse_directive(line: &str, allow_hyphen: bool) -> Option<(&str, &str)> {
     let rest = line
         .strip_prefix("#@")
@@ -61,9 +45,6 @@ pub fn parse_directive(line: &str, allow_hyphen: bool) -> Option<(&str, &str)> {
     key_ok.then_some((key, val))
 }
 
-/// Parse a profile body. `Err` = profile is malformed and must be skipped
-/// (no match directives, invalid edp/gpu/priority value). Warnings cover
-/// malformed/unknown directives that v1 logged but tolerated.
 pub fn parse_profile(
     name: &str,
     format: ProfileFormat,
@@ -78,10 +59,6 @@ pub fn parse_profile(
 
     for line in text.lines() {
         if !(line.starts_with("#@") || line.starts_with("--@")) {
-            // Stop scanning once the body begins. Directives must all sit in
-            // the leading comment block — anything below passes through to
-            // Hyprland as-is. Plain comments in either dialect (`#` / `--`)
-            // and blank lines don't end the block.
             let t = line.trim_start();
             if t.starts_with('#') || t.starts_with("--") || t.is_empty() {
                 continue;
@@ -138,26 +115,16 @@ pub fn parse_profile(
     ))
 }
 
-/// A `#@ match = ...` directive matches if any detected monitor description
-/// starts with the directive's value. The `desc:` prefix (Hyprland syntax)
-/// is stripped so users can paste rules from monitors.conf verbatim.
 pub fn match_in_signature(m: &str, signature: &[String]) -> bool {
     monitor_profiles::match_in_signature(m, signature)
 }
 
-/// Pure: pick the profile whose match set is a subset of `signature`,
-/// breaking ties by (priority, match count, name) — all descending via max.
 pub fn select_profile<'a>(signature: &[String], profiles: &'a [Profile]) -> Option<&'a Profile> {
     monitor_profiles::select_by(signature, profiles, |p| {
         (&p.matches, p.priority, p.name.as_str())
     })
 }
 
-// =========================================================================
-// Profile capture (`profile save` — the editor folded in from hyprdm)
-// =========================================================================
-
-/// One monitor from `hyprctl monitors all -j`, as capture needs it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorSnapshot {
     pub name: String,
@@ -172,17 +139,11 @@ pub struct MonitorSnapshot {
     pub disabled: bool,
 }
 
-/// "165.00000" -> "165", "1.25" -> "1.25" — matches hand-written profiles.
 fn fmt_num(v: f64) -> String {
     let s = format!("{v:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-/// Hyprland monitor selector. Convention from the hand-written profiles:
-/// the internal panel is addressed by NAME (eDP-*), externals by stable
-/// `desc:`. Descriptions containing commas would shatter the monitor
-/// keyword's comma-separated syntax — fall back to the (unstable) name and
-/// warn.
 fn selector(m: &MonitorSnapshot, warnings: &mut Vec<String>) -> String {
     if m.name.starts_with("eDP") {
         return m.name.clone();
@@ -198,11 +159,6 @@ fn selector(m: &MonitorSnapshot, warnings: &mut Vec<String>) -> String {
     format!("desc:{}", m.description)
 }
 
-/// Shared capture prep for both renderers: enabled monitors sorted
-/// left-to-right, disabled monitors, and the `match` description set
-/// (EXTERNAL descriptions only, so the profile keeps matching when the lid
-/// closes and eDP leaves the signature; a layout with no externals matches
-/// on the eDP description — the laptop-only case).
 struct CaptureLayout<'a> {
     enabled: Vec<&'a MonitorSnapshot>,
     disabled: Vec<&'a MonitorSnapshot>,
@@ -232,7 +188,6 @@ fn capture_layout(monitors: &[MonitorSnapshot]) -> Result<CaptureLayout<'_>, Str
     })
 }
 
-/// The `#@`/`--@` directive header shared by both renderers.
 fn render_directives(
     leader: &str,
     match_descs: &[&str],
@@ -254,9 +209,6 @@ fn render_directives(
     out
 }
 
-/// Render the current layout as a Lua profile body (`hl.monitor` calls with
-/// `--@` directive metadata). Hyprland executes the body via the config's
-/// `dofile` of `.active.lua`; hyprstate itself only ever reads the header.
 pub fn render_profile_lua(
     name: &str,
     date: &str,
@@ -281,12 +233,6 @@ pub fn render_profile_lua(
     ));
     out.push('\n');
 
-    // Field shapes per Hyprland's Lua bindings (LuaBindingsConfigRules.cpp
-    // MONITOR_FIELDS): mode/position/scale are strings (scale is
-    // "auto"/number-as-string), transform is an int, disabled a bool.
-    // transform and disabled are always explicit: profiles are applied with
-    // `hyprctl eval`, and hl.monitor merges into an earlier rule of the same
-    // output name, so an omitted field inherits a stale value.
     for m in &layout.enabled {
         out.push_str(&format!(
             "hl.monitor({{ output = \"{}\", mode = \"{}x{}@{}\", position = \"{}x{}\", scale = \"{}\", transform = {}, disabled = false }})\n",
@@ -314,11 +260,6 @@ pub fn render_profile_lua(
     Ok((out, warnings))
 }
 
-/// hyprctl argv that force-disables `monitor` at runtime, per config dialect.
-/// hyprlang: a `keyword` config override. Lua: the compositor rejects
-/// `keyword` outright ("Use eval.") — and with exit code 0 — so evaluate an
-/// `hl.monitor` rule instead; it replaces the rule for that output and
-/// applies within a frame. Either form is wiped by the next config reload.
 pub fn edp_disable_args(monitor: &str) -> Vec<String> {
     vec![
         "eval".into(),
@@ -326,7 +267,6 @@ pub fn edp_disable_args(monitor: &str) -> Vec<String> {
     ]
 }
 
-/// Quote `s` as a Lua double-quoted string literal.
 fn lua_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -344,18 +284,6 @@ fn lua_string_literal(s: &str) -> String {
     out
 }
 
-/// hyprctl argv to apply a rendered profile to the running compositor
-/// without a full `reload`.
-///
-/// A profile file is nothing but `hl.monitor` / `hl.workspace_rule` calls, so
-/// running just that file in the config's own Lua state is enough. `hl.monitor`
-/// replaces the rule for an output (merging over the old one) and schedules
-/// only a monitor-state refresh, while `reload` re-runs the whole config and
-/// trips every refresh bit — including the blur-framebuffer pass, which builds
-/// a framebuffer for every monitor and aborts on one that is still 0x0 mid-
-/// hotplug (Hyprland crash reports, 2026-09-06 and 2026-09-20).
-///
-/// Not wrapped in `pcall`: a failing profile must surface as a non-`ok` reply.
 pub fn apply_profile_args(lua_path: &str) -> Vec<String> {
     vec![
         "eval".into(),
@@ -363,24 +291,10 @@ pub fn apply_profile_args(lua_path: &str) -> Vec<String> {
     ]
 }
 
-/// hyprctl argv to turn every output DPMS on. Deliberately not
-/// parameterised: hyprstate never blanks (hypridle owns DPMS off,
-/// hyprstate#24), so no off form is constructible from this crate.
-/// Hyprland 0.56 removed classic string dispatchers and hypr-DE is
-/// Lua-config only: `dispatch` evaluates its argument as
-/// `hl.dispatch(<text>)`, so the Lua call form is the only one that works.
 pub fn dpms_on_args() -> Vec<String> {
     vec!["dispatch".into(), "hl.dsp.dpms({ action = \"on\" })".into()]
 }
 
-/// hyprctl argv to move workspace `ws` onto `monitor`. Same Lua-only
-/// rationale as `dpms_on_args`.
-///
-/// Used to repair workspaces Hyprland strands on the eDP: `CMonitor::
-/// onDisconnect` only evacuates workspaces to a monitor that was *enabled at
-/// the instant of disable* (BACKUPMON), and nothing retroactively re-homes
-/// them when an external returns — so an undock flap that briefly drops the
-/// external count to zero pins them to the disabled panel permanently.
 pub fn move_workspace_to_monitor_args(ws: i64, monitor: &str) -> Vec<String> {
     vec![
         "dispatch".into(),
@@ -408,7 +322,6 @@ mod tests {
     #[test]
     fn apply_profile_escapes_the_path_as_a_lua_string() {
         let args = apply_profile_args("/p/a\"b\\c\nd\re\0f.lua");
-        // One argv element (no shell), and nothing can close the literal early.
         assert_eq!(args.len(), 2);
         assert_eq!(args[1], "dofile(\"/p/a\\\"b\\\\c\\nd\\re\\0f.lua\")");
     }
@@ -452,18 +365,14 @@ mod tests {
             "#@ match = A\nmonitor = something\n#@ edp = disable\n",
         )
         .unwrap();
-        assert_eq!(prof.edp, EdpPolicy::Auto); // post-body directive ignored
+        assert_eq!(prof.edp, EdpPolicy::Auto);
     }
 
     #[test]
     fn test_malformed_profiles_are_rejected() {
-        // No match directives at all.
         assert!(parse("bad", "monitor = no directives at all\n").is_err());
-        // Invalid edp value.
         assert!(parse("bad", "#@ match = A\n#@ edp = sideways\n").is_err());
-        // Invalid gpu value.
         assert!(parse("bad", "#@ match = A\n#@ gpu = both\n").is_err());
-        // Non-integer priority.
         assert!(parse("bad", "#@ match = A\n#@ priority = high\n").is_err());
     }
 
@@ -475,8 +384,6 @@ mod tests {
         assert_eq!(warnings.len(), 2);
     }
 
-    /// Lua-dialect `--@` directives parse identically to `#@`, and plain
-    /// Lua comments (`--`) don't terminate the leading directive block.
     #[test]
     fn test_parse_profile_lua_dialect() {
         let (prof, warnings) = parse_profile(
@@ -495,7 +402,7 @@ mod tests {
         .unwrap();
         assert_eq!(prof.format, ProfileFormat::Lua);
         assert_eq!(prof.matches, vec!["desc:Dell U2723QE"]);
-        assert_eq!(prof.edp, EdpPolicy::Disable); // post-body directive ignored
+        assert_eq!(prof.edp, EdpPolicy::Disable);
         assert_eq!(prof.gpu, GpuPref::Dgpu);
         assert_eq!(prof.priority, 10);
         assert!(warnings.is_empty());
@@ -511,8 +418,6 @@ mod tests {
         assert!(parse_directive("-- match = x", false).is_none());
     }
 
-    /// Hyphenated keys are only legal with allow_hyphen (the power.conf
-    /// dialect) — "battery-low" must not parse as a profile directive key.
     #[test]
     fn test_directive_key_charsets() {
         assert!(parse_directive("#@ battery-low = x", false).is_none());
@@ -558,7 +463,6 @@ mod tests {
         let one = prof("one", &["Dell U2723QE"], None);
         let two = prof("two", &["Dell U2723QE", "LG HDR 4K"], None);
         let profiles = vec![one.clone(), two.clone()];
-        // More matches wins (default priority = match count).
         assert_eq!(select_profile(&signature, &profiles).unwrap().name, "two");
         let pinned = prof("pinned", &["LG HDR 4K"], Some(99));
         let profiles = vec![one, two, pinned];
@@ -573,7 +477,7 @@ mod tests {
         let signature = sig(&["Dell U2723QE HJKL (DP-3)"]);
         assert!(match_in_signature("desc:Dell U2723QE", &signature));
         assert!(match_in_signature("Dell U2723QE", &signature));
-        assert!(!match_in_signature("U2723QE", &signature)); // not a prefix
+        assert!(!match_in_signature("U2723QE", &signature));
     }
 
     fn mon(
@@ -598,8 +502,6 @@ mod tests {
         }
     }
 
-    /// The Lua renderer mirrors the .conf conventions and round-trips
-    /// through the Lua-dialect parser.
     #[test]
     fn test_render_profile_lua() {
         let mut rotated = mon("DP-1", "Dell A", 3440, 60.0, 1.5, false);
@@ -684,11 +586,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(warnings.len(), 1);
-        // The monitor rule falls back to the connector name.
         assert!(text.contains("\"DP-3\""), "{text}");
         assert!(!text.contains("output = \"desc:Weird"), "{text}");
-        // The match directive still uses the description (prefix-matched
-        // against the signature, commas are fine there).
         assert!(
             text.contains("--@ match = desc:Weird, Inc. Display\n"),
             "{text}"

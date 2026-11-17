@@ -1,12 +1,3 @@
-//! The state-file sources: the gpu-select and power-override files, the
-//! idle-suspend request, the monitor-profile TOML directories, and
-//! `platform_profile`. All of them were read every 2 s. inotify reports the
-//! files and directories, sysfs_notify (POLLPRI) reports platform_profile,
-//! and the reconciler's safety tick re-reads everything as the net under a
-//! lost event. One task owns every `last_*` value, so a change is reported
-//! exactly once however it was noticed (a duplicate PlatformProfileChanged
-//! would adopt an external write twice).
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
@@ -25,17 +16,11 @@ use crate::paths;
 use crate::sysio::profiles::profiles_source_fingerprint;
 use crate::sysio::sysfs::read_first_word;
 
-/// What a directory watch stands for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dir {
-    /// `~/.config/hypr`: gpu-select, power-override, and the `profiles`
-    /// child appearing.
     HyprConfig,
-    /// `$XDG_RUNTIME_DIR`: the idle-suspend request file.
     Runtime,
-    /// `~/.config/hypr/profiles`: user TOML profiles.
     UserProfiles,
-    /// `/etc/monitor-profiles`: shared TOML profiles.
     SystemProfiles,
 }
 
@@ -52,8 +37,6 @@ const KBD_LEVEL_NAME: &str = "kbd-level";
 const KBD_OVERRIDE_NAME: &str = "hyprstate-kbd-override";
 const PROFILES_DIR_NAME: &str = "profiles";
 
-/// The last value reported for each input. Reads here are the same ones
-/// the old poller made; only the trigger changed.
 struct Last {
     platform: Option<String>,
     gpu: Option<String>,
@@ -70,9 +53,6 @@ impl Last {
             platform: read_first_word(paths::platform_profile_path()),
             gpu: read_first_word(&paths::gpu_override_file()),
             power: read_first_word(&paths::power_override_file()),
-            // Existence, not content: every other reader keys on the file
-            // existing, and a zero-byte file must not read as "standing" to
-            // one and "withdrawn" to another.
             suspend: paths::suspend_request_standing(),
             profiles: profiles_source_fingerprint(),
             kbd_level: read_kbd_level(),
@@ -81,7 +61,6 @@ impl Last {
     }
 }
 
-/// Percent from the kbd-level file; None when absent or unparsable.
 fn read_kbd_level() -> Option<u8> {
     read_first_word(&paths::kbd_level_file())
         .and_then(|w| w.parse::<i64>().ok())
@@ -92,7 +71,6 @@ fn kbd_override_standing() -> bool {
     paths::kbd_override_file().is_some_and(|p| p.exists())
 }
 
-/// Which inputs an inotify event (or the tick) says to re-read.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Check {
     gpu: bool,
@@ -102,7 +80,6 @@ struct Check {
     platform: bool,
     kbd_level: bool,
     kbd_override: bool,
-    /// Re-add any directory watch that was missing (a dir created later).
     rewatch: bool,
 }
 
@@ -119,18 +96,12 @@ impl Check {
     };
 }
 
-/// Pure routing of one inotify event to the inputs it can have moved.
-/// Self-echo is filtered here: the daemon itself renders `*.lua` into the
-/// user profiles dir and writes gpu-profile and edp-off beside the
-/// override files, and none of those is an input.
 fn route(dir: Dir, mask: EventMask, name: Option<&str>) -> Check {
     let mut check = Check::default();
     if mask.contains(EventMask::Q_OVERFLOW) {
         return Check::ALL;
     }
     if mask.contains(EventMask::IGNORED) {
-        // The watched directory itself went away; its inputs read as absent
-        // now and the watch must be re-established if it comes back.
         return Check {
             profiles: matches!(dir, Dir::UserProfiles | Dir::SystemProfiles),
             rewatch: true,
@@ -187,9 +158,6 @@ impl DirWatches {
         out
     }
 
-    /// Add every directory watch that is not yet held. A missing directory
-    /// is not an error (no shared profiles, no user profiles yet); it is
-    /// retried on the tick and when its parent reports it created.
     fn ensure(&mut self, watches: &mut Watches) {
         for (dir, path) in self.targets() {
             if self.wds.values().any(|d| *d == dir) {
@@ -209,9 +177,6 @@ impl DirWatches {
     }
 }
 
-/// `platform_profile` under sysfs_notify: the kernel raises POLLPRI on the
-/// open attribute when the value changes (acpi platform_profile_store
-/// calls sysfs_notify), and nothing else; inotify does not see sysfs.
 struct PlatformWatch {
     fd: AsyncFd<File>,
 }
@@ -220,9 +185,6 @@ impl PlatformWatch {
     fn open() -> Option<Self> {
         let path = paths::platform_profile_path();
         let file = File::open(path).ok()?;
-        // SAFETY: `file` is a File opened just above. The AsyncFd takes
-        // ownership of it, so its descriptor stays open and unchanged for the
-        // AsyncFd's life.
         match unsafe { AsyncFd::register_with_interest(file, Interest::PRIORITY) } {
             Ok(fd) => Some(PlatformWatch { fd }),
             Err(e) => {
@@ -232,8 +194,6 @@ impl PlatformWatch {
         }
     }
 
-    /// Current first word, read through the watched descriptor so the
-    /// kernel's change counter for this open file is consumed.
     fn read(&self) -> Option<String> {
         let mut file = self.fd.get_ref();
         file.seek(std::io::SeekFrom::Start(0)).ok()?;
@@ -242,21 +202,17 @@ impl PlatformWatch {
         text.split_whitespace().next().map(str::to_string)
     }
 
-    /// Whether the attribute changed again since the last read (a notify
-    /// that landed between the read and the readiness clear).
     fn changed_again(&self) -> bool {
         let mut pfd = libc::pollfd {
             fd: self.fd.as_raw_fd(),
             events: libc::POLLPRI,
             revents: 0,
         };
-        // SAFETY: pfd is a valid, initialised pollfd and nfds is 1.
         let n = unsafe { libc::poll(&mut pfd, 1, 0) };
         n > 0 && (pfd.revents & libc::POLLPRI) != 0
     }
 }
 
-/// Wait for POLLPRI on platform_profile, or for ever when there is none.
 async fn platform_ready(watch: Option<&PlatformWatch>) -> std::io::Result<()> {
     match watch {
         Some(w) => {
@@ -336,8 +292,6 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
             },
             res = platform_ready(platform.as_ref()) => {
                 if let Err(e) = res {
-                    // A readiness error would recur every iteration and spin;
-                    // fall back to the tick for this input instead.
                     warn!("platform_profile readiness failed ({e}); safety tick only");
                     platform_failed = true;
                 }
@@ -424,7 +378,6 @@ pub async fn file_state_task(tx: mpsc::Sender<Event>, mut tick: watch::Receiver<
     }
 }
 
-/// Next inotify event, or pending for ever once the stream is gone.
 async fn next_inotify(
     stream: Option<&mut EventStream<[u8; 4096]>>,
 ) -> Option<inotify::Event<std::ffi::OsString>> {
@@ -440,9 +393,6 @@ async fn next_inotify(
     }
 }
 
-/// Read platform_profile (through the watched descriptor when there is
-/// one) and report a change. Loops while the kernel says it moved again
-/// under the read. Returns false when the dispatcher is gone.
 async fn send_platform(
     tx: &mpsc::Sender<Event>,
     last: &mut Last,
@@ -494,7 +444,6 @@ mod tests {
         );
     }
 
-    /// The daemon's own writes beside the override files are not inputs.
     #[test]
     fn daemon_side_files_in_hypr_config_are_ignored() {
         for name in ["edp-off", "gpu-profile", "power.conf", "hyprland.lua"] {
@@ -536,8 +485,6 @@ mod tests {
         );
     }
 
-    /// Rendered `.lua` and the atomic `.tmp-<pid>` files the daemon writes
-    /// into the profiles dir must not feed ProfilesChanged back to itself.
     #[test]
     fn profile_renders_do_not_echo() {
         for name in [
@@ -584,8 +531,6 @@ mod tests {
                 ..Check::default()
             }
         );
-        // The daemon's own status file lives in a subdirectory; its name
-        // never appears in the runtime dir watch.
         assert_eq!(
             route(Dir::Runtime, EventMask::CREATE, Some("hyprstate")),
             Check::default()

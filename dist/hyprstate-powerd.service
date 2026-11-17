@@ -1,7 +1,6 @@
 [Unit]
 Description=hyprstate powerd: root power-profile effector (org.hyprstate.Power1)
 Documentation=https://github.com/MasonRhodesDev/hyprstate
-# Mutually exclusive with other platform_profile owners.
 Conflicts=power-profiles-daemon.service tuned.service tlp.service
 
 [Service]
@@ -11,8 +10,6 @@ ExecStart=/usr/bin/hyprstate powerd
 StateDirectory=hyprstate
 Restart=on-failure
 RestartSec=2
-# Hardening. Deliberately ABSENT: ProtectKernelTunables (it remounts /sys
-# read-only, and writing /sys is this service's entire purpose).
 ProtectSystem=strict
 ReadWritePaths=/sys
 ProtectHome=yes

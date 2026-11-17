@@ -1,17 +1,7 @@
-//! `suspend request|cancel|status`: the idle-suspend request verb.
-//!
-//! Writes or removes `$XDG_RUNTIME_DIR/hyprstate-suspend-request`. This is a
-//! REQUEST into the daemon's existing Countdown machinery, driven by
-//! hypridle's idle timeout (request) and on-resume (cancel) — it never
-//! suspends anything itself. The running daemon watches the file, enters
-//! Countdown, proves a live locker, and only then calls logind Suspend.
-
 use crate::paths;
 
 pub fn run(action: &str) -> i32 {
     let Some(path) = paths::suspend_request_file() else {
-        // No runtime dir: a request written to cwd could outlive a reboot.
-        // Cancel/status are harmless no-ops; a request must refuse loudly.
         return match action {
             "request" => {
                 eprintln!("hyprstate suspend request: no XDG_RUNTIME_DIR");

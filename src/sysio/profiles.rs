@@ -1,7 +1,3 @@
-//! io side of monitor profiles: the TOML directory loader, the `.active.lua`
-//! symlink (the session is Lua-only), and the hyprctl monitor signature
-//! (sync — CLI use; the daemon gets async variants in its own module).
-
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -21,17 +17,10 @@ impl Deref for TomlProfile {
     }
 }
 
-/// Read every *.toml in the profiles dir (excluding any leading-dot file).
-/// Legacy .conf/.lua files are not profile sources any more. Malformed
-/// profiles are logged to stderr and skipped; parse warnings are logged but
-/// tolerated.
 pub fn load_profiles() -> Vec<TomlProfile> {
     load_profiles_merged(&paths::profiles_dir(), paths::system_profiles_dir())
 }
 
-/// Cheap change detector for the shared + user TOML dirs (state-file watch
-/// input: an inotify event is confirmed against it before ProfilesChanged).
-/// Paths + mtime + length; content is compared after load via Profile Eq.
 pub fn profiles_source_fingerprint() -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -64,11 +53,6 @@ pub fn profiles_source_fingerprint() -> u64 {
 pub fn load_profiles_merged(user_dir: &Path, system_dir: &Path) -> Vec<TomlProfile> {
     let mut profiles = load_profiles_from(user_dir);
 
-    // Profiles shared with the greeter live in the system directory. A
-    // same-named user profile wins, so a per-user override never requires
-    // editing /etc. Their Hyprland config is rendered into the *user*
-    // directory: /etc is not ours to write, and the active-profile symlink
-    // lives beside the user's profiles anyway.
     let (system, diagnostics) = load_toml_profiles_from(system_dir);
     for diagnostic in diagnostics {
         eprintln!("WARNING {}: {}", diagnostic.source, diagnostic.message);
@@ -111,8 +95,6 @@ pub fn load_profiles_from(dir: &Path) -> Vec<TomlProfile> {
         eprintln!("WARNING {}: {}", diagnostic.source, diagnostic.message);
     }
     if toml_profiles.is_empty() {
-        // Legacy .lua/.conf are no longer profile sources — migrate to TOML
-        // (`hyprstate profile migrate` or `monitor-profiles migrate`).
         if dir_has_legacy(dir) {
             eprintln!(
                 "WARNING {}: found legacy .conf/.lua profiles but no .toml; \
@@ -145,14 +127,11 @@ fn dir_has_legacy(dir: &Path) -> bool {
         {
             return false;
         }
-        // Render artifacts carry "Do not edit"; only hand-edited dialects count.
         fs::read_to_string(&p).is_ok_and(|t| !t.contains("Do not edit"))
     })
 }
 
 fn render_to_dir(dir: &Path, profile: &TomlProfile) -> std::io::Result<()> {
-    // Lua-only: a leftover `{name}.conf` from before the migration is never
-    // regenerated (nothing reads it); `profile migrate` retires it.
     let (content, warnings) = monitor_profiles::render::render_lua(profile);
     for warning in warnings {
         eprintln!("WARNING {}: {warning}", profile.name);
@@ -183,7 +162,6 @@ pub fn select_profile<'a>(
     profiles.iter().find(|p| p.name == selected.name)
 }
 
-/// Name (stem) of the profile `.active.lua` points at.
 pub fn active_profile_name() -> Option<String> {
     let link = paths::active_profile_link();
     if !link.is_symlink() {
@@ -195,9 +173,6 @@ pub fn active_profile_name() -> Option<String> {
         .map(|s| s.to_string_lossy().into_owned())
 }
 
-/// Atomically repoint `.active.lua` at `target` (tmp symlink, then rename).
-/// The session is Lua-only: hypr-DE's main.lua dofiles `.active.lua`, and a
-/// `.active.conf` twin would only ever point at a stale render nothing reads.
 pub fn repoint_active_profile(target: &Path) -> std::io::Result<()> {
     if target.extension().and_then(|e| e.to_str()) != Some("lua") {
         return Err(std::io::Error::other(format!(
@@ -215,8 +190,6 @@ pub fn repoint_active_profile(target: &Path) -> std::io::Result<()> {
     fs::rename(&tmp, &link)
 }
 
-/// All monitors (including disabled) from `hyprctl monitors all -j`, for
-/// `profile save` capture. Empty on any failure.
 pub fn monitor_snapshot_all() -> Vec<crate::pure::profiles::MonitorSnapshot> {
     let out = match std::process::Command::new("hyprctl")
         .args(["monitors", "all", "-j"])
@@ -253,7 +226,6 @@ pub fn monitor_snapshot_all() -> Vec<crate::pure::profiles::MonitorSnapshot> {
         .collect()
 }
 
-/// Snapshot of currently-connected monitor descriptions from hyprctl.
 pub fn monitor_signature() -> Vec<String> {
     let out = match std::process::Command::new("hyprctl")
         .args(["-j", "monitors"])
@@ -295,9 +267,6 @@ mod tests {
         .unwrap();
     }
 
-    /// The system directory is what the greeter reads, so the session must
-    /// see the same profiles from it -- and a same-named user profile must
-    /// still win, so a per-user override never means editing /etc.
     #[test]
     fn system_profiles_merge_and_user_wins_on_name() {
         let base = std::env::temp_dir().join(format!("hyprstate-merge-{}", std::process::id()));
@@ -320,8 +289,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// An absent system directory is the normal case on a machine that ships
-    /// no profiles: it must not warn, and must not disturb user profiles.
     #[test]
     fn absent_system_dir_is_harmless() {
         let base = std::env::temp_dir().join(format!("hyprstate-nosys-{}", std::process::id()));
@@ -334,7 +301,6 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// Port of test_hyprstate.py's load_profiles io test (deferred from M1).
     #[test]
     fn test_load_profiles_skips_dotfiles_and_missing_dir() {
         let dir = std::env::temp_dir().join(format!("hyprstate-test-{}", std::process::id()));
@@ -351,7 +317,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Legacy dialect files alone are not loaded; TOML is required.
     #[test]
     fn test_load_profiles_ignores_legacy_only_dir() {
         let dir = std::env::temp_dir().join(format!("hyprstate-test-lua-{}", std::process::id()));
@@ -373,7 +338,6 @@ mod tests {
         let profiles = load_profiles_from(&dir);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].matches, ["toml"]);
-        // Lua-only: the TOML renders to a.lua; the stale conf is untouched.
         assert!(
             fs::read_to_string(dir.join("a.lua"))
                 .unwrap()

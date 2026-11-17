@@ -1,5 +1,3 @@
-//! org.freedesktop.UPower proxies (AC state + DisplayDevice battery).
-
 use zbus::proxy;
 
 pub const DISPLAY_DEVICE_PATH: &str = "/org/freedesktop/UPower/devices/DisplayDevice";
@@ -25,7 +23,6 @@ pub trait UPowerDevice {
     #[zbus(property)]
     fn is_present(&self) -> zbus::Result<bool>;
 
-    /// 2 = battery, 3 = ups.
     #[zbus(property, name = "Type")]
     fn device_type(&self) -> zbus::Result<u32>;
 }

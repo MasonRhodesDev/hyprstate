@@ -1,15 +1,6 @@
-# rpmlint filters for hyprstate. Lets CI gate on rpmlint without tripping over
-# domain vocabulary and our deliberate vendored-source layout.
-
-# Domain terms rpmlint's dictionary doesn't know (Hyprland, the powerd daemon,
-# sysfs, systemd, hotplugged hubs, *.conf). Not real defects.
 addFilter("spelling-error")
 
-# Source1 is the cargo-vendor tarball produced by build-srpm.sh, not a URL —
-# intentional (offline, reproducible RPM build).
 addFilter("invalid-url Source1")
 
-# Shared setgid directory so desktop users can edit layouts without root.
-# vigil ships the same path and attributes.
 addFilter("non-standard-dir-perm /etc/monitor-profiles")
 addFilter("non-standard-gid /etc/monitor-profiles")

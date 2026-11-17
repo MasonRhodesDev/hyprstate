@@ -1,6 +1,3 @@
-//! `status`: systemctl + journalctl + inhibitor + gpu + power summary.
-//! Subprocesses inherit stdout (their output streams through).
-
 use std::process::Command;
 
 use crate::paths;

@@ -1,27 +1,16 @@
-//! GPU-primary selection: pure classification and selection over a topology
-//! snapshot (see GPU_SPEC.md). The io layer builds `GpuSnapshot` from sysfs;
-//! everything here is a pure function of it.
-
-/// One GPU candidate from /dev/dri/by-path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuCard {
-    /// Stable /dev/dri/by-path entry (selection key).
     pub path: String,
-    /// Resolved cardN (NOT stable across boots; emitted, never persisted).
     pub card: String,
     pub boot_vga: u32,
     pub vram: u64,
-    /// Connected non-eDP connectors.
     pub external: u32,
-    /// Connected eDP connectors.
     pub edp: u32,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
     pub cards: Vec<GpuCard>,
-    /// A non-candidate DRM device (DisplayLink/platform) has a connected
-    /// output — selection must bail to open-all-GPUs behavior.
     pub non_pci_display: bool,
     pub lid_closed: bool,
 }
@@ -45,8 +34,6 @@ impl GpuMode {
     }
 }
 
-/// Where the mode came from — feeds the `reason` strings (`override-igpu`,
-/// `profile-dgpu`, ...).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuModeSource {
     Override,
@@ -66,11 +53,6 @@ impl GpuModeSource {
     }
 }
 
-/// Mode precedence: override file > profile preference > platform_profile >
-/// auto. Inputs are the first words of the respective sources (None =
-/// missing). `overlay` is the daemon's freshly-selected profile `#@ gpu`
-/// value, or the breadcrumb file word at CLI/select time — same fall-through
-/// semantics either way ("auto"/unknown falls through).
 pub fn resolve_gpu_mode(
     override_word: Option<&str>,
     overlay: Option<&str>,
@@ -94,17 +76,10 @@ pub fn resolve_gpu_mode(
     match platform_word {
         Some("low-power") | Some("quiet") => (GpuMode::Igpu, GpuModeSource::Platform, warnings),
         Some("performance") => (GpuMode::Dgpu, GpuModeSource::Platform, warnings),
-        // balanced / balanced-performance / cool / custom / missing /
-        // unknown: deliberately auto (exhaustive against the kernel ABI).
         _ => (GpuMode::Auto, GpuModeSource::Default, warnings),
     }
 }
 
-/// Integrated = boot_vga AND smallest-VRAM agreeing on the same card.
-/// Disagreement (e.g. a muxed laptop reporting boot_vga on the discrete) or
-/// a VRAM tie without boot_vga -> None -> unmanaged. Cards lacking
-/// mem_info_vram_total (Intel, nouveau) read as 0, which agrees trivially.
-/// Returns an index into `cards`; caller guarantees len >= 2.
 pub fn integrated_card(cards: &[GpuCard]) -> Option<usize> {
     let min_vram = cards.iter().map(|c| c.vram).min()?;
     let by_vram: Vec<usize> = (0..cards.len())
@@ -122,35 +97,19 @@ pub fn integrated_card(cards: &[GpuCard]) -> Option<usize> {
     None
 }
 
-/// Colon-free device node for AQ_DRM_DEVICES. We SELECT by the stable PCI
-/// by-path but EMIT the resolved cardN node: AQ_DRM_DEVICES is
-/// colon-separated and PCI by-path names contain colons, so aquamarine
-/// would shatter a by-path value on every ':'.
 pub fn devnode(card: &GpuCard) -> String {
     format!("/dev/dri/{}", card.card)
 }
 
-/// Whether the discrete GPU's runtime PM must be pinned awake
-/// (`power/control=on`, blocking D3cold autosuspend) for this mode. Only
-/// `dgpu` mode pins it: on Framework 16 a D3cold resume can leave the
-/// discrete display engine wedged (`amdgpu: [drm] Cannot find any crtc or
-/// sizes`) until a cold boot, and dgpu mode keeps the card the active
-/// renderer deliberately, so it must never autosuspend. Every other mode
-/// (`auto`/`igpu`/`off`) leaves runtime PM at `auto` so the idle dGPU still
-/// suspends for battery.
 pub fn dgpu_runtime_pm_pinned(mode: GpuMode) -> bool {
     matches!(mode, GpuMode::Dgpu)
 }
 
-/// pci-0000:03:00.0 from .../pci-0000:03:00.0-card — the stable per-card
-/// key used in the state-file snapshot and powerd's dpm row labels.
 pub fn pci_key(path: &str) -> &str {
     let base = path.rsplit('/').next().unwrap_or(path);
     base.strip_suffix("-card").unwrap_or(base)
 }
 
-/// Pure: (device list primary-first, reason) or (None, reason) = unmanaged
-/// (caller prints nothing; Hyprland falls back to its own defaults).
 pub fn gpu_desired(
     snap: &GpuSnapshot,
     mode: GpuMode,
@@ -169,11 +128,6 @@ pub fn gpu_desired(
         return (None, "ambiguous-integrated".into());
     };
     if snap.lid_closed && !snap.cards.iter().any(|c| c.external > 0) {
-        // Docked cold boot: DP links can still be down at early-login sysfs
-        // read. Omitting the dock's GPU here would leave a lid-closed
-        // session with no usable output (and the lid FSM would
-        // suspend-loop). The caller does one settle retry; persistent ->
-        // unmanaged.
         return (None, "bailed-transient".into());
     }
 
@@ -206,15 +160,10 @@ pub fn gpu_desired(
         GpuMode::Off => unreachable!(),
     };
 
-    // In auto mode, list every non-primary candidate, even display-less ones:
-    // aquamarine (>= PR#239 / 0.10) deinitializes a secondary renderer with no
-    // enabled outputs, so amdgpu runtime PM suspends the idle dGPU anyway. Listing
-    // it keeps it available for live hotplug and PRIME offload at zero idle cost.
-    // igpu/dgpu keep the strict rule (display-less discretes omitted -> unopened).
     let keep_idle = mode == GpuMode::Auto;
     let mut devices = vec![primary];
     if integrated != primary {
-        devices.push(integrated); // integrated always listed (eDP/hotplug)
+        devices.push(integrated);
     }
     for &i in &discretes {
         if i == primary {
@@ -225,8 +174,6 @@ pub fn gpu_desired(
         }
     }
 
-    // Usable-output invariant: never emit a list under which nothing can
-    // light up — a connected external on a listed card, or eDP + lid open.
     let usable = devices.iter().any(|&i| snap.cards[i].external > 0)
         || (!snap.lid_closed && devices.iter().any(|&i| snap.cards[i].edp > 0));
     if !usable {
@@ -261,7 +208,6 @@ mod tests {
         }
     }
 
-    /// Framework-16-shaped snapshot: iGPU has boot_vga + small VRAM.
     fn fw16(igpu_edp: u32, dgpu_external: u32) -> Vec<GpuCard> {
         vec![
             card(
@@ -298,7 +244,6 @@ mod tests {
 
     #[test]
     fn test_integrated_disagreement_is_none() {
-        // boot_vga on the big-VRAM card (muxed laptop): signals disagree.
         let cards = vec![
             card("a", "card0", 1, 8 << 30, 0, 0),
             card("b", "card1", 0, 512 << 20, 0, 0),
@@ -317,7 +262,6 @@ mod tests {
 
     #[test]
     fn test_integrated_vram_tie_without_boot_vga_is_none() {
-        // Both vram=0 (Intel-style missing mem_info_vram_total).
         let cards = vec![
             card("a", "card0", 0, 0, 0, 0),
             card("b", "card1", 0, 0, 0, 0),
@@ -379,19 +323,12 @@ mod tests {
             GpuMode::Auto,
             GpuModeSource::Default,
         );
-        // iGPU primary, idle dGPU listed as trailing secondary: aquamarine deinits
-        // it (no enabled outputs) -> runtime PM suspends it, but it stays available
-        // for live hotplug / PRIME offload.
         assert_eq!(devices.unwrap(), vec!["/dev/dri/card2", "/dev/dri/card1"]);
         assert_eq!(reason, "dgpu-idle-listed");
     }
 
     #[test]
     fn test_gpu_auto_idle_dgpu_listed_without_igpu() {
-        // Dual-discrete, no real iGPU: card0 (boot_vga + smaller VRAM) classifies
-        // as "integrated" and is primary; the display-less card1 is still listed
-        // as a trailing secondary (topology-agnostic: the rule is about
-        // non-primary candidates, not about an integrated GPU existing).
         let cards = vec![
             card("a", "card0", 1, 4 << 30, 0, 1),
             card("b", "card1", 0, 16 << 30, 0, 0),
@@ -445,8 +382,6 @@ mod tests {
         assert_eq!(reason, "bailed-transient");
     }
 
-    /// Lid open but eDP not connected and no externals anywhere: any list we
-    /// could emit lights nothing up -> must bail, never print.
     #[test]
     fn test_gpu_usable_output_invariant() {
         let (devices, reason) = gpu_desired(
@@ -470,21 +405,17 @@ mod tests {
     fn test_resolve_gpu_mode_precedence() {
         use GpuMode::*;
         use GpuModeSource::*;
-        // Override wins over everything.
         let (m, s, w) = resolve_gpu_mode(Some("dgpu"), Some("igpu"), Some("low-power"));
         assert_eq!((m, s), (Dgpu, Override));
         assert!(w.is_empty());
-        // Override "auto" falls through silently; unknown warns + falls through.
         let (m, s, w) = resolve_gpu_mode(Some("auto"), Some("igpu"), None);
         assert_eq!((m, s), (Igpu, Profile));
         assert!(w.is_empty());
         let (m, s, w) = resolve_gpu_mode(Some("sideways"), None, Some("performance"));
         assert_eq!((m, s), (Dgpu, Platform));
         assert_eq!(w.len(), 1);
-        // Overlay "auto"/missing falls through to platform_profile.
         let (m, s, _) = resolve_gpu_mode(None, Some("auto"), Some("quiet"));
         assert_eq!((m, s), (Igpu, Platform));
-        // balanced and friends are deliberately auto.
         for word in ["balanced", "balanced-performance", "cool", "custom", "???"] {
             let (m, s, _) = resolve_gpu_mode(None, None, Some(word));
             assert_eq!((m, s), (Auto, Default));

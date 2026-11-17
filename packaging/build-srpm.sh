@@ -1,18 +1,4 @@
 #!/bin/bash
-# Build the SRPM (source tarball from a git tag + vendored cargo deps) and
-# optionally submit it to COPR.
-#
-# Release flow (Fedora + Arch from the same tag):
-#   1. Bump Cargo.toml version + spec Version (+ %changelog) + PKGBUILD
-#      pkgver — one commit.
-#   2. git tag vX.Y.Z && git push --tags
-#   CI does the rest (see README "Releasing"): the release workflow builds
-#   and publishes the Arch package, and COPR rebuilds the SRPM off its
-#   GitHub webhook via .copr/Makefile (which runs this script with --head).
-#
-# This script stays fully usable locally:
-#   --head builds from HEAD instead of the tag (testing only — never
-#   submit a --head build); --copr does a manual COPR submit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +10,6 @@ COPR_PROJECT="${COPR_PROJECT:-$NAME}"
 VER=$(sed -n 's/^Version:[[:space:]]*//p' "$SPEC")
 CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' "$REPO/Cargo.toml" | head -1)
 PKGBUILD_VER=$(sed -n 's/^pkgver=//p' "$REPO/packaging/PKGBUILD")
-# Cargo.lock's own entry for this package (guards a stale lock).
 LOCK_VER=$(awk '/^name = "hyprstate"$/{getline; gsub(/version = "|"/,""); print; exit}' "$REPO/Cargo.lock")
 mismatch=""
 [ "$CARGO_VER" = "$VER" ] || mismatch="$mismatch\n  Cargo.toml=$CARGO_VER"
@@ -61,8 +46,6 @@ tar -cJf "$SOURCES/hyprstate-$VER-vendor.tar.xz" -C "$VENDOR_DIR/src" vendor
 echo "==> building SRPM"
 SRPM=$(rpmbuild -bs "$SPEC" | sed -n 's/^Wrote: //p')
 echo "    $SRPM"
-# rpmlint is gated in CI against the SRPM and binary RPMs together. Linting
-# the SRPM alone treats binary-only filters as unused errors.
 
 if [ "${1:-}" = "--copr" ]; then
     echo "==> submitting to COPR project $COPR_PROJECT"

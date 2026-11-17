@@ -1,20 +1,14 @@
-//! sysfs/procfs readers. All best-effort: missing files and read errors
-//! resolve to defaults, mirroring v1's tolerance of partial hardware.
-
 use std::fs;
 use std::path::Path;
 
 use crate::paths;
 use crate::pure::gpu::{GpuCard, GpuSnapshot};
 
-/// First whitespace-separated word of a file, or None when unreadable/empty.
 pub fn read_first_word(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     text.split_whitespace().next().map(str::to_string)
 }
 
-/// Integer file content with v1's base-0 semantics (a leading 0x reads as
-/// hex); `default` on any failure.
 pub fn read_int(path: &Path, default: u64) -> u64 {
     let Ok(text) = fs::read_to_string(path) else {
         return default;
@@ -28,7 +22,6 @@ pub fn read_int(path: &Path, default: u64) -> u64 {
     parsed.unwrap_or(default)
 }
 
-/// (external, edp) connected-connector counts for cardN.
 fn card_connectors(card: &str) -> (u32, u32) {
     let (mut external, mut edp) = (0, 0);
     let Ok(entries) = fs::read_dir("/sys/class/drm") else {
@@ -54,9 +47,6 @@ fn card_connectors(card: &str) -> (u32, u32) {
     (external, edp)
 }
 
-/// Every connected, non-writeback output as `(connector, card)` — e.g.
-/// `("DP-1", "card1")`. Drives `gpu status`'s per-output view: which GPU each
-/// display hangs off, hence whether it's on the cross-GPU copy path.
 pub fn connected_outputs() -> Vec<(String, String)> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir("/sys/class/drm") else {
@@ -64,8 +54,6 @@ pub fn connected_outputs() -> Vec<(String, String)> {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // `cardN-<connector>`; the bare `cardN` device and `renderD*` have no
-        // '-' and are skipped, as is `*-Writeback-*`.
         let Some((card, connector)) = name.split_once('-') else {
             continue;
         };
@@ -81,11 +69,6 @@ pub fn connected_outputs() -> Vec<(String, String)> {
     out
 }
 
-/// AC state from /sys/class/power_supply, the UPower-down fallback. `Some`
-/// for the first supply whose `type` is `Mains`; `None` when there is none
-/// (desktop, VM, or no adapter driver). Matched on `type`, not on the
-/// name: Framework's adapter is `ACAD`, the Asahi macsmc driver's is
-/// `macsmc-ac`, and a name filter that fits one misses the other.
 pub fn on_ac_sysfs() -> Option<bool> {
     let entries = fs::read_dir("/sys/class/power_supply").ok()?;
     let mut supplies: Vec<(String, String)> = entries
@@ -100,7 +83,6 @@ pub fn on_ac_sysfs() -> Option<bool> {
     on_ac_from_supplies(&supplies)
 }
 
-/// Pure half of `on_ac_sysfs`: `(type, online)` file contents per supply.
 pub fn on_ac_from_supplies(supplies: &[(String, String)]) -> Option<bool> {
     supplies
         .iter()
@@ -108,7 +90,6 @@ pub fn on_ac_from_supplies(supplies: &[(String, String)]) -> Option<bool> {
         .map(|(_, online)| online.trim() == "1")
 }
 
-/// Lid state without logind (D-Bus is unavailable at `gpu select` time).
 pub fn lid_closed_sysfs() -> bool {
     let Ok(entries) = fs::read_dir(paths::LID_STATE_GLOB_DIR) else {
         return false;
@@ -121,13 +102,6 @@ pub fn lid_closed_sysfs() -> bool {
     false
 }
 
-/// Enumerate GPU candidates from /dev/dri/by-path. A candidate must be a
-/// PCI display-class device (class 0x03*) with no usb segment in its
-/// by-path name — this excludes DisplayLink/evdi and platform devices,
-/// which are never listed in AQ_DRM_DEVICES (untested scanout path). If
-/// such a non-candidate has a connected output, the snapshot flags it so
-/// selection can bail to today's open-all-GPUs behavior instead of killing
-/// that output.
 pub fn gpu_snapshot() -> GpuSnapshot {
     let mut cards: Vec<GpuCard> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
@@ -196,21 +170,18 @@ mod tests {
         (format!("{kind}\n"), format!("{online}\n"))
     }
 
-    /// Framework 16: the adapter is `ACAD`; a USB-C source may sit beside it.
     #[test]
     fn framework_adapter_is_matched_by_type() {
         let supplies = [s("Battery", ""), s("Mains", "1"), s("USB", "0")];
         assert_eq!(on_ac_from_supplies(&supplies), Some(true));
     }
 
-    /// Asahi: `macsmc-ac` starts with no `A`; a name filter never saw it.
     #[test]
     fn asahi_adapter_is_matched_by_type_not_name() {
         let supplies = [s("Mains", "0"), s("Battery", "")];
         assert_eq!(on_ac_from_supplies(&supplies), Some(false));
     }
 
-    /// A desktop has no Mains supply: unknown, not "on battery".
     #[test]
     fn no_mains_supply_is_unknown() {
         assert_eq!(on_ac_from_supplies(&[s("Battery", "")]), None);

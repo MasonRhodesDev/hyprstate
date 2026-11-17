@@ -1,7 +1,3 @@
-//! Every filesystem path and tunable constant in one place (port of
-//! hyprstate.py's constants block). Functions return fresh PathBufs; nothing
-//! here touches the filesystem.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,52 +5,29 @@ pub const PLATFORM_PROFILE_PATH: &str = "/sys/firmware/acpi/platform_profile";
 pub const DRI_BY_PATH: &str = "/dev/dri/by-path";
 pub const LID_STATE_GLOB_DIR: &str = "/proc/acpi/button/lid";
 
-/// Settle retry delay for `gpu select` on a bailed-transient (docked cold
-/// boot where DP links aren't up at early-login sysfs read).
 pub const GPU_SETTLE: Duration = Duration::from_millis(500);
-
-// ---- daemon timing ----
 
 pub const GRACE_SECONDS: Duration = Duration::from_secs(30);
 pub const LOCK_WAIT: Duration = Duration::from_secs(2);
-/// Reconnect delay for an event source whose subscription or socket
-/// dropped (D-Bus signal streams, the uevent socket).
 pub const SOURCE_RETRY: Duration = Duration::from_secs(2);
-/// The reconciler runs on events. This is the one slow timer under it: a
-/// pass this long after the last one, as the net under a missed signal.
 pub const SAFETY_TICK: Duration = Duration::from_secs(300);
-/// How long a burst of reconcile triggers (a hotplug is several socket2
-/// lines plus a profile apply) settles before one snapshot is taken.
 pub const RECONCILE_SETTLE: Duration = Duration::from_secs(2);
-/// Offset from SIGRTMIN of the signal waybar's `custom/power-profile`
-/// module re-runs its exec on (hypr-DE waybar config `"signal": 9`). The
-/// daemon raises it whenever what the module renders changes.
 pub const WAYBAR_POWER_SIGNAL: i32 = 9;
-/// The one sampler left: while Deferred waits on a Wayland idle-inhibit
-/// claim (lid closed mid-call), `hyprctl clients` is asked this often
-/// whether the claim is still held. No compositor event announces release.
 pub const DEFERRED_CLAIM_POLL: Duration = Duration::from_secs(5);
-/// Coalesce monitor add/remove bursts before profile reconciliation.
 pub const PROFILE_DEBOUNCE: Duration = Duration::from_millis(500);
-/// AC plug-jiggle settle window before power policy reacts.
 pub const POWER_AC_DEBOUNCE: Duration = Duration::from_secs(5);
 pub const GPU_NOTIFY_MIN: Duration = Duration::from_secs(60);
 
-/// logind inhibitor holders that do NOT count as "a real inhibitor is
-/// active" (baseline daemons + our own). Deliberately excludes
-/// `logind-idle-control` — that is the user's idle-inhibit toggle and must
-/// drive DEFERRED / Help like any other real idle block.
 pub const INHIBIT_BASELINE_WHO: [&str; 7] = [
     "ModemManager",
     "NetworkManager",
     "UPower",
     "hypridle",
     "hyprstate",
-    "hypr-power", // transitional; predecessor name
-    "hypr-fsm",   // transitional; earlier predecessor
+    "hypr-power",
+    "hypr-fsm",
 ];
 
-/// Hypr config tree: `$XDG_CONFIG_HOME/hypr` if set, else `$HOME/.config/hypr`.
 fn hypr_config(file: &str) -> PathBuf {
     match xdg_paths::ConfigDirs::from_env() {
         Ok(dirs) => dirs.config_dir("hypr").join(file),
@@ -62,15 +35,10 @@ fn hypr_config(file: &str) -> PathBuf {
     }
 }
 
-/// Runtime user state (deliberately not chezmoi-managed): manual GPU mode
-/// override, first word igpu|dgpu|off|auto.
 pub fn gpu_override_file() -> PathBuf {
     hypr_config("gpu-select")
 }
 
-/// Breadcrumb the daemon writes with the matched profile's `#@ gpu` value so
-/// next login's `gpu select` (pre-compositor, can't match profiles) computes
-/// from the same inputs.
 pub fn gpu_breadcrumb_file() -> PathBuf {
     hypr_config("gpu-profile")
 }
@@ -82,14 +50,10 @@ fn xdg_runtime_dir() -> PathBuf {
     }
 }
 
-/// Contract between `gpu select` (run by uwsm pre-compositor) and the
-/// daemon's drift detection. Schema v1, see GPU_SPEC.md.
 pub fn gpu_state_path() -> PathBuf {
     xdg_runtime_dir().join("hypr-gpu-primary.json")
 }
 
-/// Help telemetry socket. Empty `XDG_RUNTIME_DIR` yields a relative path;
-/// the emitter then fails closed (no `/run/user/<uid>` or `/tmp` fallback).
 pub fn telemetry_sock_path() -> PathBuf {
     xdg_runtime_dir().join("hyprstate-telemetry.sock")
 }
@@ -98,14 +62,6 @@ pub fn platform_profile_path() -> &'static Path {
     Path::new(PLATFORM_PROFILE_PATH)
 }
 
-// ---- monitor profiles ----
-
-/// Machine-wide profile directory, shared with the greeter. This is the whole
-/// point of the neutral format: one layout definition applied on both sides of
-/// login, instead of the session and the login screen disagreeing about which
-/// monitor is where. Packaged as 2775 root:monitor-profiles so members of that
-/// group can edit layouts without root, and world-readable so the unprivileged
-/// greeter user can read them.
 pub const SYSTEM_PROFILES_DIR: &str = "/etc/monitor-profiles";
 
 pub fn system_profiles_dir() -> &'static Path {
@@ -116,35 +72,18 @@ pub fn profiles_dir() -> PathBuf {
     hypr_config("profiles")
 }
 
-/// The symlink hypr-DE's main.lua dofiles; renders are Lua only.
 pub fn active_profile_link() -> PathBuf {
     profiles_dir().join(".active.lua")
 }
 
-/// Marker the daemon maintains with the resolved eDP policy: present = panel
-/// forced off. hyprland.lua checks it after the profile dofile so any config
-/// reload converges to the daemon's desired state instead of re-enabling the
-/// panel. Runtime state (deliberately not chezmoi-managed); absence = enabled,
-/// the fail-safe boot default.
 pub fn edp_off_marker() -> PathBuf {
     hypr_config("edp-off")
 }
-
-// ---- power policy (user side) ----
 
 pub fn power_conf_file() -> PathBuf {
     hypr_config("power.conf")
 }
 
-/// Standing idle-suspend request. Runtime dir on purpose: a reboot must
-/// clear it (a persistent request would suspend the machine at first idle
-/// after every boot), unlike the deliberate persistence of power-override.
-///
-/// `None` when there is no runtime dir. Unlike telemetry, this does NOT
-/// fall back to a relative path: a request written into the CLI's cwd
-/// (often `$HOME` for a user unit) would survive reboot and re-suspend the
-/// machine at first idle - the exact hazard the runtime dir avoids. No
-/// runtime dir means no request can be made or read, which is safe.
 pub fn suspend_request_file() -> Option<PathBuf> {
     match xdg_paths::BaseDirs::from_env() {
         Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate-suspend-request")),
@@ -152,9 +91,6 @@ pub fn suspend_request_file() -> Option<PathBuf> {
     }
 }
 
-/// Whether an idle-suspend request is standing. Existence is the signal;
-/// every reader keys on this so a zero-byte file cannot read as "standing"
-/// to one and "withdrawn" to another.
 pub fn suspend_request_standing() -> bool {
     suspend_request_file().is_some_and(|p| p.exists())
 }
@@ -163,17 +99,10 @@ pub fn power_override_file() -> PathBuf {
     hypr_config("power-override")
 }
 
-// ---- keyboard backlight ----
-
-/// The stored level (percent) the keyboard backlight policy lights the keys
-/// at. Written by `hyprstate kbd set|up|down`, persistent like power-override.
 pub fn kbd_level_file() -> PathBuf {
     hypr_config("kbd-level")
 }
 
-/// The manual override marker: present while a key press keeps the keys lit
-/// in a lit room. Runtime dir so a reboot clears it; the daemon removes it
-/// when typing stops.
 pub fn kbd_override_file() -> Option<PathBuf> {
     match xdg_paths::BaseDirs::from_env() {
         Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate-kbd-override")),
@@ -181,9 +110,6 @@ pub fn kbd_override_file() -> Option<PathBuf> {
     }
 }
 
-/// Daemon-written snapshot for `hyprstate kbd status`. In a subdirectory on
-/// purpose: the state-file task watches the runtime dir itself (inotify is
-/// not recursive), and a status write must not wake it.
 pub fn kbd_status_file() -> Option<PathBuf> {
     match xdg_paths::BaseDirs::from_env() {
         Ok(dirs) => Some(dirs.runtime_dir().join("hyprstate").join("kbd-status.json")),
@@ -191,40 +117,20 @@ pub fn kbd_status_file() -> Option<PathBuf> {
     }
 }
 
-// ---- sleep hook / usb wake ----
-
 pub const SLEEP_HOOK_LOG: &str = "/var/log/hyprstate-sleep.log";
 pub const WAKE_USB_CONTROLLER: &str = "/sys/bus/pci/devices/0000:0e:00.3/power/wakeup";
-/// (idVendor, idProduct) -> label for the input devices the hook tracks.
 pub const WAKE_USB_VENDORS: [((&str, &str), &str); 2] = [
     (("3297", "1977"), "ZSA Voyager (keyboard)"),
     (("046d", "c539"), "Logitech Lightspeed (mouse receiver)"),
 ];
 
-// The PIXA i2c-HID touchpad wedges on resume: the device stays half-alive
-// (button events pass through, motion is silently dropped) until re-enumerated.
-// Unbind/bind on post-resume forces a clean udev remove/add so the compositor's
-// libinput backend recreates the device instead of reusing the wedged one.
-//
-// Two sysfs markers, deliberately tracked separately (see rebind_touchpad):
-//   I2C_DEVICES_DIR/<client>     — symlink iff the device is present on the bus
-//   I2C_HID_DRIVER_DIR/<client>  — symlink iff it is currently *bound*
-// The driver dir also holds the bind/unbind files; writing the client name to
-// unbind then bind cycles it. A device can be present-but-unbound (e.g. a prior
-// failed bind), which is exactly the state a bind should recover — so the skip
-// guard keys on presence, never on bound-ness.
 pub const I2C_HID_DRIVER_DIR: &str = "/sys/bus/i2c/drivers/i2c_hid_acpi";
 pub const I2C_DEVICES_DIR: &str = "/sys/bus/i2c/devices";
 pub const TOUCHPAD_I2C_CLIENT: &str = "i2c-PIXA3854:00";
 
-// ---- powerd (root effector; see POWER_SPEC.md) ----
-
 pub const POWERD_BUS: &str = "org.hyprstate.Power1";
 pub const POWERD_PATH: &str = "/org/hyprstate/Power1";
 pub const POWERD_STATE_FILE: &str = "/var/lib/hyprstate/profile";
-/// Persisted discrete-GPU runtime-PM pin (`on`|`auto`), pushed by the daemon
-/// when the resolved GPU mode is `dgpu`. powerd re-applies it on resume (the
-/// FW16 DCN D3cold wedge). tmp+rename atomic; missing → `auto`.
 pub const POWERD_DGPU_PIN_FILE: &str = "/var/lib/hyprstate/dgpu-pin";
 pub const PLATFORM_PROFILE_CHOICES_PATH: &str = "/sys/firmware/acpi/platform_profile_choices";
 pub const CPUFREQ_DIR: &str = "/sys/devices/system/cpu/cpufreq";

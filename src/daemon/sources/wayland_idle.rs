@@ -1,16 +1,3 @@
-//! Typing detection for the keyboard backlight: ext-idle-notify-v1 on a
-//! Wayland connection of the daemon's own. The compositor tells us when
-//! input has been idle for `kbd-idle` seconds and when it resumes; nothing
-//! polls. Version 2 of the protocol has `get_input_idle_notification`,
-//! which ignores idle inhibitors, and that is the one typing wants: a video
-//! playing in a dark room must not keep the keys lit. On a compositor that
-//! only speaks version 1 the inhibitor-aware request is used and logged.
-//!
-//! The socket is discovered from the live instance first (line 2 of
-//! `hyprland.lock` under the instance dir hypr-ipc resolves), then from
-//! `WAYLAND_DISPLAY`: the environment names the instance the daemon was
-//! started under, which is stale after a compositor crash and restart.
-
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
@@ -31,17 +18,12 @@ use wayland_protocols::ext::idle_notify::v1::client::{
 use crate::daemon::event::Event;
 use crate::paths;
 
-/// Wayland socket of the live Hyprland instance: line 2 of its lock file,
-/// absolute or relative to the runtime dir. None when there is no instance
-/// or the lock has no second line (older Hyprland).
 pub fn live_wayland_socket() -> Option<PathBuf> {
     let dir = hypr_ipc::instance_dir().ok()?;
     let lock = std::fs::read_to_string(dir.join(hypr_ipc::LOCK_NAME)).ok()?;
     socket_from_lock(&lock, dir.parent()?.parent()?)
 }
 
-/// Pure half of `live_wayland_socket`: `lock` is the file body, `runtime`
-/// the directory a relative socket name lives in.
 pub fn socket_from_lock(lock: &str, runtime: &std::path::Path) -> Option<PathBuf> {
     let name = lock.lines().nth(1)?.trim();
     if name.is_empty() {
@@ -55,8 +37,6 @@ pub fn socket_from_lock(lock: &str, runtime: &std::path::Path) -> Option<PathBuf
     })
 }
 
-/// Per-connection dispatch state: idle edges land here and are drained
-/// into the event channel between dispatches.
 #[derive(Default)]
 struct State {
     pending: Vec<bool>,
@@ -71,7 +51,6 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // The GlobalList keeps the global table; nothing to do per event.
     }
 }
 
@@ -102,8 +81,6 @@ struct Session {
     fd: AsyncFd<OwnedFd>,
 }
 
-/// Connect, bind the globals and create the notification. Blocking (the
-/// registry roundtrip has no timeout), so it runs on the blocking pool.
 fn connect(timeout_ms: u32) -> Result<(Session, bool), String> {
     let conn = match live_wayland_socket() {
         Some(path) => {
@@ -134,8 +111,6 @@ fn connect(timeout_ms: u32) -> Result<(Session, bool), String> {
         .poll_fd()
         .try_clone_to_owned()
         .map_err(|e| format!("dup socket: {e}"))?;
-    // SAFETY: `fd` is an OwnedFd duplicated just above. The AsyncFd takes
-    // ownership of it, so it stays open and unchanged for the AsyncFd's life.
     let fd = unsafe { AsyncFd::register(fd) }.map_err(|e| format!("register socket: {e}"))?;
     Ok((
         Session {
@@ -148,9 +123,6 @@ fn connect(timeout_ms: u32) -> Result<(Session, bool), String> {
     ))
 }
 
-/// Keep one idle notification alive against the live compositor and turn
-/// its idled/resumed events into `Event::KbdIdle`. Reconnects (re-resolving
-/// the socket) after any error, so a compositor restart costs one retry.
 pub async fn idle_notify_task(tx: mpsc::Sender<Event>, idle: Duration) {
     let timeout_ms = idle.as_millis().min(u32::MAX as u128) as u32;
     loop {
@@ -189,7 +161,6 @@ pub async fn idle_notify_task(tx: mpsc::Sender<Event>, idle: Duration) {
 }
 
 enum Loop {
-    /// The dispatcher is gone.
     Closed,
     Wayland(String),
 }
@@ -205,7 +176,6 @@ async fn run(s: &mut Session, tx: &mpsc::Sender<Event>) -> Result<(), Loop> {
                 return Err(Loop::Closed);
             }
         }
-        // None means events are already queued: dispatch them first.
         let Some(guard) = s.queue.prepare_read() else {
             continue;
         };
@@ -231,8 +201,6 @@ mod tests {
     use super::socket_from_lock;
     use std::path::Path;
 
-    /// Hyprland writes `pid\nwayland-N\n`; the name is relative to the
-    /// runtime dir the instance dir lives in.
     #[test]
     fn socket_name_comes_from_line_two() {
         let p = socket_from_lock("4242\nwayland-1\n", Path::new("/run/user/1000")).unwrap();
@@ -241,8 +209,6 @@ mod tests {
         assert_eq!(abs, Path::new("/tmp/wl/wayland-9"));
     }
 
-    /// An older lock with only the PID yields nothing; the env fallback
-    /// takes over.
     #[test]
     fn pid_only_lock_has_no_socket() {
         assert_eq!(

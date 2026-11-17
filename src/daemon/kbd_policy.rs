@@ -1,9 +1,3 @@
-//! Keyboard backlight orchestration (POWER_SPEC "Keyboard backlight"): sense
-//! what the pure rule table needs, decide, write the LED, publish a status
-//! snapshot for the CLI. Runs only on the events that can change the
-//! answer; the sensor is read only when asked (a resume, a manual key press,
-//! an LED hotplug, startup), never on a timer.
-
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -13,8 +7,6 @@ use crate::paths;
 use crate::pure::kbd::{KbdInputs, is_dark, kbd_lit};
 use crate::sysio::kbd::read_lux;
 
-/// What `hyprstate kbd status` shows for the daemon-side fields. Written
-/// tmp+rename to `kbd_status_file()` whenever it changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KbdStatus {
     pub lit: bool,
@@ -52,9 +44,6 @@ impl KbdStatus {
     }
 }
 
-/// Decide and apply. `sample` re-reads the ambient light sensor first: true
-/// on the events the spec names (resume, a manual key press), false on lock,
-/// sleep and idle, where darkness cannot change the answer.
 pub async fn kbd_policy_check(ctx: &mut Context, fx: &Effectors, sample: bool) {
     if !ctx.kbd_active() {
         return;
@@ -85,7 +74,6 @@ pub async fn kbd_policy_check(ctx: &mut Context, fx: &Effectors, sample: bool) {
     fx.kbd_write_status(ctx, lit);
 }
 
-/// Status file body for the CLI; None when there is no runtime dir.
 pub fn status_path() -> Option<std::path::PathBuf> {
     paths::kbd_status_file()
 }

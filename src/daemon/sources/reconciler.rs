@@ -1,12 +1,3 @@
-//! The reconciler: gathers the world for the dispatcher to diff and repair.
-//!
-//! It used to run every 5 s. On a laptop that was one `hyprctl` child plus
-//! three D-Bus round trips every five seconds for ever, which is exactly the
-//! kind of wakeup a battery cannot afford. It now runs when something that
-//! can move the world has happened (compositor events, lock and unlock,
-//! resume, AC changes) and otherwise once per `SAFETY_TICK` as the net under
-//! a missed signal. A burst of triggers coalesces into one pass.
-
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
@@ -16,13 +7,8 @@ use crate::paths;
 use crate::sysio::{hyprctl, sysfs};
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 
-/// Why a reconcile pass was asked for. Logged with the pass so drift can be
-/// traced back to the event that exposed it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileTrigger {
-    /// One pass shortly after start: the 5 s loop used to repair a
-    /// boot-on-battery with UPower down within seconds (V8), and the
-    /// stuck-DPMS cursor baseline wants an early first sample.
     Startup,
     MonitorHotplug,
     ConfigReloaded,
@@ -33,7 +19,6 @@ pub enum ReconcileTrigger {
     Resumed,
     AcChanged,
     BatteryLowChanged,
-    /// The uevent socket overflowed; something may have been missed.
     UeventsLost,
     SafetyTick,
 }
@@ -57,7 +42,6 @@ impl ReconcileTrigger {
     }
 }
 
-/// Join a burst of triggers into one log-friendly reason string.
 pub fn describe(reasons: &[ReconcileTrigger]) -> String {
     let mut names: Vec<&'static str> = Vec::new();
     for r in reasons {
@@ -68,11 +52,6 @@ pub fn describe(reasons: &[ReconcileTrigger]) -> String {
     names.join(", ")
 }
 
-/// Wait for a trigger (or the safety tick), let the burst settle, gather one
-/// snapshot and hand it to the dispatcher. `manager` and `session` must be
-/// UNCACHED proxies: catching missed PropertiesChanged signals is this
-/// task's whole purpose. `tick` is bumped on every safety tick so the
-/// state-file task re-reads its inputs on the same cadence.
 pub async fn reconcile_task(
     tx: mpsc::Sender<Event>,
     mut triggers: mpsc::Receiver<ReconcileTrigger>,
@@ -83,8 +62,6 @@ pub async fn reconcile_task(
     lid_present: bool,
 ) {
     loop {
-        // The tick is armed fresh after every pass, so it fires only after
-        // SAFETY_TICK of nothing else having prompted a reconcile.
         let first = tokio::select! {
             t = triggers.recv() => match t {
                 Some(t) => t,
@@ -96,9 +73,6 @@ pub async fn reconcile_task(
             tick.send_modify(|n| *n += 1);
         }
         let mut reasons = vec![first];
-        // Coalesce: a hotplug is several socket2 lines, a profile apply, and
-        // a reload within a second or two. One pass after the dust settles
-        // sees the end state instead of three passes seeing three halves.
         let settle = tokio::time::sleep(paths::RECONCILE_SETTLE);
         tokio::pin!(settle);
         loop {
@@ -125,17 +99,12 @@ pub async fn reconcile_task(
     }
 }
 
-/// One world snapshot. None when the lid read failed on a lid-present
-/// machine (a bad lid read must not fabricate a state).
 async fn gather(
     manager: &LogindManagerProxy<'static>,
     session: Option<&LogindSessionProxy<'static>>,
     ext_prev: &mut u32,
     lid_present: bool,
 ) -> Option<ReconcileSnapshot> {
-    // A lidless machine never reads the lid: there is nothing to read, and
-    // a logind error here must not skip the pass that also repairs the
-    // idle-suspend request.
     let lid = if lid_present {
         match manager.lid_closed().await {
             Ok(v) => v,
@@ -147,8 +116,6 @@ async fn gather(
     } else {
         false
     };
-    // One monitors payload per pass: ext count, eDP state and the
-    // stuck-blank check all read the same JSON.
     let monitors = hyprctl::monitors().await;
     let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), *ext_prev);
     *ext_prev = ext;
@@ -169,8 +136,6 @@ async fn gather(
     let dpms_off = monitors
         .as_deref()
         .map(hyprctl::any_enabled_monitor_dpms_off_in);
-    // The cursor is only ever needed to decide whether a *dark* session
-    // has a human in front of it; sample it only when something is blank.
     let cursor_pos = match dpms_off {
         Some(true) => hyprctl::cursor_pos().await,
         _ => None,

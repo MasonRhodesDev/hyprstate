@@ -1,15 +1,9 @@
-//! Power policy: base states, the policy map, platform_profile value
-//! mapping, battery-low hysteresis, and self-write bookkeeping (see
-//! POWER_SPEC.md). Time-dependent functions take `Instant` parameters —
-//! nothing here reads a clock.
-
 use std::time::{Duration, Instant};
 
 use crate::kbd::{DEFAULT_KBD_DARK_LUX, DEFAULT_KBD_IDLE_SECS, MAX_KBD_IDLE_SECS};
 
 pub const BATTERY_LOW_EXIT_DELTA: u8 = 3;
 pub const DEFAULT_BATTERY_LOW_PCT: u8 = 15;
-/// Adoption suppression window after any ApplyProfile call.
 pub const ADOPT_SUPPRESS: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +29,6 @@ impl PowerProfile {
     }
 }
 
-/// The string was not one of `power-saver | balanced | performance`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParsePowerProfileError;
 
@@ -60,10 +53,6 @@ impl std::str::FromStr for PowerProfile {
     }
 }
 
-/// platform_profile value fallback chain per profile, validated against
-/// `_choices` at apply time. Also the self-write acceptance set: ANY value
-/// in a chain counts as our own write (quiet-only firmware writes "quiet"
-/// when we asked for power-saver).
 pub fn platform_profile_chain(p: PowerProfile) -> &'static [&'static str] {
     match p {
         PowerProfile::PowerSaver => &["low-power", "quiet"],
@@ -72,8 +61,6 @@ pub fn platform_profile_chain(p: PowerProfile) -> &'static [&'static str] {
     }
 }
 
-/// Map an externally-written platform_profile value back to a profile
-/// (adopt-don't-revert path).
 pub fn profile_from_platform_value(value: Option<&str>) -> PowerProfile {
     match value {
         Some("low-power") | Some("quiet") => PowerProfile::PowerSaver,
@@ -101,14 +88,6 @@ impl BaseState {
     }
 }
 
-/// Pure: docked-ac | ac | battery | battery-low.
-///
-/// The AC axis is decided by `on_ac_settled` ALONE. Desktops never observe
-/// an AC-unplug, so they sit permanently on the AC side without a special
-/// case — while a laptop with UPower down (battery percentage unknowable)
-/// still reaches the battery profiles via the reconciler's sysfs on_ac
-/// repair. `low_battery` is never true without a known battery, so it alone
-/// gates the low branch.
 pub fn power_base_state(on_ac_settled: bool, ext_mon_count: u32, low_battery: bool) -> BaseState {
     if on_ac_settled {
         if ext_mon_count >= 1 {
@@ -136,8 +115,6 @@ pub fn ac_axis(base: BaseState) -> AcAxis {
     }
 }
 
-/// Battery-low hysteresis step: enter at <= threshold, exit at >= threshold
-/// + EXIT_DELTA, otherwise hold.
 pub fn battery_low_step(low: bool, pct: f64, threshold: u8) -> bool {
     if !low && pct <= threshold as f64 {
         true
@@ -148,7 +125,6 @@ pub fn battery_low_step(low: bool, pct: f64, threshold: u8) -> bool {
     }
 }
 
-/// base-state -> profile map from ~/.config/hypr/power.conf.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PowerPolicy {
     pub docked_ac: PowerProfile,
@@ -179,16 +155,6 @@ impl PowerPolicy {
     }
 }
 
-/// Parse power.conf text -> (policy, battery-low %, warnings). Missing keys
-/// fall back to defaults; invalid values warn + keep the default. The io
-/// layer handles the missing-file case (also defaults) and logs warnings.
-/// Whether this machine has a lid at all. `power.conf` `#@ lid = ...`.
-/// Default `Present` keeps today's behavior (the handle-lid-switch
-/// inhibitor is taken); `Absent` is the explicit opt-out for a lidless
-/// desktop, where the lid FSM route is dead and the inhibitor must not be
-/// held. There is deliberately no auto-probe: a false "absent" would let
-/// logind suspend a laptop unlocked on lid close, so absence must be
-/// declared, not guessed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LidMode {
     #[default]
@@ -216,13 +182,6 @@ impl std::str::FromStr for LidMode {
     }
 }
 
-/// What a lid close does while on AC (`#@ lid-ac = suspend|defer`).
-/// `Suspend` is the historical behaviour: the lid chain runs whatever the
-/// charger is doing. `Defer` neutralises the lid as a suspend TRIGGER while
-/// on AC, the way Docked does for an external monitor: the panel goes off
-/// and nothing counts down until the charger is pulled, when the ordinary
-/// countdown starts. It is a lid policy, not a keep-awake claim: a standing
-/// idle-suspend request still suspends, and the lock does not end it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LidAcPolicy {
     #[default]
@@ -250,8 +209,6 @@ impl std::str::FromStr for LidAcPolicy {
     }
 }
 
-/// `#@ kbd = auto|off`. `Off` means hyprstate never touches the keyboard
-/// backlight LED (and opens no Wayland connection for it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KbdMode {
     #[default]
@@ -279,38 +236,23 @@ impl std::str::FromStr for KbdMode {
     }
 }
 
-/// `#@ lid-grace` default: the lid-close countdown before lock and suspend.
 pub const DEFAULT_LID_GRACE_SECS: u16 = 30;
-/// Upper bound for `#@ lid-grace`; anything longer is a typo, not a grace.
 pub const MAX_LID_GRACE_SECS: u16 = 600;
 
-/// Everything `power.conf` declares. Additive superset of the tuple
-/// `parse_power_policy` returns, so the GUI's dependency on that signature
-/// is untouched.
 #[derive(Debug, Clone)]
 pub struct PowerConf {
     pub policy: PowerPolicy,
     pub battery_low_pct: u8,
     pub lid: LidMode,
-    /// Seconds between a lid close and the lock-then-suspend. 0 locks and
-    /// suspends at once. Governs the LID countdown only; request-driven
-    /// countdowns (idle, battery-low) keep the fixed 30 s plug-in window.
     pub lid_grace_secs: u16,
     pub lid_ac: LidAcPolicy,
-    /// Keyboard backlight policy (see `crate::kbd`).
     pub kbd: KbdMode,
-    /// Seconds of no input before the keys go dark.
     pub kbd_idle_secs: u16,
-    /// Sensor reading at or below which the room counts as dark.
     pub kbd_dark_lux: u32,
 }
 
 impl Default for PowerConf {
     fn default() -> Self {
-        // NOT #[derive(Default)]: a bare u8 defaults to 0, which would make
-        // BatteryLow unreachable and pin a no-power.conf laptop to the
-        // `battery` profile down to 0%. The parser already uses this
-        // constant; the missing-file path must match it.
         Self {
             policy: PowerPolicy::default(),
             battery_low_pct: DEFAULT_BATTERY_LOW_PCT,
@@ -324,7 +266,6 @@ impl Default for PowerConf {
     }
 }
 
-/// Thin wrapper: the original tuple contract, preserved for the GUI.
 pub fn parse_power_policy(text: &str) -> (PowerPolicy, u8, Vec<String>) {
     let (conf, warnings) = parse_power_conf(text);
     (conf.policy, conf.battery_low_pct, warnings)
@@ -446,10 +387,6 @@ pub fn parse_power_conf(text: &str) -> (PowerConf, Vec<String>) {
     )
 }
 
-/// Self-write detection for platform_profile: tracks the expected values
-/// (full fallback chain) of in-flight applies plus a suppression window
-/// after any apply. Entries are registered BEFORE the ApplyProfile call so
-/// the sysfs watch can't observe the change ahead of the bookkeeping.
 #[derive(Debug, Default)]
 pub struct SelfWriteTracker {
     pub entries: Vec<(Instant, &'static [&'static str])>,
@@ -463,8 +400,6 @@ impl SelfWriteTracker {
         self.last_apply = Some(now);
     }
 
-    /// True if a platform_profile change is one of our own in-flight applies
-    /// (entry consumed) or inside the adoption-suppression window.
     pub fn is_self_write(&mut self, now: Instant, value: Option<&str>) -> bool {
         self.entries.retain(|(expiry, _)| *expiry > now);
         if let Some(v) = value
@@ -493,15 +428,11 @@ mod tests {
         assert_eq!(power_base_state(false, 0, true), BaseState::BatteryLow);
     }
 
-    /// Regression (structural in v2): an unknown battery percentage (UPower
-    /// down) must not pin the axis to AC — the axis is on_ac_settled alone,
-    /// battery_percent is not even an input.
     #[test]
     fn test_power_base_state_upower_down_on_battery() {
         assert_eq!(power_base_state(false, 0, false), BaseState::Battery);
     }
 
-    /// Desktops never observe an unplug: on_ac_settled stays true.
     #[test]
     fn test_power_base_state_desktop_stays_ac() {
         assert_eq!(power_base_state(true, 0, false), BaseState::Ac);
@@ -542,10 +473,8 @@ mod tests {
 
     #[test]
     fn test_battery_low_hysteresis() {
-        // Enter at <= threshold.
         assert!(battery_low_step(false, 15.0, 15));
         assert!(!battery_low_step(false, 16.0, 15));
-        // Exit only at >= threshold + 3.
         assert!(battery_low_step(true, 17.0, 15));
         assert!(!battery_low_step(true, 18.0, 15));
     }
@@ -555,9 +484,8 @@ mod tests {
         let t0 = Instant::now();
         let mut tracker = SelfWriteTracker::default();
         tracker.register(t0, PowerProfile::PowerSaver);
-        // quiet-only firmware: we asked for power-saver, kernel wrote "quiet".
         assert!(tracker.is_self_write(t0 + Duration::from_secs(1), Some("quiet")));
-        assert!(tracker.entries.is_empty()); // entry consumed
+        assert!(tracker.entries.is_empty());
     }
 
     #[test]
@@ -575,7 +503,6 @@ mod tests {
         let t0 = Instant::now();
         let mut tracker = SelfWriteTracker::default();
         tracker.register(t0, PowerProfile::Balanced);
-        // Any value inside the window counts as ours.
         assert!(tracker.is_self_write(t0 + Duration::from_secs(1), Some("performance")));
     }
 
@@ -590,7 +517,6 @@ mod tests {
         let t0 = Instant::now();
         let mut tracker = SelfWriteTracker::default();
         tracker.register(t0, PowerProfile::PowerSaver);
-        // 100s later the entry has expired: not a self write, entry pruned.
         assert!(!tracker.is_self_write(t0 + Duration::from_secs(100), Some("low-power")));
         assert!(tracker.entries.is_empty());
     }
@@ -614,9 +540,9 @@ mod tests {
         );
         assert_eq!(policy.docked_ac, PowerProfile::Performance);
         assert_eq!(policy.battery, PowerProfile::PowerSaver);
-        assert_eq!(policy.ac, PowerProfile::Balanced); // invalid value -> default kept
-        assert_eq!(pct, 50); // clamped to [1, 50]
-        assert_eq!(warnings.len(), 2); // warp-speed + mystery-knob
+        assert_eq!(policy.ac, PowerProfile::Balanced);
+        assert_eq!(pct, 50);
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]
@@ -659,17 +585,12 @@ mod tests {
 
     #[test]
     fn parse_power_policy_wrapper_is_silent_on_lid() {
-        // The GUI's tuple contract: a lid directive is not its concern and
-        // must not surface as a warning through the wrapper.
         let (_policy, _pct, warnings) = parse_power_policy("#@ lid = absent");
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
     fn default_conf_keeps_the_battery_low_threshold() {
-        // Regression guard: the missing-power.conf path (load_power_conf's
-        // Err branch returns PowerConf::default) must not zero the low
-        // threshold. A bare u8 derive did exactly that.
         assert_eq!(
             PowerConf::default().battery_low_pct,
             DEFAULT_BATTERY_LOW_PCT
@@ -696,8 +617,6 @@ mod tests {
         assert_eq!(PowerConf::default().lid_grace_secs, DEFAULT_LID_GRACE_SECS);
     }
 
-    /// mason-air: no countdown at all, and a closed lid on the charger
-    /// does not suspend.
     #[test]
     fn lid_grace_zero_and_lid_ac_defer_parse() {
         let (conf, warnings) = parse_power_conf("#@ lid-grace = 0\n#@ lid-ac = defer\n");

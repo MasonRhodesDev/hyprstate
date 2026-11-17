@@ -1,23 +1,9 @@
-//! hyprstate: lid / monitor / profile / lock / suspend / wake state machine
-//! for Hyprland. Rust port of hyprstate.py (v2) — see POWER_SPEC.md and
-//! GPU_SPEC.md for the behavioral contracts shared with v1.
-//!
-//! Architecture (daemon):
-//!   Layer 1 — effectors:      narrow, idempotent world mutations.
-//!   Layer 2 — on_enter:       composes effectors; the only place effects fire.
-//!   Layer 3 — pure/:          (state, inputs) -> state maps; no I/O at all.
-
 mod cli;
 mod daemon;
-// dead_code: a few proxy methods exist for completeness of the pinned
-// interface shapes rather than current callers.
 #[allow(dead_code)]
 mod dbus;
 mod paths;
 mod powerd;
-// The pure (I/O-free) FSM + policy layer now lives in its own crate so the GUI
-// can share the exact same types. Aliased to `pure` so the daemon's existing
-// `crate::pure::...` paths are unchanged.
 use hyprstate_fsm as pure;
 mod sleep_hook;
 #[allow(dead_code)]
@@ -34,32 +20,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run the FSM (via systemd --user)
     Daemon {
-        /// Log decisions only: no effectors fire, no lid inhibitor is taken.
-        /// Safe to run alongside the live (Python) daemon for parity diffing.
         #[arg(long, hide = true)]
         shadow: bool,
     },
-    /// Root power effector (systemd system service, org.hyprstate.Power1)
     Powerd {
-        /// Dev/testing: serve on the session bus instead of the system bus.
-        /// Sysfs writes degrade to skipped-unsupported when unprivileged.
         #[arg(long, hide = true)]
         session: bool,
     },
-    /// Invoked by /usr/lib/systemd/system-sleep/ as root
     SleepHook {
         action: Option<String>,
-        /// suspend|hibernate|... — passed by systemd, ignored
         sleep_type: Option<String>,
     },
-    /// GPU-primary selection (uwsm + drift status)
     Gpu {
         #[arg(value_parser = ["select", "check", "status"])]
         action: String,
     },
-    /// Power profile policy
     Power {
         #[arg(value_parser = ["set", "get", "cycle", "status"])]
         action: String,
@@ -67,75 +43,33 @@ enum Cmd {
         #[arg(long)]
         waybar: bool,
     },
-    /// Monitor profiles (save captures the live layout as a new profile)
     Profile {
         #[arg(value_parser = ["list", "current", "switch", "save", "migrate", "verify"])]
         action: String,
         name: Option<String>,
-        /// save: eDP policy directive for the captured profile
         #[arg(long, value_parser = ["auto", "enable", "disable"], default_value = "auto")]
         edp: String,
-        /// save: render-GPU preference directive
         #[arg(long, value_parser = ["auto", "igpu", "dgpu"], default_value = "auto")]
         gpu: String,
-        /// save: explicit `#@ priority` (default: implicit match count)
         #[arg(long)]
         priority: Option<i64>,
-        /// save: overwrite an existing profile
         #[arg(long)]
         force: bool,
-        /// migrate: report conversions without writing TOML files
         #[arg(long)]
         dry_run: bool,
     },
-    /// Keyboard backlight: manual level keys and the policy's status
     Kbd {
         #[arg(value_parser = ["status", "set", "up", "down", "auto"])]
         action: String,
-        /// set: percent 0..100
         value: Option<String>,
     },
-    /// Idle-suspend request (driven by hypridle; feeds the daemon's
-    /// Countdown machinery, never suspends directly)
     Suspend {
         #[arg(value_parser = ["request", "cancel", "status"])]
         action: String,
     },
-    /// systemctl + journalctl + gpu + power summary
     Status,
 }
 
-/// Human log to stdout, span-lines records to stderr.
-///
-/// Two layers on one registry rather than a `fmt` subscriber: the records
-/// have to go somewhere a machine can read them, and the existing prose log
-/// is what a person reads. They are separate streams so neither has to
-/// compromise for the other.
-///
-/// The allowlist is the single target `hyprstate.trace`, which nothing
-/// reaches by accident. Two reasons it is not simply `hyprstate`:
-///
-/// Installing a subscriber makes the process collect every instrumented
-/// crate in its tree - zbus is in there, carrying D-Bus paths and peer
-/// names - and this daemon's journal should hold its own state machine,
-/// not its dependencies' internals.
-///
-/// And `tracing`'s default target is the module path, so `hyprstate` would
-/// also admit `hyprstate::daemon` - every `info!` in the crate. That was
-/// not theoretical: the first version of this duplicated the entire prose
-/// log into the record stream as percent-encoded `event=log` lines, which
-/// is both unreadable and the exact noise the format exists to avoid. A
-/// dotted name cannot collide with a module path, which uses `::`.
-///
-/// `install` rather than `layer`: it registers with `span_lines::exit`, so
-/// the state span open at shutdown is closed and marked rather than lost.
-///
-/// The fmt layer carries its own filter. A bare `fmt::layer()` on a
-/// registry has no level cap (the `fmt()` builder this replaces defaulted
-/// to INFO), so every `debug!` in the crate would start reaching the
-/// journal; and it would also print the `hyprstate.trace` events, putting
-/// each transition on stdout twice. INFO by default, that one target off:
-/// the prose log reads exactly as it did before the records existed.
 fn init_tracing() {
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::filter::{LevelFilter, Targets};
@@ -232,10 +166,5 @@ fn main() {
         Cmd::Suspend { action } => cli::suspend::run(&action),
         Cmd::Status => cli::status::run(),
     };
-    // Closes any span still open; a bare process::exit runs no destructors,
-    // so it would otherwise be lost - and a daemon's last state is the one
-    // worth having. On a signal the dispatcher has already dropped its
-    // Context, so the final occupancy span arrives as a completed record
-    // and this call finds nothing open; it is the error paths that need it.
     span_lines::exit(rc);
 }

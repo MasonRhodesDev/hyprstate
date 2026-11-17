@@ -1,5 +1,3 @@
-//! User-facing subcommands.
-
 pub mod gpu;
 pub mod kbd;
 pub mod power;

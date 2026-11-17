@@ -1,8 +1,3 @@
-//! powerd's sysfs knob matrix (see POWER_SPEC.md). Mechanism only, no
-//! policy: three profile names map onto a hardcoded whitelist of sysfs
-//! writes. Every row is read-before-write idempotent; row failures land as
-//! result strings, never as a failed ApplyProfile.
-
 use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -22,8 +17,6 @@ fn governor(p: PowerProfile) -> &'static str {
     }
 }
 
-/// EPP value; None for performance (implied by the performance governor,
-/// and writing it under that governor EBUSYs anyway).
 fn epp(p: PowerProfile) -> Option<&'static str> {
     match p {
         PowerProfile::PowerSaver => Some("power"),
@@ -53,10 +46,6 @@ fn aspm(p: PowerProfile) -> &'static str {
     }
 }
 
-/// Idempotent single-knob write -> result enum string. EBUSY/EPERM/EACCES
-/// are 'skipped-unsupported' (EPP locked by performance governor,
-/// BIOS-locked turbo, BIOS-disabled ASPM) — expected hardware conditions,
-/// not errors.
 fn knob_write(path: &Path, value: &str) -> String {
     match fs::read_to_string(path) {
         Ok(cur) if cur.trim() == value => return "unchanged".into(),
@@ -75,7 +64,6 @@ fn knob_write(path: &Path, value: &str) -> String {
     }
 }
 
-/// Collapse per-CPU-policy statuses into one result entry.
 fn merge_row(statuses: &[String]) -> String {
     if statuses.is_empty() {
         return "skipped-missing".into();
@@ -124,10 +112,6 @@ fn cpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
     let epp_capable = p0.join("energy_performance_preference").exists()
         || matches!(driver.as_str(), "amd-pstate-epp" | "intel_pstate");
     if !epp_capable {
-        // On acpi-cpufreq "powersave" PINS MIN FREQUENCY (our balanced
-        // profile would crawl); on schedutil kernels our values don't exist.
-        // Only EPP drivers interpret powersave/performance the way this
-        // matrix means.
         res.insert("scaling_governor".into(), "skipped-unsupported".into());
         res.insert(
             "energy_performance_preference".into(),
@@ -150,7 +134,6 @@ fn cpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
         .collect();
     res.insert("scaling_governor".into(), merge_row(&gov_statuses));
     if let Some(epp_val) = epp(profile) {
-        // Written AFTER governor; EBUSY tolerated.
         let epp_statuses: Vec<String> = policies
             .iter()
             .map(|pol| knob_write(&pol.join("energy_performance_preference"), epp_val))
@@ -168,7 +151,6 @@ fn boost_row(profile: PowerProfile, res: &mut HashMap<String, String>) {
     if boost_path.exists() {
         res.insert("boost".into(), knob_write(&boost_path, boost(profile)));
     } else if no_turbo.exists() {
-        // Inverted semantics: no_turbo=1 disables boost.
         let val = if profile == PowerProfile::PowerSaver {
             "1"
         } else {
@@ -192,8 +174,6 @@ fn gpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
         None
     };
     let Some(integrated) = integrated else {
-        // Single-card desktops must not have their only (discrete) GPU
-        // misclassified and clamped; classification needs >= 2 cards.
         res.insert("gpu".into(), "skipped-ambiguous".into());
         return;
     };
@@ -205,8 +185,6 @@ fn gpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
             res.insert(label, knob_write(&knob, "auto"));
             continue;
         }
-        // runtime_status FIRST — opening the dpm knob on a runtime-suspended
-        // card wakes it, destroying the GPU-omission power win.
         match fs::read_to_string(dev.join("power/runtime_status")) {
             Ok(s) if s.trim() == "suspended" => {
                 res.insert(label, "skipped-suspended".into());
@@ -221,17 +199,6 @@ fn gpu_rows(profile: PowerProfile, res: &mut HashMap<String, String>) {
     }
 }
 
-/// Pin (`awake=true` → `power/control=on`) or release (`auto`) discrete-GPU
-/// runtime PM. The daemon pushes `on` whenever the resolved GPU mode is
-/// `dgpu`: on Framework 16 a D3cold autosuspend/resume can wedge the discrete
-/// display engine (`amdgpu: [drm] Cannot find any crtc or sizes`) until a cold
-/// boot, so the card the session renders on must never drop to D3cold. Every
-/// other mode pushes `auto` so an idle dGPU still suspends for battery.
-///
-/// Mechanism only; the dgpu-vs-other decision lives in `pure::gpu`. Discovery
-/// guards mirror `gpu_rows` (≥2 cards + unambiguous integrated). Unlike the
-/// dpm knob, `power/control` is the autosuspend gate itself — reading or
-/// writing it does NOT wake a suspended card — so no runtime_status guard.
 pub fn apply_dgpu_runtime_pm(awake: bool) -> HashMap<String, String> {
     let mut res = HashMap::new();
     let snap = gpu_snapshot();
@@ -258,7 +225,6 @@ pub fn apply_dgpu_runtime_pm(awake: bool) -> HashMap<String, String> {
     res
 }
 
-/// Persisted dgpu pin; missing/invalid → false (`auto`, the kernel default).
 pub fn persisted_dgpu_pin() -> bool {
     fs::read_to_string(paths::POWERD_DGPU_PIN_FILE)
         .ok()
@@ -280,7 +246,6 @@ pub fn persist_dgpu_pin(awake: bool) {
     }
 }
 
-/// The currently-selected ASPM policy is the bracket-annotated word.
 fn aspm_current(opts: &str) -> Option<String> {
     opts.split_whitespace()
         .find(|o| o.starts_with('['))
@@ -294,7 +259,7 @@ fn aspm_row(profile: PowerProfile, res: &mut HashMap<String, String>, writable: 
         return;
     }
     if !writable {
-        res.insert("pcie_aspm".into(), "skipped-unsupported".into()); // BIOS-disabled ASPM
+        res.insert("pcie_aspm".into(), "skipped-unsupported".into());
         return;
     }
     let opts = match fs::read_to_string(path) {
@@ -335,8 +300,6 @@ fn platform_row(profile: PowerProfile, res: &mut HashMap<String, String>) {
     res.insert("platform_profile".into(), status);
 }
 
-/// Apply the whitelist for `profile`. Rows are independent; a row that hits
-/// unexpected I/O conditions reports `error:<msg>` in its slot.
 pub fn powerd_apply(profile: PowerProfile, aspm_writable: bool) -> HashMap<String, String> {
     let mut res = HashMap::new();
     platform_row(profile, &mut res);
@@ -347,7 +310,6 @@ pub fn powerd_apply(profile: PowerProfile, aspm_writable: bool) -> HashMap<Strin
     res
 }
 
-/// Persisted active profile; invalid/missing -> balanced + warning.
 pub fn persisted_profile() -> PowerProfile {
     if let Ok(text) = fs::read_to_string(paths::POWERD_STATE_FILE)
         && let Some(word) = text.split_whitespace().next()
@@ -375,7 +337,6 @@ pub fn persist_profile(profile: PowerProfile) {
     }
 }
 
-/// Read-only live values for GetKnobs / status.
 pub fn knob_snapshot() -> HashMap<String, String> {
     let mut out = HashMap::new();
     let cpufreq = Path::new(paths::CPUFREQ_DIR);
@@ -412,8 +373,6 @@ pub fn knob_snapshot() -> HashMap<String, String> {
             }
             Err(_) => {}
         }
-        // power/control is safe to read on a suspended card (it's the
-        // autosuspend gate, not a register access) — surfaces the dgpu pin.
         if let Ok(v) = fs::read_to_string(dev.join("power/control")) {
             out.insert(
                 format!("runtime_pm:{}", pci_key(&c.path)),
@@ -424,8 +383,6 @@ pub fn knob_snapshot() -> HashMap<String, String> {
     out
 }
 
-/// One same-value rewrite probe at startup; EPERM means BIOS-disabled ASPM
-/// and the row is skipped-unsupported forever.
 pub fn aspm_writability_probe() -> bool {
     let path = Path::new(paths::ASPM_POLICY_PATH);
     let Ok(opts) = fs::read_to_string(path) else {

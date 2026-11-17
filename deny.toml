@@ -1,18 +1,10 @@
-# cargo-deny configuration — supply-chain gate for a root-privileged daemon.
-# Run locally with `cargo deny check`; CI runs it on PRs, pushes, and weekly.
-
 [advisories]
 version = 2
 yanked = "deny"
-# Add RUSTSEC IDs here (with a justifying comment) only if an advisory is
-# confirmed not to affect us and a fix isn't yet available.
 ignore = []
 
 [licenses]
 version = 2
-# Permissive set actually present in the tree (see `cargo metadata`). The one
-# `... OR LGPL-2.1-or-later` dep is satisfied by its MIT/Apache alternative, so
-# LGPL is intentionally NOT allowed.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -30,9 +22,6 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# The workspace's own crates (hyprstate-fsm) are path deps with no version —
-# that's a "wildcard" to cargo-deny. Exempt local path deps; still catch a
-# real `foo = "*"` registry wildcard.
 allow-wildcard-paths = true
 
 [sources]
@@ -41,7 +30,5 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/MasonRhodesDev/monitor-profiles",
-    # span-lines, pinned by rev in Cargo.toml. cargo-deny matches repository
-    # URLs; Cargo.toml and Cargo.lock are what enforce the revision.
     "https://github.com/MasonRhodesDev/desktop-commons",
 ]

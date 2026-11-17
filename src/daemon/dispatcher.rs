@@ -1,16 +1,3 @@
-//! The event loop: ctx updates, the exact v1 routing topology, and Layer-2
-//! on_enter composition.
-//!
-//! Routing invariants ported from v1 (hyprstate.py dispatcher):
-//! - RECONCILE (configreloaded) re-asserts the current states only — it
-//!   never feeds desired_state — and ingests the active profile link (.active.lua) first.
-//! - MONITORS_CHANGED: profile apply -> breadcrumb -> gpu drift -> dgpu
-//!   runtime-PM pin -> power policy -> continue (never feeds the main FSM).
-//! - gpu drift advice on AC/platform/gpu-override events happens in
-//!   fall-through, NOT via RECONCILE; the dgpu pin rides the same gate.
-//! - power policy fall-through gate: BatteryLowChanged flips,
-//!   PowerOverrideChanged, PowerAcSettled.
-
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -41,9 +28,6 @@ pub enum Entry {
 }
 
 async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors) -> bool {
-    // The Deferred claim watch exists only while Deferred holds a Wayland
-    // claim; every other state (and a Deferred held by a logind claim,
-    // which is event-driven) stops it.
     if state == State::Deferred && ctx.wayland_inhibitor {
         fx.start_claim_watch(ctx);
     } else {
@@ -63,9 +47,6 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
         State::Deferred => {
             fx.cancel_grace_timer(ctx);
             fx.set_edp(false, ctx);
-            // Media is paused when a claim parked the lid (a video nobody
-            // is watching any more). A lid-ac hold is not a claim: a laptop
-            // closed on its charger keeps playing.
             if claim_governs(&ctx.world()) {
                 fx.pause_media();
             }
@@ -73,9 +54,6 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
         }
         State::Countdown => {
             fx.set_edp(false, ctx);
-            // A RECONCILE re-assert must NOT restart (extend) a live
-            // countdown — v1 silently reset the 30s window on every
-            // configreloaded.
             fx.start_grace_timer(ctx, entry == Entry::Fresh);
             true
         }
@@ -86,10 +64,6 @@ async fn on_enter(state: State, entry: Entry, ctx: &mut Context, fx: &Effectors)
     }
 }
 
-/// Sample the compositor's idle-inhibit claims right before a decision that
-/// turns on them (lid close, a suspend request). No event announces a
-/// client taking or dropping its inhibitor, so the flag is refreshed at the
-/// moment it matters instead of being polled for ever.
 async fn refresh_wayland_claim(ctx: &mut Context) {
     let Some(held) = hyprctl::wayland_idle_inhibited().await else {
         return;
@@ -103,15 +77,6 @@ async fn refresh_wayland_claim(ctx: &mut Context) {
     }
 }
 
-/// What decision 6 wants done, as a pure function of the power inputs.
-/// Request only when genuinely discharging low: BOTH the raw and the
-/// settled AC axis must be off - the raw one flips instantly at wake, so a
-/// machine that wakes on a charger inside the 5 s settle window must not
-/// self-request off a UPower percent event (review F2). Withdraw the
-/// moment the reason is gone: raw AC back OR the battery recovered - a
-/// plug-in during the 30 s grace must never ride to a suspend on the
-/// charger (review F1); the effector scopes the withdraw to the daemon's
-/// own "battery-low" file, so an idle-origin request stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatteryLowAction {
     Request,
@@ -134,16 +99,6 @@ fn battery_low_action(
     }
 }
 
-/// Decision 6 (POWER_SPEC.md ladder): the daemon requests its own suspend
-/// on low battery, and withdraws that request when the reason is gone. The
-/// request rides the ordinary machinery - grace, lock proof, cancellation -
-/// and `world_state` lets a battery-low request bypass the keep-awake claim
-/// gate, so a paused video cannot ride the battery to zero. ctx is marked
-/// standing only when the file was actually written (shadow and failed
-/// writes stay consistent with what readers see, review F3), and cleared
-/// only when the daemon's own file was actually removed - an idle-origin
-/// request is not the daemon's to withdraw. Returns whether anything
-/// changed.
 pub(crate) fn battery_low_request_check(ctx: &mut Context, fx: &Effectors) -> bool {
     match battery_low_action(
         ctx.low_battery,
@@ -172,8 +127,6 @@ pub(crate) fn battery_low_request_check(ctx: &mut Context, fx: &Effectors) -> bo
     }
 }
 
-/// Lock-before-suspend: proceed only after a live locker is proven.
-/// A cached/stuck LockedHint is not proof; abort the same way as lock-timeout.
 async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
     if fx.live_locker().await {
         info!("already locked; proceeding to suspend");
@@ -189,11 +142,6 @@ async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
     if fx.do_suspend().await {
         true
     } else {
-        // Same fail-closed shape as an unengaged lock: reject the
-        // transition so the caller re-arms a fresh grace and retries. A
-        // refused suspend (masked target, logind trouble) must never park
-        // the FSM in SUSPENDING - only Resumed leaves that state, and no
-        // Resumed ever comes for a suspend that did not happen.
         warn!("suspend refused - staying in COUNTDOWN to retry");
         false
     }
@@ -209,10 +157,6 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
         ctx.locked,
         ctx.on_ac,
     );
-    // The same fact in a shape a machine can read. The prose line above is
-    // for a person and stays; this one carries the world that produced the
-    // transition, so a reader can ask why it happened and not only that it
-    // did.
     tracing::event!(
         name: "state.transition",
         target: "hyprstate.trace",
@@ -224,24 +168,11 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
         inhibitor = ctx.inhibitor(),
         locked = ctx.locked,
         on_ac = ctx.on_ac,
-        // The two inputs world_state reads that the prose line does not
-        // show. A standing request short-circuits straight to COUNTDOWN
-        // and a lid-ac hold parks a closed lid; without them a reader
-        // cannot tell either transition from a plain lid or timer one.
         suspend_requested = ctx.suspend_requested,
         lid_ac_hold = ctx.world().lid_ac_hold,
     );
 }
 
-/// Replace the span covering the state the daemon occupies.
-///
-/// Dropping the outgoing span is what emits it, so its `dur_us` is how long
-/// the daemon actually sat in that state - the question the prose log
-/// cannot answer without someone subtracting timestamps by hand.
-///
-/// Not entered. A daemon has no single call stack to nest these under, and
-/// entering one would make every unrelated span opened afterwards its
-/// child.
 fn enter_state_span(ctx: &mut Context, to: State) {
     ctx.state_span = Some(tracing::info_span!(
         target: "hyprstate.trace",
@@ -250,7 +181,6 @@ fn enter_state_span(ctx: &mut Context, to: State) {
     ));
 }
 
-/// Run both transition maps for one event kind; fire on_enter on change.
 async fn evaluate_fsms(
     ctx: &mut Context,
     fx: &Effectors,
@@ -268,9 +198,6 @@ async fn evaluate_fsms(
                 ctx.state = new;
                 true
             } else {
-                // The timer transition is rejected when lock readiness is
-                // unconfirmed. Stay in COUNTDOWN and re-arm a fresh grace
-                // period so a later attempt can retry safely.
                 fx.start_grace_timer(ctx, true);
                 false
             }
@@ -284,7 +211,6 @@ async fn evaluate_fsms(
             enter_state_span(ctx, settled);
         }
 
-        // Best-effort telemetry — never affects FSM behavior.
         telem.emit_help(
             ctx,
             "transition",
@@ -306,12 +232,10 @@ async fn evaluate_fsms(
             ctx.locked,
             ctx.on_ac,
         );
-        // Ctx may still have changed (e.g. inhibitor while already LID_OPEN).
         telem.emit_help(ctx, "ctx", label, from, ctx.state, Vec::new());
     }
 }
 
-/// Map state to the effector names fired during on_enter (for telemetry).
 fn on_enter_effector_names(state: State, ctx: &Context) -> Vec<&'static str> {
     match state {
         State::LidOpen => vec!["cancel_grace_timer", "set_edp_on"],
@@ -325,8 +249,6 @@ fn on_enter_effector_names(state: State, ctx: &Context) -> Vec<&'static str> {
     }
 }
 
-/// MONITORS_CHANGED branch: profile apply -> breadcrumb -> gpu drift ->
-/// power policy. Never feeds the main FSM.
 async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors, telem: &mut TelemetryEmitter) {
     let signature = hyprctl::monitor_signature().await;
     let profiles = load_profiles();
@@ -343,21 +265,12 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors, telem: &mut 
         }
         Some(p) => fx.apply_profile(p, ctx),
     }
-    // Breadcrumb before drift check: "relog to apply" must be satisfiable
-    // by one relog, so next-login select needs the same profile overlay the
-    // drift computation is about to use.
     let gpu_pref = chosen.map(|p| p.gpu).unwrap_or(GpuPref::Auto);
     fx.write_gpu_breadcrumb(chosen.map(|p| p.gpu));
     let mode = gpu_drift_check(ctx, fx, "monitors changed", gpu_pref);
     fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
-    // Docked-ness (ext_mon_count) is a power-policy input.
     power_policy_check(ctx, fx).await;
 
-    // A dock topology change is both when Hyprland strands eDP workspaces
-    // (disable with no enabled backup during an undock flap) and when they
-    // become re-homeable (an external is back). Hyprland never re-homes them
-    // itself once stranded, so repair here whenever the eDP is meant to be
-    // off and an external exists to receive them.
     let edp_should_be_off = match ctx.edp_policy {
         EdpPolicy::Disable => true,
         EdpPolicy::Enable => false,
@@ -376,8 +289,6 @@ async fn handle_monitors_changed(ctx: &mut Context, fx: &Effectors, telem: &mut 
     );
 }
 
-/// Diff a reconciler snapshot against ctx; repair, route repairs back into
-/// the machines, and re-assert the eDP/DPMS invariants.
 async fn handle_reconcile_tick(
     snap: ReconcileSnapshot,
     ctx: &mut Context,
@@ -396,14 +307,8 @@ async fn handle_reconcile_tick(
         ctx.lid_closed = snap.lid_closed;
         fsm_drift = true;
     } else if !ctx.lid_present && snap.lid_closed {
-        // A closed lid reported on a machine declared lidless: log it, but
-        // never let it drive the FSM (that is the whole point of absent).
         warn!("reconciler: lid reported closed but power.conf declares lid absent — ignoring");
     }
-    // Re-read the file HERE, not from the snapshot: this handler runs after
-    // the Resumed arm (events are processed serially), so a snapshot taken
-    // before Resumed cleared the request cannot resurrect it. Existence is
-    // the signal, matching the state-file watch and the TimerExpired guard.
     let request_now = crate::paths::suspend_request_standing();
     if request_now != ctx.suspend_requested {
         drift.push(format!(
@@ -421,8 +326,6 @@ async fn handle_reconcile_tick(
         ctx.ext_mon_count = snap.ext_mon_count;
         fsm_drift = true;
         power_drift = true;
-        // Monitor events were evidently missed, so profile reconciliation
-        // was missed too — re-derive via the normal debounced path.
         fx.schedule_profile_reconcile(ctx);
     }
     if snap.logind_inhibitor != ctx.logind_inhibitor {
@@ -445,9 +348,6 @@ async fn handle_reconcile_tick(
     {
         drift.push(format!("locked {}->{locked} (LockedHint)", ctx.locked));
         ctx.locked = locked;
-        // Mirror into the watch channel: wait_for_lock reads it, and
-        // lock_watcher only sends on signal edges — which we evidently
-        // missed.
         let _ = fx.locked_tx.send(locked);
         fsm_drift = true;
     }
@@ -467,16 +367,11 @@ async fn handle_reconcile_tick(
         );
     }
 
-    // Repaired power inputs must reach power policy — covers
-    // boot-on-battery with UPower down.
     if power_drift {
         ctx.on_ac_settled = ctx.on_ac;
         power_policy_check(ctx, fx).await;
-        // Repaired power inputs feed decision 6 like live ones - covers
-        // boot-on-battery with UPower down (review F6).
         battery_low_request_check(ctx, fx);
     }
-    // Repaired FSM inputs must DRIVE the machines, not just describe them.
     if fsm_drift {
         evaluate_fsms(ctx, fx, EventKind::CtxRepaired, "CtxRepaired", telem).await;
     }
@@ -485,22 +380,13 @@ async fn handle_reconcile_tick(
         return;
     }
 
-    // Ingest any out-of-band .active.lua repoint before enforcing the eDP
-    // invariant — enforcing a stale edp_policy would fight a manual
-    // `profile switch` every pass.
     fx.ingest_active_profile(ctx);
 
-    // eDP invariant: the resolved policy (profile override or lid-driven
-    // default) vs reality.
     let should_be_enabled = match ctx.edp_policy {
         EdpPolicy::Disable => false,
         EdpPolicy::Enable => true,
         EdpPolicy::Auto => ctx.state == State::LidOpen,
     };
-    // The only output is on regardless (see `Effectors::set_edp`). Folding
-    // that in here makes this pass the backstop that turns a disabled panel
-    // back on once the externals are gone, and stops it asking every tick
-    // for a disable that set_edp would refuse.
     let should_be_enabled = edp_must_be_on(should_be_enabled, ctx.ext_mon_count);
     if let Some(disabled) = snap.edp_disabled {
         if should_be_enabled && disabled {
@@ -520,18 +406,10 @@ async fn handle_reconcile_tick(
         }
     }
 
-    // STUCK-DPMS backstop: hypridle can lose its own wake (see
-    // `dpms_stuck_off`), leaving a live session driving dark panels that no
-    // input will recover. Repair only when the blank is provably unowned.
     let cursor_moved = match (ctx.last_cursor_pos, snap.cursor_pos) {
         (Some(prev), Some(now)) => prev != now,
-        // First sample (or hyprctl failed) proves nothing either way.
         _ => false,
     };
-    // The cursor is only sampled while something is dark, so drop the
-    // baseline as soon as it is not. Keeping it would let a position left
-    // over from an earlier dark episode read as movement on the first tick
-    // of the next one and undo an ordinary idle blank immediately.
     ctx.last_cursor_pos = snap.cursor_pos;
     if let Some(dpms_off) = snap.dpms_off {
         let inputs = StuckScreenInputs {
@@ -565,9 +443,6 @@ async fn handle_reconcile_tick(
 pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors) {
     let mut telem = TelemetryEmitter::new();
     ctx.state = world_state(&ctx.world());
-    // The starting state is never transitioned into, so nothing else opens
-    // its span - and without it the first stretch of every daemon's life
-    // sits in no state at all.
     let initial = ctx.state;
     enter_state_span(&mut ctx, initial);
     info!(
@@ -588,11 +463,6 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         on_enter_effector_names(ctx.state, &ctx),
     );
 
-    // Initial dgpu runtime-PM pin. dgpu mode must block D3cold from login
-    // onward — the FW16 DCN wedge bites during the no-display-yet window
-    // before the compositor brings the dGPU's output up, so we can't wait for
-    // the first MONITORS_CHANGED. Independent of gpu_actual (mode resolves
-    // from the override/profile/platform inputs alone).
     {
         let signature = hyprctl::monitor_signature().await;
         let profiles = load_profiles();
@@ -605,12 +475,7 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     }
 
     fx.sync_waybar(&mut ctx);
-    // Keyboard backlight: decide once at startup (keys off until typing in
-    // a dark room; also the first sensor sample).
     kbd_policy_check(&mut ctx, &fx, true).await;
-    // The first pass runs RECONCILE_SETTLE after start instead of waiting
-    // for an event or the safety tick: it is what repairs on_ac from sysfs
-    // when UPower is down at boot (V8) and takes the first cursor sample.
     fx.request_reconcile(ReconcileTrigger::Startup);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -618,8 +483,6 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
         let ev = tokio::select! {
             ev = rx.recv() => match ev {
                 Some(ev) => ev,
-                // Every sender is gone, so nothing can arrive. Unreachable
-                // in practice (fx holds one), kept so the loop has an end.
                 None => break,
             },
             name = &mut shutdown => {
@@ -628,26 +491,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
             }
         };
         dispatch(ev, &mut ctx, &fx, &mut telem).await;
-        // Everything the bar renders may have moved; tell it once per event,
-        // after the effects (the apply) have landed.
         fx.sync_waybar(&mut ctx);
     }
-    // ctx owns the occupancy span of the state the daemon is leaving in.
-    // Dropping it here, with the subscriber still up and before main
-    // reaches span_lines::exit, emits that span as a completed record; the
-    // exit path would only mark it cut short (status=exit), and a kill
-    // would lose it outright.
     drop(ctx);
 }
 
-/// Resolves with the name of the first SIGTERM, SIGINT or SIGHUP to arrive.
-///
-/// `systemctl restart hyprstate` sends SIGTERM on every package upgrade, so
-/// this is the ordinary way the daemon ends, not an edge case. tokio's
-/// signal streams keep the handler itself trivial (a byte into a pipe); the
-/// loop then returns on its own, which is what lets destructors run. A
-/// stream that cannot be registered is logged and skipped: that signal then
-/// kills the daemon as before, and the loop runs on.
 async fn shutdown_signal() -> &'static str {
     let hook = |name: &'static str, kind: SignalKind| match signal(kind) {
         Ok(stream) => Some(stream),
@@ -668,8 +516,6 @@ async fn shutdown_signal() -> &'static str {
     }
 }
 
-/// One delivery of `sig`; never resolves when the stream is missing or
-/// has closed, so `shutdown_signal` can select over whichever registered.
 async fn recv_or_pending(sig: Option<&mut Signal>) {
     if let Some(sig) = sig
         && sig.recv().await.is_some()
@@ -679,19 +525,13 @@ async fn recv_or_pending(sig: Option<&mut Signal>) {
     std::future::pending::<()>().await
 }
 
-/// One event through the exact v1 routing topology.
 async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut TelemetryEmitter) {
     let kind = ev.kind();
     let label = ev.label();
 
-    // ---- branches that never reach the FSMs ----
     match ev {
         Event::ConfigReloaded | Event::ProfileApplied => {
             if ctx.state != State::Suspending {
-                // `profile switch` repoints .active.lua and reloads;
-                // ingest BEFORE re-asserting so set_edp uses the new
-                // profile's policy. (A daemon-side apply already updated
-                // ctx, so ingest is a no-op for ProfileApplied.)
                 fx.ingest_active_profile(ctx);
                 info!(
                     "RECONCILE ({}): re-asserting {}",
@@ -717,7 +557,7 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         }
         Event::MonitorsChanged => {
             handle_monitors_changed(ctx, fx, telem).await;
-            return; // profile reconciliation does not feed the main FSM
+            return;
         }
         Event::ProfilesChanged => {
             info!("PROFILE: source directory changed; re-resolving");
@@ -737,10 +577,8 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             ctx.kbd_typing = !idle;
             info!("KBD: {}", if idle { "input idle" } else { "typing" });
             if idle {
-                // The override lives exactly as long as typing does.
                 fx.kbd_release_override(ctx);
             }
-            // A resume is the moment the spec reads the sensor.
             kbd_policy_check(ctx, fx, !idle).await;
             return;
         }
@@ -762,13 +600,10 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             return;
         }
 
-        // ---- ctx updates that fall through to the FSMs ----
         Event::Lid(closed) => {
             if ctx.lid_present {
                 ctx.lid_closed = closed;
                 if closed {
-                    // Deferred vs Countdown turns on the claim set as
-                    // of right now.
                     refresh_wayland_claim(ctx).await;
                 }
             } else {
@@ -782,8 +617,6 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
                 if added { "added" } else { "removed" }
             );
             ctx.ext_mon_count = hyprctl::ext_monitor_count(ctx.ext_mon_count).await;
-            // Coalesce mode/scale negotiation bursts before profile
-            // reconciliation.
             fx.schedule_profile_reconcile(ctx);
             fx.request_reconcile(ReconcileTrigger::MonitorHotplug);
         }
@@ -797,77 +630,51 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         Event::LockChanged(locked) => {
             ctx.locked = locked;
             fx.request_reconcile(ReconcileTrigger::LockChanged);
-            // Rule 1: a locked session never lights the keys.
             kbd_policy_check(ctx, fx, false).await;
         }
         Event::AcChanged(on_ac) => {
-            // Two sources report AC: UPower's OnBattery and the kernel's
-            // power_supply uevent read from sysfs. Whichever lands
-            // second says what ctx already holds; dropping it is what
-            // keeps the 5 s settle from being re-armed or bypassed.
             if on_ac == ctx.on_ac {
                 debug!("AC: {label} already on_ac={on_ac}; ignoring");
                 return;
             }
             ctx.on_ac = on_ac;
             info!("AC: {label} (on_ac={on_ac})");
-            // Raw plug-in withdraws a battery-low request NOW, not
-            // after the 5 s settle: a suspend on the charger is the
-            // worse failure by far, so cancellation follows the fast
-            // signal while requests wait for both axes.
             battery_low_request_check(ctx, fx);
             fx.schedule_power_settle(ctx);
             fx.request_reconcile(ReconcileTrigger::AcChanged);
         }
         Event::PowerAcSettled => {
             ctx.on_ac_settled = ctx.on_ac;
-            // An unplug that settles while already low must request
-            // (decision 6), and a plug-in that settles must withdraw a
-            // standing battery-low request - re-derivation alone never
-            // cancels one, because suspend_requested short-circuits
-            // world_state (review F1).
             battery_low_request_check(ctx, fx);
         }
-        Event::PowerOverrideChanged(ref word) => {
-            // Echoes of the daemon's own writes arrive with ctx already
-            // matching; those land as no-ops by design.
-            match word.as_deref() {
-                None => {
-                    ctx.power_override = None;
+        Event::PowerOverrideChanged(ref word) => match word.as_deref() {
+            None => {
+                ctx.power_override = None;
+                ctx.power_override_base = None;
+            }
+            Some(w) => match w.parse::<crate::pure::power::PowerProfile>() {
+                Ok(p) if ctx.power_override == Some(p) => {}
+                Ok(p) => {
+                    ctx.power_override = Some(p);
                     ctx.power_override_base = None;
                 }
-                Some(w) => match w.parse::<crate::pure::power::PowerProfile>() {
-                    Ok(p) if ctx.power_override == Some(p) => {} // own echo
-                    Ok(p) => {
-                        ctx.power_override = Some(p);
-                        ctx.power_override_base = None; // stamped at next check
-                    }
-                    Err(_) => warn!("power-override: unknown profile {w:?}; ignoring"),
-                },
-            }
-        }
+                Err(_) => warn!("power-override: unknown profile {w:?}; ignoring"),
+            },
+        },
         Event::BatteryPercent(pct) => {
             ctx.battery_percent = Some(pct);
             let new_low = battery_low_step(ctx.low_battery, pct, ctx.battery_low_pct);
             let flipped = new_low != ctx.low_battery;
             ctx.low_battery = new_low;
-            // Decided model, decision 6: battery-low requests and
-            // withdrawals ride every percent event, not only the flip,
-            // so a machine that woke still-low re-requests (the 30 s
-            // grace is the plug-in window) and a recovery withdraws.
             let changed = battery_low_request_check(ctx, fx);
             if flipped {
                 fx.request_reconcile(ReconcileTrigger::BatteryLowChanged);
             }
             if !flipped && !changed {
-                return; // no flip -> no event existed in v1
+                return;
             }
         }
         Event::PlatformProfileChanged(ref value) => {
-            // Self-writes (or anything inside the suppression window of
-            // an apply) are ignored; external writes are adopted as a
-            // manual override, never reverted. Either way the event
-            // still falls through to the gpu-drift gate, as in v1.
             if ctx
                 .self_writes
                 .is_self_write(std::time::Instant::now(), value.as_deref())
@@ -887,8 +694,8 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
                 info!("powerd appeared on the bus; re-enabling power applies");
                 ctx.powerd_available = true;
                 ctx.powerd_warned = false;
-                ctx.power_applied = None; // force a re-apply
-                ctx.dgpu_pinned = None; // re-push the dgpu pin too
+                ctx.power_applied = None;
+                ctx.dgpu_pinned = None;
             }
             ctx.on_ac_settled = ctx.on_ac;
         }
@@ -906,29 +713,14 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             }
         }
         Event::TimerExpired => {
-            // Close the cancel-vs-expiry race: hypridle's on-resume
-            // deletes the request file on first input, the inotify echo
-            // of that is still in flight, and the grace timer can fire
-            // inside the gap. The file is the authority; a request the
-            // user just withdrew must not suspend the machine.
             if ctx.suspend_requested && !crate::paths::suspend_request_standing() {
                 info!("idle-suspend request withdrawn at grace expiry");
                 ctx.suspend_requested = false;
             }
         }
         Event::Resumed => {
-            // Clear BEFORE evaluate_fsms re-derives: Resumed maps
-            // Suspending back to world_state, and a stale standing
-            // request would re-enter Countdown - a wake that schedules
-            // its own next suspend, looping the machine. desktop-commons
-            // adds a conformance assertion pinning this ordering in the
-            // registry PR that follows.
             ctx.suspend_requested = false;
             fx.clear_suspend_request();
-            // The dock can leave while the machine sleeps, and no hotplug
-            // event is delivered for it until after this one. Re-read the
-            // count so the state derived below, and the only-output guard in
-            // set_edp, do not act on the monitors from before the suspend.
             ctx.ext_mon_count = hyprctl::ext_monitor_count(ctx.ext_mon_count).await;
             fx.request_reconcile(ReconcileTrigger::Resumed);
             ctx.kbd_sleeping = false;
@@ -936,13 +728,10 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         }
     }
 
-    // Re-arm the brightness takeover guard on resume: panel raw values
-    // drift across suspend and must not read as a user adjustment.
     if kind == EventKind::Resumed {
         fx.brightness_rearm(ctx);
     }
 
-    // GPU drift advice on power/override changes (NOT via RECONCILE).
     if matches!(
         kind,
         EventKind::AcPlugged
@@ -958,7 +747,6 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
         fx.sync_dgpu_pin(ctx, dgpu_runtime_pm_pinned(mode)).await;
     }
 
-    // Power policy evaluation on its (debounced/derived) inputs.
     if matches!(
         kind,
         EventKind::BatteryLowChanged | EventKind::PowerOverrideChanged | EventKind::PowerAcSettled
@@ -976,24 +764,18 @@ mod battery_low_tests {
 
     #[test]
     fn requests_only_when_genuinely_discharging_low() {
-        // (low, on_ac, on_ac_settled, standing) -> action
         assert_eq!(
             battery_low_action(true, false, false, false),
             BatteryLowAction::Request
         );
-        // Review F2: a machine that wakes on the charger has raw on_ac
-        // true while on_ac_settled is still false for the 5 s debounce; a
-        // UPower percent event in that window must NOT request.
         assert_eq!(
             battery_low_action(true, true, false, false),
             BatteryLowAction::Hold
         );
-        // Stale-true settled axis alone also blocks a request.
         assert_eq!(
             battery_low_action(true, false, true, false),
             BatteryLowAction::Hold
         );
-        // Not low, nothing standing: nothing to do.
         assert_eq!(
             battery_low_action(false, false, false, false),
             BatteryLowAction::Hold
@@ -1002,20 +784,14 @@ mod battery_low_tests {
 
     #[test]
     fn withdraws_the_moment_the_reason_is_gone() {
-        // Review F1: a plug-in during the 30 s grace must cancel the
-        // standing request - re-derivation alone cannot, because
-        // suspend_requested short-circuits world_state. The raw axis is
-        // enough: cancellation follows the fast signal.
         assert_eq!(
             battery_low_action(true, true, false, true),
             BatteryLowAction::Withdraw
         );
-        // Battery recovered (charged above threshold + hysteresis).
         assert_eq!(
             battery_low_action(false, false, false, true),
             BatteryLowAction::Withdraw
         );
-        // Still discharging low with a request standing: hold, idempotent.
         assert_eq!(
             battery_low_action(true, false, false, true),
             BatteryLowAction::Hold
@@ -1051,8 +827,6 @@ mod trace_tests {
             .to_string()
     }
 
-    /// A transition must reach the record stream, carrying the world that
-    /// produced it - and the daemon's prose log must not.
     #[test]
     fn a_transition_emits_one_record_and_the_prose_log_emits_none() {
         let sink = Collector::default();
@@ -1064,17 +838,12 @@ mod trace_tests {
         );
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
-            // Both set, so a field wired to the wrong input (every other
-            // bool here defaults to false) cannot pass by accident.
             let ctx = Context {
                 suspend_requested: true,
                 lid_ac: LidAcPolicy::Defer,
                 ..Context::default()
             };
             log_state_transition(&ctx, State::LidOpen, State::Docked, "monitor-added");
-            // Prose, at the module-path target. This is the line that used
-            // to be duplicated into the record stream as `event=log`,
-            // because the allowlist matched `hyprstate::daemon` too.
             info!("STATE: something a person reads");
         });
 

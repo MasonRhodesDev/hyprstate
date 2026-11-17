@@ -20,22 +20,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    #[command(about = "Run the FSM (via systemd --user)")]
     Daemon {
         #[arg(long, hide = true)]
         shadow: bool,
     },
+    #[command(about = "Root power effector (systemd system service, org.hyprstate.Power1)")]
     Powerd {
         #[arg(long, hide = true)]
         session: bool,
     },
+    #[command(about = "Invoked by /usr/lib/systemd/system-sleep/ as root")]
     SleepHook {
         action: Option<String>,
+        #[arg(help = "suspend|hibernate|... — passed by systemd, ignored")]
         sleep_type: Option<String>,
     },
+    #[command(about = "GPU-primary selection (uwsm + drift status)")]
     Gpu {
         #[arg(value_parser = ["select", "check", "status"])]
         action: String,
     },
+    #[command(about = "Power profile policy")]
     Power {
         #[arg(value_parser = ["set", "get", "cycle", "status"])]
         action: String,
@@ -43,30 +49,40 @@ enum Cmd {
         #[arg(long)]
         waybar: bool,
     },
+    #[command(about = "Monitor profiles (save captures the live layout as a new profile)")]
     Profile {
         #[arg(value_parser = ["list", "current", "switch", "save", "migrate", "verify"])]
         action: String,
         name: Option<String>,
-        #[arg(long, value_parser = ["auto", "enable", "disable"], default_value = "auto")]
+        #[arg(long, value_parser = ["auto", "enable", "disable"], default_value = "auto", help = "save: eDP policy directive for the captured profile")]
         edp: String,
-        #[arg(long, value_parser = ["auto", "igpu", "dgpu"], default_value = "auto")]
+        #[arg(long, value_parser = ["auto", "igpu", "dgpu"], default_value = "auto", help = "save: render-GPU preference directive")]
         gpu: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "save: explicit `#@ priority` (default: implicit match count)"
+        )]
         priority: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "save: overwrite an existing profile")]
         force: bool,
-        #[arg(long)]
+        #[arg(long, help = "migrate: report conversions without writing TOML files")]
         dry_run: bool,
     },
+    #[command(about = "Keyboard backlight: manual level keys and the policy's status")]
     Kbd {
         #[arg(value_parser = ["status", "set", "up", "down", "auto"])]
         action: String,
+        #[arg(help = "set: percent 0..100")]
         value: Option<String>,
     },
+    #[command(
+        about = "Idle-suspend request (driven by hypridle; feeds the daemon's Countdown machinery, never suspends directly)"
+    )]
     Suspend {
         #[arg(value_parser = ["request", "cancel", "status"])]
         action: String,
     },
+    #[command(about = "systemctl + journalctl + gpu + power summary")]
     Status,
 }
 

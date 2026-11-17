@@ -1,5 +1,3 @@
-//! Client proxy for org.hyprstate.Power1 (powerd).
-
 use std::collections::HashMap;
 
 use zbus::proxy;

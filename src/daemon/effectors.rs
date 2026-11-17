@@ -1,14 +1,3 @@
-//! Layer 1: narrow, idempotent world mutations.
-//!
-//! Two tiers: fire-and-forget subprocess effects go through a serialized
-//! worker task (a slow `hyprctl eval`/`reload` must never stall dispatch); effects
-//! whose results feed ctx (powerd ApplyProfile, Session.Lock, Suspend,
-//! SetBrightness) are awaited inline by the dispatcher, as v1 did.
-//!
-//! Shadow mode: every world mutation logs "[shadow] would ..." instead of
-//! firing. In-memory ctx still updates so decision logs stay diffable
-//! against the live v1 daemon.
-
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -30,29 +19,15 @@ use crate::pure::profiles::{
 use crate::sysio::hyprctl;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 
-/// Serialized subprocess effects (ordering between profile apply, reload and
-/// keyword matters for eDP handling).
 #[derive(Debug)]
 pub enum Cmd {
-    /// Ensure eDP enabled/disabled (read-before-write inside the worker).
     SetEdp {
         on: bool,
     },
-    /// Apply the rendered profile at `lua` to the live compositor by running
-    /// just that file (`hyprctl eval dofile(..)`), never a full reload. See
-    /// `apply_profile_args` for why. `ProfileApplied` follows on success.
     ApplyProfile {
         lua: String,
     },
-    /// Every output DPMS on: the stuck-DPMS repair. hyprstate never blanks
-    /// (hypridle owns every DPMS off), so there is no off variant to reach.
     DpmsOn,
-    /// Re-home workspaces stranded on the disabled eDP onto an external
-    /// monitor. Hyprland's `CMonitor::onDisconnect` evacuates workspaces
-    /// only to a monitor that was enabled at disable time, and never
-    /// retroactively re-homes them when an external returns — so an undock
-    /// flap pins them to the dead panel. Cheap no-op when nothing is
-    /// stranded.
     RehomeEdpWorkspaces,
     PauseMedia,
     Notify {
@@ -67,16 +42,9 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
     while let Some(cmd) = rx.recv().await {
         match cmd {
             Cmd::SetEdp { on } => {
-                // None = no eDP panel on this machine (desktop). Treat as a
-                // no-op: there is nothing to (re-)enable, and reloading here
-                // self-sustains — reload -> configreloaded -> RECONCILE ->
-                // SetEdp -> reload (observed at ~35 reloads/s once a reload
-                // storm primed it on the Lua config, 2026-07-07).
                 let Some(disabled) = hyprctl::edp_is_disabled().await else {
                     continue;
                 };
-                // Marker before the live flip: a reload racing in between
-                // still re-derives the desired state from the marker.
                 sync_edp_marker(on);
                 if on {
                     if !disabled {
@@ -98,14 +66,9 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
                 let args = apply_profile_args(&lua);
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 if !hyprctl::hyprctl_ok(&args).await {
-                    // ctx already recorded this profile as applied, so nothing
-                    // would retry: fall back to the heavy hammer rather than
-                    // leave the monitors on the wrong layout.
                     warn!("profile eval failed for {lua}; falling back to hyprctl reload");
                     hyprctl::hyprctl_ok(&["reload"]).await;
                 }
-                // Either path leaves the compositor on the new profile; a
-                // reload also emits configreloaded, this covers the eval path.
                 let _ = queue.send(Event::ProfileApplied).await;
             }
             Cmd::DpmsOn => {
@@ -119,8 +82,6 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
                     continue;
                 }
                 let Some(dest) = hyprctl::first_external_monitor().await else {
-                    // No external to receive them (racing an undock) — leave
-                    // them put; a later dock change retries.
                     continue;
                 };
                 for ws in stranded {
@@ -143,7 +104,6 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
                 .await;
             }
             Cmd::RunHook(cmd) => {
-                // Hooks are user-authored; shell for ~ expansion etc.
                 match tokio::process::Command::new("bash")
                     .args(["-lc", &cmd])
                     .spawn()
@@ -156,11 +116,6 @@ pub async fn effector_worker(mut rx: mpsc::Receiver<Cmd>, queue: mpsc::Sender<Ev
     }
 }
 
-/// Keep the edp-off marker (read by hyprland.lua after the profile dofile)
-/// in sync with the resolved policy, so any config reload converges to the
-/// daemon's desired eDP state instead of re-enabling the panel. Present =
-/// forced off; removed when the panel should be on (absence is the fail-safe
-/// boot default). Idempotent.
 fn sync_edp_marker(on: bool) {
     let file = paths::edp_off_marker();
     let result = if on {
@@ -193,8 +148,6 @@ async fn run_cmd(cmd: &str, args: &[&str]) {
     }
 }
 
-/// Whether the internal panel has to be on, given what the policy and the
-/// lid ask for. The only output is always on, whatever they ask.
 pub fn edp_must_be_on(wanted_on: bool, ext_mon_count: u32) -> bool {
     wanted_on || !edp_may_disable(ext_mon_count)
 }
@@ -207,11 +160,7 @@ pub struct Effectors {
     pub session: Option<LogindSessionProxy<'static>>,
     pub powerd: PowerdProxy<'static>,
     pub locked_rx: watch::Receiver<bool>,
-    /// Mirror for reconciler lock repairs — state, not an effect, so never
-    /// shadow-gated (same as lock_watcher's sends).
     pub locked_tx: watch::Sender<bool>,
-    /// Asks the reconciler for a pass. Not an effect: the pass only reads
-    /// the world, so shadow mode asks too.
     pub reconcile: mpsc::Sender<ReconcileTrigger>,
 }
 
@@ -226,32 +175,16 @@ impl Effectors {
         }
     }
 
-    /// Prompt a reconcile pass. A full queue is fine: triggers coalesce and
-    /// a pass is already pending.
     pub fn request_reconcile(&self, trigger: ReconcileTrigger) {
         let _ = self.reconcile.try_send(trigger);
     }
 
-    // ---- eDP / dpms / media / notify ----
-
-    /// The active profile's edp policy overrides the lid-driven default.
     pub fn set_edp(&self, on: bool, ctx: &Context) {
         let wanted = match ctx.edp_policy {
             EdpPolicy::Disable => false,
             EdpPolicy::Enable => true,
             EdpPolicy::Auto => on,
         };
-        // Guard every path, not just the one that bit: turning off the only
-        // output leaves the compositor with no monitors at all, and Hyprland
-        // crashes refocusing windows onto one that no longer exists. Countdown
-        // (lid close while undocked) is the path that reaches here with no
-        // external attached.
-        //
-        // The guard sends an enable rather than dropping the request. The
-        // panel may already be off when the last external leaves (an undock
-        // with the lid closed, or one that happened across a suspend), and
-        // then nothing else would turn it back on. The worker no-ops when the
-        // panel is already on.
         let resolved = edp_must_be_on(wanted, ctx.ext_mon_count);
         if resolved && !wanted {
             warn!("keeping {} on: it is the only output", hyprctl::EDP_MONITOR);
@@ -263,10 +196,6 @@ impl Effectors {
         self.send_cmd(Cmd::DpmsOn);
     }
 
-    /// Repair workspaces stranded on the disabled eDP (see `Cmd::
-    /// RehomeEdpWorkspaces`). Safe to call on every dock change: the worker
-    /// no-ops when nothing is on the eDP. Only meaningful while the eDP is
-    /// meant to be off and an external is present — callers gate on that.
     pub fn rehome_edp_workspaces(&self) {
         self.send_cmd(Cmd::RehomeEdpWorkspaces);
     }
@@ -304,8 +233,6 @@ impl Effectors {
         });
     }
 
-    // ---- timers ----
-
     fn spawn_timer(
         &self,
         delay: Duration,
@@ -324,14 +251,6 @@ impl Effectors {
         }
     }
 
-    /// `fresh` = entering COUNTDOWN; a RECONCILE re-assert must NOT restart
-    /// (and thereby extend) a live countdown.
-    ///
-    /// A standing request outranks the lid in `world_state`, so a countdown
-    /// with a request standing is request-driven and keeps the fixed 30 s
-    /// (the battery-low plug-in window, hypridle's cancel window). Only a
-    /// countdown the lid alone started runs on `lid-grace`, which may be
-    /// zero: the timer then fires at once and the lock-then-suspend follows.
     pub fn start_grace_timer(&self, ctx: &mut Context, fresh: bool) {
         if !fresh && ctx.grace_timer.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
@@ -348,10 +267,6 @@ impl Effectors {
         ctx.grace_timer = Some(self.spawn_timer(grace, || Event::TimerExpired));
     }
 
-    /// Deferred on a Wayland claim: watch the claim for release (see
-    /// `sources::inhibitors::wayland_claim_watch`). Idempotent while one is
-    /// running, so a RECONCILE re-assert of Deferred does not restart it.
-    /// Sensing, not an effect: shadow mode watches too.
     pub fn start_claim_watch(&self, ctx: &mut Context) {
         if ctx.claim_watch.as_ref().is_some_and(|t| !t.is_finished()) {
             return;
@@ -367,7 +282,6 @@ impl Effectors {
         }
     }
 
-    /// Debounce monitor add/remove bursts into one MonitorsChanged.
     pub fn schedule_profile_reconcile(&self, ctx: &mut Context) {
         if let Some(t) = ctx.profile_debounce.take() {
             t.abort();
@@ -376,8 +290,6 @@ impl Effectors {
             Some(self.spawn_timer(paths::PROFILE_DEBOUNCE, || Event::MonitorsChanged));
     }
 
-    /// Debounce raw AC flips; PowerAcSettled fires once the state stops
-    /// bouncing.
     pub fn schedule_power_settle(&self, ctx: &mut Context) {
         if let Some(t) = ctx.power_debounce.take() {
             t.abort();
@@ -386,11 +298,6 @@ impl Effectors {
             Some(self.spawn_timer(paths::POWER_AC_DEBOUNCE, || Event::PowerAcSettled));
     }
 
-    // ---- monitor profiles ----
-
-    /// Repoint the active-profile symlink, apply it live, fire hooks, update ctx.
-    /// Idempotent on name+symlink **and** profile body — a TOML edit that
-    /// keeps the same name still forces a re-render reload (#19).
     pub fn apply_profile(&self, profile: &crate::sysio::profiles::TomlProfile, ctx: &mut Context) {
         let target = paths::profiles_dir().join(format!("{}.lua", profile.name));
         let link = paths::active_profile_link();
@@ -448,9 +355,6 @@ impl Effectors {
         }
     }
 
-    /// Sync ctx with an out-of-band .active.* repoint (`profile switch`).
-    /// Returns true when ingested. The daemon's own apply_profile updates
-    /// ctx synchronously, so this only fires for external changes.
     pub fn ingest_active_profile(&self, ctx: &mut Context) -> bool {
         let Some(name) = crate::sysio::profiles::active_profile_name() else {
             return false;
@@ -472,9 +376,6 @@ impl Effectors {
         true
     }
 
-    /// Record the matched profile's `#@ gpu` for next login's `gpu select`.
-    /// Cleared on no-match/auto so the file only exists when it means
-    /// something.
     pub fn write_gpu_breadcrumb(&self, value: Option<GpuPref>) {
         if self.shadow {
             debug!("[shadow] would write gpu breadcrumb: {value:?}");
@@ -501,12 +402,6 @@ impl Effectors {
         }
     }
 
-    // ---- power ----
-
-    /// Tell every waybar of this user to re-run its power-profile module
-    /// (SIGRTMIN+9) when what the module renders has changed. Called once
-    /// per dispatched event, after the effects, so the bar reads the
-    /// applied state, not the intent. Replaces the module's 5 s poll.
     pub fn sync_waybar(&self, ctx: &mut Context) {
         let view = WaybarView::of(ctx);
         if ctx.waybar_view == Some(view) {
@@ -527,9 +422,6 @@ impl Effectors {
         debug!("signalled {n} waybar process(es): {view:?}");
     }
 
-    /// Ask powerd to apply a profile. No-op when already applied. Registers
-    /// the expected platform_profile chain BEFORE the call so the sysfs
-    /// watch can't observe the write ahead of the bookkeeping.
     pub async fn apply_power_profile(&self, ctx: &mut Context, profile: PowerProfile) {
         if ctx.power_applied == Some(profile) || !ctx.powerd_available {
             return;
@@ -554,7 +446,7 @@ impl Effectors {
                 }
             }
             Err(e) => {
-                ctx.powerd_available = false; // NameOwnerChanged re-enables
+                ctx.powerd_available = false;
                 if !ctx.powerd_warned {
                     ctx.powerd_warned = true;
                     warn!(
@@ -566,11 +458,6 @@ impl Effectors {
         }
     }
 
-    /// Pin (`awake=true`) or release the discrete GPU's runtime PM via powerd.
-    /// `awake` should be `pure::gpu::dgpu_runtime_pm_pinned(mode)`: dgpu mode
-    /// must block D3cold (the FW16 DCN resume wedge). Idempotent on
-    /// `ctx.dgpu_pinned`; deferred while powerd is unavailable (re-pushed when
-    /// PowerdAppeared resets the marker).
     pub async fn sync_dgpu_pin(&self, ctx: &mut Context, awake: bool) {
         if ctx.dgpu_pinned == Some(awake) || !ctx.powerd_available {
             return;
@@ -594,7 +481,7 @@ impl Effectors {
                 }
             }
             Err(e) => {
-                ctx.powerd_available = false; // NameOwnerChanged re-enables
+                ctx.powerd_available = false;
                 if !ctx.powerd_warned {
                     ctx.powerd_warned = true;
                     warn!("powerd unavailable ({e}) — dgpu pin deferred");
@@ -603,13 +490,6 @@ impl Effectors {
         }
     }
 
-    /// Decision 6: write the idle-suspend request file on the daemon's own
-    /// behalf (battery-low). Same file the CLI and hypridle write, so every
-    /// downstream contract (inotify echo, Resumed clear, grace re-check)
-    /// applies unchanged; the "battery-low" body is the provenance token
-    /// that lets AC-return withdraw ONLY the daemon's own request. Returns
-    /// whether the file was actually written - the caller must not mark a
-    /// request standing that no reader can see (shadow, or a failed write).
     pub fn request_suspend(&self) -> bool {
         if self.shadow {
             info!("[shadow] would self-request suspend (battery-low)");
@@ -628,11 +508,6 @@ impl Effectors {
         }
     }
 
-    /// Withdraw a battery-low self-request when its reason is gone (AC
-    /// returned, or the battery recovered). Scoped by the provenance token:
-    /// a request hypridle or the CLI wrote ("idle") is somebody else's and
-    /// stays standing - only the daemon's own "battery-low" file is
-    /// removed. Returns whether a file was removed.
     pub fn clear_battery_low_request(&self) -> bool {
         if self.shadow {
             info!("[shadow] would withdraw battery-low suspend request");
@@ -655,10 +530,6 @@ impl Effectors {
         }
     }
 
-    /// Delete the standing idle-suspend request file, whoever wrote it.
-    /// Runs on Resumed so a wake never inherits the request that put the
-    /// machine to sleep, and at startup so a daemon restart mid-request
-    /// cannot suspend a user who has since returned.
     pub fn clear_suspend_request(&self) {
         if self.shadow {
             info!("[shadow] would delete idle-suspend request file");
@@ -674,8 +545,6 @@ impl Effectors {
         }
     }
 
-    /// Delete the override file and update ctx SYNCHRONOUSLY: the inotify
-    /// echo of the deletion must arrive as a no-op.
     pub fn clear_power_override(&self, ctx: &mut Context) {
         ctx.power_override = None;
         ctx.power_override_base = None;
@@ -690,11 +559,9 @@ impl Effectors {
         }
     }
 
-    /// External platform_profile write -> adopt as override (never
-    /// revert-fight). File + ctx updated synchronously.
     pub fn adopt_power_override(&self, ctx: &mut Context, profile: PowerProfile) {
         ctx.power_override = Some(profile);
-        ctx.power_override_base = None; // re-stamped on next policy check
+        ctx.power_override_base = None;
         if self.shadow {
             info!("[shadow] would adopt power override: {}", profile.as_str());
         } else {
@@ -712,8 +579,6 @@ impl Effectors {
         ));
     }
 
-    // ---- brightness (logind SetBrightness — session-scoped) ----
-
     fn brightness_read(&self, ctx: &Context) -> Option<u32> {
         let dev = ctx.brightness_dev.as_ref()?;
         let text = fs::read_to_string(
@@ -725,8 +590,6 @@ impl Effectors {
         text.trim().parse().ok()
     }
 
-    /// Guard at ±0.5% of max: any larger delta from what we last set is a
-    /// deliberate user adjustment — leave it alone.
     fn brightness_user_took_over(&self, ctx: &Context) -> bool {
         let Some(set) = ctx.brightness_set else {
             return false;
@@ -801,18 +664,12 @@ impl Effectors {
         self.brightness_write(ctx, saved).await;
     }
 
-    /// Re-arm the takeover guard (RESUMED: panel raw values drift across
-    /// suspend and must not read as a user adjustment).
     pub fn brightness_rearm(&self, ctx: &mut Context) {
         if ctx.brightness_dev.is_some() {
             ctx.brightness_set = self.brightness_read(ctx);
         }
     }
 
-    // ---- keyboard backlight (logind SetBrightness on the leds class) ----
-
-    /// Light the keyboard at `pct` (0 = off). Idempotent on the raw value
-    /// last written; a missing LED or session is a logged no-op.
     pub async fn kbd_set(&self, ctx: &mut Context, pct: u8) {
         let Some((name, max)) = ctx.kbd_led.clone() else {
             return;
@@ -839,8 +696,6 @@ impl Effectors {
         }
     }
 
-    /// Typing stopped: the manual override is over. Removes the runtime
-    /// marker; its inotify echo lands with ctx already matching.
     pub fn kbd_release_override(&self, ctx: &mut Context) {
         if !ctx.kbd_override {
             return;
@@ -858,9 +713,6 @@ impl Effectors {
         }
     }
 
-    /// Publish the status snapshot for `hyprstate kbd status`. Not in
-    /// shadow mode: a shadow daemon beside the live one must not speak for
-    /// it.
     pub fn kbd_write_status(&self, ctx: &Context, lit: bool) {
         if self.shadow {
             return;
@@ -880,8 +732,6 @@ impl Effectors {
         }
     }
 
-    // ---- lock / suspend ----
-
     pub async fn request_lock(&self) {
         let Some(session) = &self.session else {
             warn!("no session proxy — cannot request lock");
@@ -897,9 +747,6 @@ impl Effectors {
         }
     }
 
-    /// Live locker: fresh logind LockedHint plus compositor session lock
-    /// (`hyprctl locked` / ext-session-lock-v1). LockedHint alone can stick
-    /// after vigil-lock dies; the compositor lock is the liveness proof.
     pub async fn live_locker(&self) -> bool {
         let Some(session) = &self.session else {
             return false;
@@ -910,9 +757,6 @@ impl Effectors {
         }
     }
 
-    /// Wait for the lock to engage (watch channel fed by the LockedHint
-    /// subscription), up to LOCK_WAIT. Does not treat a cached LockedHint
-    /// as proof of a live locker.
     pub async fn wait_for_lock(&self, ctx: &Context) -> bool {
         if ctx.locked && self.live_locker().await {
             return true;
@@ -923,11 +767,6 @@ impl Effectors {
             .is_ok_and(|r| r.is_ok())
     }
 
-    /// Returns whether logind accepted the suspend. A refusal must be
-    /// reported, not swallowed: on 2026-09-04 a masked suspend.target made
-    /// Suspend() fail with AccessDenied, the FSM sat in SUSPENDING forever
-    /// (nothing retries a state only Resumed leaves), and the machine
-    /// stayed awake all night. The caller re-arms the grace and retries.
     pub async fn do_suspend(&self) -> bool {
         info!("calling logind Suspend()");
         if self.shadow {
@@ -957,7 +796,6 @@ mod tests {
 
     #[test]
     fn edp_is_forced_on_when_it_is_the_only_output() {
-        // Off was requested (docked, lid closed), then the externals left.
         assert!(edp_must_be_on(false, 0));
         assert!(edp_must_be_on(true, 0));
     }

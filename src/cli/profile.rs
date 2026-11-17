@@ -1,15 +1,3 @@
-//! `profile list | current | switch <name> | save <name>`.
-//!
-//! The daemon's MONITORS_CHANGED handler is the canonical apply path.
-//! `switch` repoints .active.conf and runs `hyprctl reload`; the daemon
-//! ingests the repoint (configreloaded RECONCILE, reconciler backstop) and
-//! adopts the new edp policy. A manual switch is a force-apply, not a pin —
-//! the next monitor-set change re-derives from the signature.
-//!
-//! `save` captures the LIVE monitor layout as a new profile (the editor
-//! workflow folded in from the archived hyprdm: arrange monitors with
-//! whatever tool you like, then snapshot the result).
-
 use crate::paths;
 use std::fmt::Debug;
 use std::fs;
@@ -130,11 +118,6 @@ fn legacy_files(dir: &Path, only: Option<&str>) -> Vec<PathBuf> {
         })
         .collect::<Vec<_>>();
     files.sort();
-    // Match legacy loading: a same-stem Lua file displaces Conf. `dedup_by`
-    // passes the *later* element as `a` and drops it when the closure returns
-    // true, so the surviving element is `b` — overwrite `b` with the Lua path,
-    // not the other way around. (Getting this backwards made `migrate` convert
-    // the stub `.conf` twin and emit a profile with no monitors at all.)
     files.dedup_by(|a, b| {
         if a.file_stem() == b.file_stem() {
             if a.extension().and_then(|x| x.to_str()) == Some("lua") {
@@ -201,9 +184,6 @@ fn verify_dir(dir: &Path, only: Option<&str>) -> (usize, Vec<String>) {
 }
 
 pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
-    // migrate/verify are pure file operations. Loading the profile set and
-    // querying the compositor for them re-parses every legacy file (echoing
-    // migrate's own warnings) and fails noisily off-session.
     let needs_live = matches!(action, "list" | "current" | "switch" | "save");
     let profiles = if needs_live {
         load_profiles()
@@ -290,7 +270,6 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
         }
         "list" => {
             let mut sorted = profiles;
-            // Stable: priority descending, load (filename) order for ties.
             sorted.sort_by_key(|p| std::cmp::Reverse(p.priority));
             for p in &sorted {
                 let applies = if p
@@ -372,10 +351,6 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 for warning in warnings {
                     eprintln!("WARNING {}: {warning}", legacy_path.display());
                 }
-                // A conversion that yields no monitors has silently thrown the
-                // layout away. Refuse it: verify compares parse-to-parse and
-                // would call empty-vs-empty "identical", which is precisely the
-                // false confidence this gate exists to prevent.
                 if profile.monitors.is_empty() {
                     eprintln!(
                         "{}: converts to zero monitors — refusing to write {}. \
@@ -434,13 +409,8 @@ mod tests {
     use super::*;
     use monitor_profiles::{Mode, Monitor, Profile};
 
-    /// A stub `.conf` next to a real `.lua` must not be what migrate reads:
-    /// the Lua twin is what the session actually loads. Getting this backwards
-    /// converted the stub and produced a TOML with no monitors in it.
     #[test]
     fn lua_twin_displaces_conf_for_migration() {
-        // No tempfile dev-dependency: it would enter the vendored tarball
-        // the RPM %check builds from.
         let dir = std::env::temp_dir().join(format!("hyprstate-legacy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

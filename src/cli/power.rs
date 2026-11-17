@@ -1,7 +1,3 @@
-//! `power set|get|cycle|status [--waybar]` — override-file management and
-//! powerd queries. The override file carries the profile only; the daemon
-//! stamps the base state itself when it ingests the file.
-
 use std::collections::HashMap;
 use std::fs;
 
@@ -31,8 +27,6 @@ fn powerd_query() -> anyhow::Result<(String, HashMap<String, String>)> {
     })
 }
 
-/// v1 prints the policy as a Python dict repr in `power get`; reproduced
-/// verbatim so output stays diffable across the port.
 fn policy_pydict(policy: &PowerPolicy) -> String {
     format!(
         "{{'docked-ac': '{}', 'ac': '{}', 'battery': '{}', 'battery-low': '{}'}}",
@@ -79,7 +73,6 @@ pub fn run(action: &str, value: Option<&str>, waybar: bool) -> i32 {
             0
         }
         "cycle" => {
-            // auto -> power-saver -> balanced -> performance -> auto.
             let next = match override_profile {
                 None => "power-saver",
                 Some("power-saver") => "balanced",

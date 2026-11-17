@@ -1,26 +1,13 @@
-# hyprstate is the exclusive owner of platform_profile (POWER_SPEC.md). The
-# powerd unit Conflicts= power-profiles-daemon/tuned/tlp; disable them so
-# systemd can't pick the wrong owner at boot. Arch does not auto-apply presets,
-# so enabling hyprstate-powerd is left to the user (`systemctl enable --now
-# hyprstate-powerd`; `systemctl --user enable --now hyprstate`).
-
 _disable_conflicts() {
     systemctl --quiet disable --now power-profiles-daemon.service tuned.service tlp.service >/dev/null 2>&1 || true
 }
 
-# Load the freshly-installed udev rule and D-Bus policy now, so USB-wake and
-# powerd's name ownership work without waiting for a reboot.
 _reload_rules() {
     udevadm control --reload >/dev/null 2>&1 || true
     udevadm trigger --subsystem-match=usb --action=add >/dev/null 2>&1 || true
     systemctl reload dbus-broker.service >/dev/null 2>&1 || systemctl reload dbus.service >/dev/null 2>&1 || true
 }
 
-# Shared monitor-profile group: /etc/monitor-profiles is group-writable so a
-# desktop user can edit layouts without root. No username is baked in -- the
-# admin adds whoever should have access (`gpasswd -a <user> monitor-profiles`).
-# vigil ships the same group and directory; whichever installs first wins and
-# the other is a no-op.
 _monitor_profiles_group() {
     getent group monitor-profiles >/dev/null || groupadd -r monitor-profiles || true
     if [ -d /etc/monitor-profiles ]; then

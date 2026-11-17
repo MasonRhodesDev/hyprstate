@@ -1,8 +1,3 @@
-//! The gpu-select state file: $XDG_RUNTIME_DIR/hypr-gpu-primary.json,
-//! schema v1 (see GPU_SPEC.md). Written by `gpu select` (intent record),
-//! read by the daemon's drift check and `gpu status`. Ground truth for
-//! *actual* is Hyprland's environ, never this file.
-
 use std::collections::BTreeMap;
 use std::fs;
 
@@ -36,8 +31,6 @@ fn snapshot_key(path: &str) -> String {
     crate::pure::gpu::pci_key(path).to_string()
 }
 
-/// Best-effort atomic intent record. Never panics, never touches stdout
-/// (the caller's stdout is consumed raw by uwsm).
 pub fn write_gpu_state(mode: &str, reason: &str, devices: Option<&[String]>, snap: &GpuSnapshot) {
     let integrated = if snap.cards.len() >= 2 {
         integrated_card(&snap.cards)

@@ -1,8 +1,3 @@
-//! `hyprstate daemon`: the lid/monitor/profile/lock/suspend/power state
-//! machine (systemd --user). `--shadow` runs everything except effects: no
-//! lid inhibitor, all world mutations logged instead of fired — safe to run
-//! alongside the live v1 daemon for decision-log diffing.
-
 pub mod ctx;
 pub mod dispatcher;
 pub mod effectors;
@@ -31,7 +26,6 @@ use effectors::Effectors;
 use event::Event;
 use logind_session::{Inhibitor, LogindManagerProxy};
 
-/// Startup diagnostic only — the sleep hook owns the fix.
 fn log_wake_state() {
     let mut entries: Vec<String> = Vec::new();
     let mut bad: Vec<String> = Vec::new();
@@ -79,10 +73,6 @@ fn log_wake_state() {
     }
 }
 
-/// The backlight device the brightness effects drive. Runs at startup and
-/// again on a backlight add/remove uevent (a panel driver that probes after
-/// the session is up, or a DDC panel going away). A changed device drops
-/// the saved and last-set raw values: they belong to the old scale.
 pub(crate) fn discover_backlight(ctx: &mut Context) {
     let found = find_backlight();
     let name = found.as_ref().map(|(dev, _)| dev.as_str());
@@ -99,14 +89,9 @@ pub(crate) fn discover_backlight(ctx: &mut Context) {
     ctx.brightness_saved = None;
 }
 
-/// The keyboard backlight LED and ambient light sensor. Runs at startup and
-/// on a leds uevent. Logs once what the policy has to work with; without
-/// both pieces it stays inert.
 pub(crate) fn discover_kbd(ctx: &mut Context) {
     let led = crate::sysio::kbd::find_kbd_led();
     if led != ctx.kbd_led {
-        // Seed idempotence from what the LED shows now, so a value it is
-        // already at is not rewritten at startup.
         ctx.kbd_applied = led
             .as_ref()
             .and_then(|(name, _)| crate::sysio::kbd::led_brightness(name));
@@ -128,7 +113,6 @@ pub(crate) fn discover_kbd(ctx: &mut Context) {
     }
 }
 
-/// `(device, max_brightness)` for the preferred backlight, if any.
 fn find_backlight() -> Option<(String, u32)> {
     let rd = fs::read_dir("/sys/class/backlight").ok()?;
     let mut names: Vec<String> = rd
@@ -152,12 +136,7 @@ fn find_backlight() -> Option<(String, u32)> {
     (max > 0).then_some((dev, max))
 }
 
-/// Delete a request file left over from before a daemon restart. Standalone
-/// (not an Effectors method) because it runs before Effectors is built.
 fn fx_clear_stale_request(_shadow: bool) {
-    // Runs even in shadow: a leftover request file is stale user state, not
-    // a system effect, and leaving it wedges a shadow daemon in COUNTDOWN
-    // (shadow never receives Resumed to clear it).
     let Some(path) = crate::paths::suspend_request_file() else {
         return;
     };
@@ -176,8 +155,6 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
 
     let conn = zbus::Connection::system().await?;
     let manager = LogindManagerProxy::new(&conn).await?;
-    // The reconciler exists to catch missed PropertiesChanged signals — it
-    // must read fresh values, not the signal-fed cache.
     let manager_uncached = LogindManagerProxy::builder(&conn)
         .cache_properties(CacheProperties::No)
         .build()
@@ -205,15 +182,8 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         info!("power.conf declares lid absent — the lid FSM route and its inhibitor are disabled");
     }
 
-    // A daemon restart mid-request must not suspend a user who has since
-    // returned; the request is re-established only if the file still exists
-    // and the state-file watch reports it.
     fx_clear_stale_request(shadow);
 
-    // Lid inhibitor first (held for process lifetime; dropping releases).
-    // Skipped entirely on a lidless machine (lid = absent): there is no lid
-    // switch for logind to mishandle, and holding a phantom inhibitor is
-    // what showed on `systemd-inhibit --list` for this desktop.
     let _lid_inhibit_fd = if shadow || !ctx.lid_present {
         None
     } else {
@@ -239,7 +209,6 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         }
     };
 
-    // Session + UPower setup.
     let (session, session_uncached) = match sources::resolve_session(&conn).await {
         Some((cached, uncached)) => (Some(cached), Some(uncached)),
         None => (None, None),
@@ -304,12 +273,8 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         reconcile: reconcile_tx.clone(),
     };
 
-    // Decision 6 as a state, not an edge (review F6): a daemon that boots
-    // already discharging below the threshold requests now rather than
-    // waiting for the next UPower percent event.
     crate::daemon::dispatcher::battery_low_request_check(&mut ctx, &fx);
 
-    // Initial world snapshot.
     ctx.lid_closed = if ctx.lid_present {
         manager_uncached.lid_closed().await.unwrap_or(false)
     } else {
@@ -321,8 +286,6 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     ctx.wayland_inhibitor = hyprctl::wayland_idle_inhibited().await.unwrap_or(false);
     ctx.ext_mon_count = hyprctl::ext_monitor_count(0).await;
 
-    // Seed the active profile from the existing symlink so reconciles can
-    // detect "no change" instead of forcing a spurious reload at startup.
     if let Some(name) = crate::sysio::profiles::active_profile_name() {
         if let Some(p) = crate::sysio::profiles::load_profiles()
             .into_iter()
@@ -338,8 +301,6 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         ctx.current_profile.as_deref().unwrap_or("None"),
         ctx.edp_policy.as_str()
     );
-    // Align with reality (profiles edited offline / monitors changed while
-    // down), then seed power policy AFTER docked-ness lands.
     let _ = tx.send(Event::MonitorsChanged).await;
     let _ = tx
         .send(Event::PowerOverrideChanged(sysfs::read_first_word(
@@ -352,12 +313,10 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
             warn!("initial LockedHint read failed: {e} — assuming unlocked");
             false
         }),
-        // resolve_session already warned that lock detection is disabled.
         None => false,
     };
     let _ = locked_tx.send(ctx.locked);
 
-    // Spawn everything; the dispatcher owns ctx from here.
     tokio::spawn(effectors::effector_worker(worker_rx, tx.clone()));
     tokio::spawn(sources::hypr_socket_reader(tx.clone()));
     tokio::spawn(sources::inhibitors::logind_inhibitor_watcher(
@@ -414,9 +373,6 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     }
     tokio::spawn(sources::powerd_name_watcher(tx.clone(), conn.clone()));
 
-    // Returns on SIGTERM, SIGINT or SIGHUP with ctx (and its state span)
-    // already dropped. Ok, so main takes the same span_lines::exit(0) path
-    // as any clean exit; the inhibitor fd releases on the way out.
     dispatcher::run(rx, ctx, fx).await;
     Ok(())
 }

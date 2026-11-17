@@ -1,23 +1,3 @@
-//! Keep-awake claim sensing from two real sources and no log text.
-//!
-//! - logind idle/sleep block inhibitors: `ListInhibitors`, re-read when the
-//!   Manager's `BlockInhibited`/`DelayInhibited` properties change (logind
-//!   emits that on every inhibitor start and stop).
-//! - Wayland idle-inhibit surfaces: `hyprctl clients` `inhibitingIdle`, the
-//!   compositor's own view. There is no event for a client dropping its
-//!   inhibitor, so it is sampled at the decisions that need it (lid close, a
-//!   suspend request, a reconcile pass) and, while Deferred is waiting on a
-//!   claim to release, every `DEFERRED_CLAIM_POLL` until it does.
-//!
-//! The previous source was hypridle's journal, grepped for "inhibit locks"
-//! every 2 s. On mason-air (hyprstate 2.7.4, hypr-DE 0.2.36) the flag was
-//! true from boot with no claim anywhere: hypridle with `inhibit_sleep=3`
-//! logs "Sleep inhibition enabled" and "Inhibited sleep with fd N" at
-//! startup while holding a logind *sleep delay* inhibitor, and the tail
-//! read with `--reverse` picked the oldest of the last 20 matches, so a
-//! stale count stuck. Every lid close went LID_OPEN to DEFERRED and the
-//! laptop never suspended.
-
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -33,8 +13,6 @@ use logind_session::LogindManagerProxy;
 const LOGIN1: &str = "org.freedesktop.login1";
 const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
 
-/// Re-read `ListInhibitors` whenever logind says its inhibitor set moved;
-/// send only on an edge of the derived "real idle block" boolean.
 pub async fn logind_inhibitor_watcher(
     tx: mpsc::Sender<Event>,
     conn: Connection,
@@ -95,10 +73,6 @@ pub async fn logind_inhibitor_watcher(
     }
 }
 
-/// Deferred holds a Wayland claim and waits for it to release. Nothing
-/// announces that, so this is the daemon's one sampler: it runs only while
-/// Deferred is on a Wayland claim and ends itself the moment the claim is
-/// gone (or the state changes and the effector aborts it).
 pub async fn wayland_claim_watch(tx: mpsc::Sender<Event>) {
     loop {
         tokio::time::sleep(paths::DEFERRED_CLAIM_POLL).await;

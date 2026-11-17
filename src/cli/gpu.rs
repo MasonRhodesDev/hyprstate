@@ -1,19 +1,9 @@
-//! `gpu select | check | status` (see GPU_SPEC.md).
-//!
-//! select/check print the device list (or nothing) on stdout — consumed raw
-//! by uwsm's env-hyprland — so everything else goes to stderr and the list
-//! is the single, final stdout write. No hyprctl, no D-Bus (select runs
-//! pre-compositor); sysfs only.
-
 use std::io::Write;
 
 use crate::paths;
 use crate::pure::gpu::{GpuMode, gpu_desired, resolve_gpu_mode};
 use crate::sysio::{gpu_state, hypr_instance, sysfs};
 
-/// Read the three mode-resolution inputs and run the pure precedence.
-/// `overlay` is the breadcrumb file at CLI time (the daemon substitutes the
-/// freshly-matched profile's value instead).
 fn resolve_mode_from_files() -> (GpuMode, crate::pure::gpu::GpuModeSource) {
     let override_word = sysfs::read_first_word(&paths::gpu_override_file());
     let overlay = sysfs::read_first_word(&paths::gpu_breadcrumb_file());
@@ -39,7 +29,6 @@ pub fn run(action: &str) -> i32 {
     let (mut devices, mut reason) = gpu_desired(&snap, mode, source);
 
     if devices.is_none() && reason == "bailed-transient" && action == "select" {
-        // One settle retry: docked cold boot can race DP link training.
         std::thread::sleep(paths::GPU_SETTLE);
         snap = sysfs::gpu_snapshot();
         (devices, reason) = gpu_desired(&snap, mode, source);
@@ -48,8 +37,6 @@ pub fn run(action: &str) -> i32 {
     if let Some(list) = &devices
         && !list.iter().all(|d| std::path::Path::new(d).exists())
     {
-        // All-or-nothing: dropping individual paths could silently violate
-        // the integrated-always-included / usable-output invariants.
         (devices, reason) = (None, "validation-failed".into());
     }
 
@@ -100,8 +87,6 @@ fn status() -> i32 {
         ),
     }
 
-    // Primary render GPU = first AQ device's card (e.g. /dev/dri/card1 ->
-    // card1). Captured before the sync check moves `actual`.
     let primary_card = actual
         .as_ref()
         .and_then(|l| l.first())
@@ -116,10 +101,6 @@ fn status() -> i32 {
         }
     }
 
-    // Per-output routing: which GPU drives each display, and whether it's on
-    // the cross-GPU copy path (rendered on the primary, then copied to another
-    // GPU for scanout — the source of multi-GPU tearing/lag at high pixel
-    // rates). A display on the primary's own card is render-local (no copy).
     let outputs = sysfs::connected_outputs();
     if !outputs.is_empty() {
         println!("outputs:");

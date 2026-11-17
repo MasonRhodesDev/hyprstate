@@ -1,8 +1,3 @@
-# RPM spec for hyprstate (Rust v2). Built in COPR from a local SRPM
-# produced by packaging/build-srpm.sh (source tarball from the git tag +
-# vendored cargo deps as Source1 — no rust-*-devel packages needed).
-# The test suite runs by default (cargo test over both workspace members).
-# Disable for a one-off build with --without check; COPR builds run the suite.
 %bcond_without check
 
 Name:           hyprstate
@@ -16,15 +11,10 @@ Source1:        %{name}-%{version}-vendor.tar.xz
 
 BuildRequires:  cargo-rpm-macros >= 24
 BuildRequires:  systemd-rpm-macros
-# groupadd in %pre for the shared monitor-profiles group.
 Requires(pre):  shadow-utils
 Requires:       systemd
 Requires:       dbus-common
 %{?systemd_requires}
-# Runtime conflicts with other platform_profile owners are handled by the
-# powerd unit's Conflicts= line, NOT an RPM-level Conflicts: (p-p-d ships in
-# the default Fedora install; a package conflict would make installs
-# painful).
 Recommends:     playerctl
 Recommends:     hypridle
 
@@ -37,11 +27,8 @@ for hotplugged hubs. Configuration lives in ~/.config/hypr (power.conf,
 profiles/) and is not part of this package.
 
 %prep
-# -a1 unpacks the vendor tarball (vendor/ at its root) into the source dir.
 %autosetup -p1 -a1
 %cargo_prep -v vendor
-# %%cargo_prep only redirects crates.io. Git pins are vendored in Source1
-# too; map them so the RPM build stays offline.
 cat >> .cargo/config.toml << 'EOF'
 
 [source."git+https://github.com/MasonRhodesDev/monitor-profiles?rev=e263f57#e263f57b8ef3b7c812a8180c31cfc275a90c825b"]
@@ -61,8 +48,6 @@ EOF
 %{cargo_license} > LICENSE.dependencies
 
 %install
-# %%cargo_install re-resolves without Cargo.lock; git pins then fail offline.
-# %%cargo_build already produced the rpm-profile binary.
 install -Dpm0755 target/rpm/hyprstate %{buildroot}%{_bindir}/hyprstate
 install -Dpm0644 dist/hyprstate.service %{buildroot}%{_userunitdir}/hyprstate.service
 install -Dpm0644 dist/hyprstate-powerd.service %{buildroot}%{_unitdir}/hyprstate-powerd.service
@@ -80,25 +65,14 @@ install -d -m2775 %{buildroot}%{_sysconfdir}/monitor-profiles
 %endif
 
 %pre
-# Shared monitor-profile group. The directory below is group-writable so a
-# desktop user can edit layouts without root, and no username is ever baked
-# in: the admin adds whoever should be able to. vigil creates the same group
-# and co-owns the directory with identical attributes, so either package may
-# be installed alone or both together.
 getent group monitor-profiles >/dev/null || groupadd -r monitor-profiles || :
 
 %post
 %systemd_post hyprstate-powerd.service
 %systemd_user_post hyprstate.service
-# Load the freshly-installed udev rule and D-Bus policy now, so the USB-wake
-# rule and powerd's name ownership work without waiting for a reboot.
 %udev_rules_update
 systemctl reload dbus-broker.service >/dev/null 2>&1 || systemctl reload dbus.service >/dev/null 2>&1 || :
 if [ $1 -eq 1 ]; then
-    # First install only: take exclusive ownership of platform_profile.
-    # The systemd preset only covers the named unit, so the conflicting daemons
-    # must be disabled explicitly or systemd may pick the wrong owner at boot
-    # (both Conflicts= each other and would otherwise both be WantedBy multi-user).
     systemctl --quiet disable --now power-profiles-daemon.service tuned.service tlp.service >/dev/null 2>&1 || :
 fi
 
@@ -113,7 +87,7 @@ fi
 
 %files
 %license LICENSE LICENSE.dependencies
-%doc README.md POWER_SPEC.md GPU_SPEC.md
+%doc README.md
 %{_bindir}/hyprstate
 %{_unitdir}/hyprstate-powerd.service
 %{_userunitdir}/hyprstate.service
@@ -247,7 +221,7 @@ fi
   refusal and the transition is rejected, re-arming a fresh 30 s grace and
   retrying, the same fail-closed shape as an unengaged lock.
 * Thu Sep 04 2026 Mason Rhodes <mrhodesdev@gmail.com> - 2.7.0-1
-- The decided idle/power ladder (POWER_SPEC.md, 2026-09-04) in the FSM:
+- The decided idle/power ladder (2026-09-04) in the FSM:
   a keep-awake claim governs only the UNLOCKED machine. WorldInputs gains
   locked and battery_low; an inhibitor on a locked machine defers nothing,
   and battery-low bypasses the claim gate outright (the daemon

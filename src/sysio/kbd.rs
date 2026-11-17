@@ -1,16 +1,9 @@
-//! Keyboard backlight hardware: the `leds` class LED and the IIO ambient
-//! light sensor. Discovery runs at startup and on a leds uevent; the sensor
-//! is read only when the policy asks (a resume or a manual key press).
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const LEDS_DIR: &str = "/sys/class/leds";
 const IIO_DIR: &str = "/sys/bus/iio/devices";
 
-/// The keyboard backlight LED: `(name, max_brightness)`. Names carry
-/// `kbd_backlight` on every driver seen so far (Asahi `kbd_backlight`,
-/// ThinkPad `tpacpi::kbd_backlight`, Framework `framework_laptop::kbd_backlight`).
 pub fn find_kbd_led() -> Option<(String, u32)> {
     let mut names: Vec<String> = fs::read_dir(LEDS_DIR)
         .ok()?
@@ -27,12 +20,10 @@ pub fn find_kbd_led() -> Option<(String, u32)> {
     (max > 0).then_some((name, max))
 }
 
-/// Pure half of `find_kbd_led`.
 pub fn pick_kbd_led(names: &[String]) -> Option<&String> {
     names.iter().find(|n| n.contains("kbd_backlight"))
 }
 
-/// Current raw LED value, to seed the idempotence marker at startup.
 pub fn led_brightness(name: &str) -> Option<u32> {
     fs::read_to_string(Path::new(LEDS_DIR).join(name).join("brightness"))
         .ok()?
@@ -41,16 +32,12 @@ pub fn led_brightness(name: &str) -> Option<u32> {
         .ok()
 }
 
-/// Illuminance attribute names, most to least preferred. `_input` is the
-/// processed value in lux; `_raw` is the fallback on drivers without one.
 const ALS_ATTRS: [&str; 3] = [
     "in_illuminance_input",
     "in_illuminance0_input",
     "in_illuminance_raw",
 ];
 
-/// The ambient light sensor's illuminance attribute, if any IIO device has
-/// one (mason-air: `iio:device0`, name `aop-sensors-als`).
 pub fn find_als() -> Option<PathBuf> {
     let mut devices: Vec<PathBuf> = fs::read_dir(IIO_DIR)
         .ok()?
@@ -71,7 +58,6 @@ pub fn find_als() -> Option<PathBuf> {
     None
 }
 
-/// Pure half of `find_als`.
 pub fn pick_als_attr(attrs: &[String]) -> Option<&'static str> {
     ALS_ATTRS
         .iter()
@@ -79,8 +65,6 @@ pub fn pick_als_attr(attrs: &[String]) -> Option<&'static str> {
         .find(|a| attrs.iter().any(|x| x == a))
 }
 
-/// One sensor reading. None when unreadable (the policy keeps its last
-/// `dark` verdict).
 pub fn read_lux(attr: &Path) -> Option<f64> {
     fs::read_to_string(attr).ok()?.trim().parse().ok()
 }

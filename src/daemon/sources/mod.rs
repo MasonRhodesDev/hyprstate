@@ -1,6 +1,3 @@
-//! Event source tasks. Each holds an mpsc Sender<Event> clone and never
-//! touches Context — the dispatcher owns it.
-
 pub mod files;
 pub mod inhibitors;
 pub mod reconciler;
@@ -21,10 +18,6 @@ use crate::paths;
 use logind_session::{LogindManagerProxy, LogindSessionProxy};
 pub use reconciler::ReconcileTrigger;
 
-// =========================================================================
-// Hyprland socket2 reader
-// =========================================================================
-
 pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
     loop {
         let path = match hypr_ipc::socket2_path() {
@@ -41,7 +34,6 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
                 let mut lines = tokio::io::BufReader::new(stream).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     let ev = if let Some(rest) = line.strip_prefix("monitoraddedv2>>") {
-                        // payload: id,name,description
                         let name = rest.split(',').nth(1).unwrap_or("").to_string();
                         Some(Event::MonitorHotplug { added: true, name })
                     } else if let Some(rest) = line.strip_prefix("monitorremoved>>") {
@@ -68,10 +60,6 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
     }
 }
 
-// =========================================================================
-// logind inhibitors
-// =========================================================================
-
 pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> Option<bool> {
     let rows = match manager.list_inhibitors().await {
         Ok(r) => r,
@@ -83,7 +71,6 @@ pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> O
     Some(logind_has_real_idle_block(&rows))
 }
 
-/// `rows` are Login1.ListInhibitors tuples: (what, who, why, mode, uid, pid).
 pub(crate) fn logind_has_real_idle_block(
     rows: &[(String, String, String, String, u32, u32)],
 ) -> bool {
@@ -103,14 +90,6 @@ pub(crate) fn logind_has_real_idle_block(
     false
 }
 
-// =========================================================================
-// D-Bus subscriptions
-// =========================================================================
-
-/// logind's Session `Lock`/`Unlock` signals are reconcile triggers: a lock
-/// or unlock requested without input (`loginctl unlock-session` over SSH)
-/// is exactly when the stuck-DPMS repair has work and no LockedHint edge
-/// may follow quickly enough to prompt it.
 pub async fn session_signal_watcher(
     triggers: mpsc::Sender<ReconcileTrigger>,
     proxy: SessionSignalsProxy<'static>,
@@ -138,9 +117,6 @@ pub async fn session_signal_watcher(
 
 pub async fn lid_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<'static>) {
     let mut stream = manager.receive_lid_closed_changed().await;
-    // Skip the initial emission: zbus property streams yield the current
-    // value on subscription; daemon_main already read it, and v1 callbacks
-    // fired only on real changes.
     let _ = stream.next().await;
     while let Some(change) = stream.next().await {
         if let Ok(v) = change.get().await
@@ -174,10 +150,6 @@ pub async fn sleep_watcher(tx: mpsc::Sender<Event>, manager: LogindManagerProxy<
     }
 }
 
-/// Resolve our graphical session via logind-session. Returns a (cached,
-/// uncached) proxy pair: lock_watcher needs the cached one (property-change
-/// streams are fed from the cache), the reconciler needs the uncached one
-/// (fresh reads). Lid/suspend/LockedHint policy stays in this daemon.
 pub async fn resolve_session(
     conn: &Connection,
 ) -> Option<(LogindSessionProxy<'static>, LogindSessionProxy<'static>)> {
@@ -194,8 +166,6 @@ pub async fn resolve_session(
         .build()
         .await
         .ok()?;
-    // The reconciler must read fresh values, not the signal-fed cache —
-    // same reasoning as manager_uncached in daemon::run.
     let uncached = LogindSessionProxy::builder(conn)
         .path(path.clone())
         .cache_properties(CacheProperties::No)
@@ -215,14 +185,9 @@ pub async fn lock_watcher(
     session: LogindSessionProxy<'static>,
 ) {
     let mut stream = session.receive_locked_hint_changed().await;
-    // Skip the initial emission: zbus property streams yield the current
-    // value on subscription; daemon_main already read it, and v1 callbacks
-    // fired only on real changes.
     let _ = stream.next().await;
     while let Some(change) = stream.next().await {
         if let Ok(v) = change.get().await {
-            // Eager: the suspending tail's wait_for_lock watches this
-            // channel; it must see the flip before the queue is drained.
             let _ = locked_tx.send(v);
             if tx.send(Event::LockChanged(v)).await.is_err() {
                 return;
@@ -233,9 +198,6 @@ pub async fn lock_watcher(
 
 pub async fn ac_watcher(tx: mpsc::Sender<Event>, upower: UPowerProxy<'static>) {
     let mut stream = upower.receive_on_battery_changed().await;
-    // Skip the initial emission: zbus property streams yield the current
-    // value on subscription; daemon_main already read it, and v1 callbacks
-    // fired only on real changes.
     let _ = stream.next().await;
     while let Some(change) = stream.next().await {
         if let Ok(on_battery) = change.get().await
@@ -248,9 +210,6 @@ pub async fn ac_watcher(tx: mpsc::Sender<Event>, upower: UPowerProxy<'static>) {
 
 pub async fn battery_watcher(tx: mpsc::Sender<Event>, device: UPowerDeviceProxy<'static>) {
     let mut stream = device.receive_percentage_changed().await;
-    // Skip the initial emission: zbus property streams yield the current
-    // value on subscription; daemon_main already read it, and v1 callbacks
-    // fired only on real changes.
     let _ = stream.next().await;
     while let Some(change) = stream.next().await {
         if let Ok(pct) = change.get().await
@@ -261,9 +220,6 @@ pub async fn battery_watcher(tx: mpsc::Sender<Event>, device: UPowerDeviceProxy<
     }
 }
 
-/// Initial battery probe: (battery_percent, watcher device). None = no
-/// battery / UPower down — battery machinery disabled. Desktops report
-/// IsPresent=false with Percentage=0.0, which must not latch low_battery.
 pub async fn battery_initial(conn: &Connection) -> Option<(f64, UPowerDeviceProxy<'static>)> {
     let device = UPowerDeviceProxy::builder(conn)
         .path(DISPLAY_DEVICE_PATH)
@@ -280,7 +236,6 @@ pub async fn battery_initial(conn: &Connection) -> Option<(f64, UPowerDeviceProx
     Some((pct, device))
 }
 
-/// Re-enable power applies when org.hyprstate.Power1 (re)appears.
 pub async fn powerd_name_watcher(tx: mpsc::Sender<Event>, conn: Connection) {
     let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else {
         warn!("DBus daemon interface unavailable");
@@ -309,15 +264,6 @@ mod tests {
         (what.into(), who.into(), "why".into(), mode.into(), 1000, 1)
     }
 
-    /// Regression (mason-air, hyprstate 2.7.4 with hypr-DE 0.2.36): the
-    /// keep-awake flag was true from boot with no claim anywhere, so every
-    /// lid close went LID_OPEN to DEFERRED and the laptop never suspended.
-    /// The flag came from hypridle's journal, and `inhibit_sleep=3` makes
-    /// hypridle log "Sleep inhibition enabled" and "Inhibited sleep with
-    /// fd 9" at startup while it holds a logind sleep inhibitor as
-    /// "hypridle". This is that machine's boot state as the two real
-    /// sources see it: hypridle's own inhibitor (in either mode) and the
-    /// daemon's lid block are not claims, and no client inhibits idle.
     #[test]
     fn mason_air_boot_state_holds_no_claim() {
         let rows = [
@@ -348,7 +294,6 @@ mod tests {
 
     #[test]
     fn what_who_order_not_swapped() {
-        // Swapped fields would treat "idle" as who and miss the category check.
         let rows = [row("idle", "firefox", "block")];
         assert!(logind_has_real_idle_block(&rows));
     }

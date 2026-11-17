@@ -1,17 +1,3 @@
-//! Best-effort telemetry emitter over a Unix domain socket.
-//!
-//! After each relevant node/context change the daemon writes one
-//! newline-delimited JSON frame to `$XDG_RUNTIME_DIR/hyprstate-telemetry.sock`.
-//! The daemon binds that socket; clients (dials) connect and read.
-//! The write is non-blocking and fire-and-forget: if no client is connected,
-//! the frame is silently dropped. This module never affects FSM behavior.
-//!
-//! Envelope: every frame carries `version` ([`TELEMETRY_VERSION`], currently 2).
-//! Each version is an additive JSON object — unknown fields in a known
-//! version are ignored; v2 dropped the `screen` field. Consumers must skip frames whose `version` they do not understand
-//! rather than silently misparsing. Missing `XDG_RUNTIME_DIR` drops the frame
-//! (no `/run/user/<uid>` or `/tmp` fallback).
-
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -26,15 +12,10 @@ use crate::paths;
 use crate::pure::fsm::State;
 use crate::pure::power::power_base_state;
 
-/// Current Help telemetry envelope version. Bump on breaking field changes.
-/// v2 (hyprstate 2.5.0) dropped the `screen` field with the screen-DPMS
-/// sub-FSM; dials never read it.
 pub const TELEMETRY_VERSION: u32 = 2;
 
-/// A single telemetry frame for Help / observers.
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetryFrame {
-    /// Envelope version ([`TELEMETRY_VERSION`]). Consumers skip unknown majors.
     pub version: u32,
     pub ts: u128,
     pub kind: &'static str,
@@ -45,7 +26,6 @@ pub struct TelemetryFrame {
     pub effectors: Vec<&'static str>,
 }
 
-/// Snapshot of world + power + display selection at emit time.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FrameCtx {
     pub lid_closed: bool,
@@ -99,7 +79,6 @@ impl FrameCtx {
     }
 }
 
-/// Persistent emitter handle. Binds the telemetry socket and writes to clients.
 pub struct TelemetryEmitter {
     sock_path: PathBuf,
     listener: Option<UnixListener>,
@@ -119,7 +98,6 @@ impl TelemetryEmitter {
         }
     }
 
-    /// Emit Help-relevant live state if the fingerprint changed.
     pub fn emit_help(
         &mut self,
         ctx: &Context,
@@ -142,8 +120,6 @@ impl TelemetryEmitter {
         self.emit_if_changed(&frame);
     }
 
-    /// Emit a frame. Best-effort, non-blocking, never panics.
-    /// Returns whether the frame was written to a listener.
     pub fn emit(&mut self, frame: &TelemetryFrame) -> bool {
         let Ok(mut buf) = serde_json::to_vec(frame) else {
             return false;
@@ -180,8 +156,6 @@ impl TelemetryEmitter {
         if self.last_fp == Some(fp) {
             return;
         }
-        // Only burn the fingerprint after a successful write so a later GUI
-        // connect still receives the current snapshot.
         if self.emit(frame) {
             self.last_fp = Some(fp);
         }

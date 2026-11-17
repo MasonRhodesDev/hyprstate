@@ -1,8 +1,5 @@
-//! /proc helpers: find the caller's own processes by name and signal them.
-
 use std::fs;
 
-/// Real uid from a `/proc/<pid>/status` body (`Uid:\treal\teffective...`).
 pub fn uid_from_status(status: &str) -> Option<u32> {
     status
         .lines()
@@ -11,11 +8,7 @@ pub fn uid_from_status(status: &str) -> Option<u32> {
         .and_then(|uid| uid.parse().ok())
 }
 
-/// Send `signal` to every process named `comm` (exact `/proc/<pid>/comm`
-/// match) that belongs to this uid, excluding ourselves. Returns how many
-/// were signalled. Best effort: a process that exits mid-scan is skipped.
 pub fn signal_own_processes(comm: &str, signal: libc::c_int) -> usize {
-    // SAFETY: getuid and getpid have no preconditions.
     let (me_uid, me_pid) = unsafe { (libc::getuid(), libc::getpid()) };
     let Ok(rd) = fs::read_dir("/proc") else {
         return 0;
@@ -42,7 +35,6 @@ pub fn signal_own_processes(comm: &str, signal: libc::c_int) -> usize {
         if uid_from_status(&status) != Some(me_uid) {
             continue;
         }
-        // SAFETY: kill with a pid we just read from /proc and a valid signal.
         if unsafe { libc::kill(pid, signal) } == 0 {
             hit += 1;
         }
@@ -61,9 +53,6 @@ mod tests {
         assert_eq!(uid_from_status("Name:\tx\n"), None);
     }
 
-    /// Exec `sleep` through a symlink so its comm is a name nothing else on
-    /// the box carries (15 chars max, or comm truncates), then signal by
-    /// that name: exactly one hit, and the child died of that signal.
     #[test]
     fn signals_exactly_the_processes_with_that_name() {
         use std::os::unix::process::ExitStatusExt;
@@ -73,7 +62,6 @@ mod tests {
         let link = dir.join(name);
         std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
         let mut child = std::process::Command::new(&link).arg("30").spawn().unwrap();
-        // comm is set at exec; give the child a moment to get there.
         let comm = format!("/proc/{}/comm", child.id());
         for _ in 0..200 {
             if std::fs::read_to_string(&comm).is_ok_and(|c| c.trim_end() == name) {

@@ -1,8 +1,3 @@
-//! `kbd status|set|up|down|auto`: the manual keys of the keyboard backlight
-//! policy and its status view. The CLI never touches the LED; it writes the
-//! two files the daemon watches (the persistent level, the runtime override
-//! marker) and reads the daemon's status snapshot.
-
 use std::fs;
 
 use crate::daemon::kbd_policy::KbdStatus;
@@ -20,9 +15,6 @@ fn stored_level() -> u8 {
         .unwrap_or(DEFAULT_KBD_LEVEL_PCT)
 }
 
-/// Write the level, then arm the override. In that order: the daemon reacts
-/// to each file on its own, and the marker landing first would light the
-/// old level for one event.
 fn apply(level: u8) -> i32 {
     let file = paths::kbd_level_file();
     if let Some(parent) = file.parent() {

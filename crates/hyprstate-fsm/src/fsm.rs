@@ -54,16 +54,21 @@ pub struct WorldInputs {
     pub locked: bool,
     pub battery_low: bool,
     pub lid_ac_hold: bool,
+    pub sleep_block: bool,
 }
 
 pub fn claim_governs(w: &WorldInputs) -> bool {
     w.inhibitor && !w.locked && !w.battery_low
 }
 
+pub fn sleep_block_governs(w: &WorldInputs) -> bool {
+    w.suspend_requested && w.sleep_block && !w.battery_low
+}
+
 pub fn world_state(w: &WorldInputs) -> State {
     let claim = claim_governs(w);
     if w.suspend_requested {
-        return if claim {
+        return if claim || sleep_block_governs(w) {
             State::Deferred
         } else {
             State::Countdown
@@ -322,6 +327,81 @@ mod tests {
                 main.as_str()
             );
         }
+    }
+
+    fn locked_req(sleep_block: bool) -> WorldInputs {
+        WorldInputs {
+            locked: true,
+            sleep_block,
+            ..req(false)
+        }
+    }
+
+    #[test]
+    fn sleep_block_defers_a_locked_idle_suspend() {
+        assert_eq!(world_state(&locked_req(false)), State::Countdown);
+        assert_eq!(world_state(&locked_req(true)), State::Deferred);
+    }
+
+    #[test]
+    fn sleep_block_release_resumes_the_countdown() {
+        drive(
+            State::LidOpen,
+            &[
+                (
+                    EventKind::SuspendRequested,
+                    locked_req(true),
+                    Some(State::Deferred),
+                ),
+                (
+                    EventKind::InhibitorOff,
+                    locked_req(false),
+                    Some(State::Countdown),
+                ),
+                (
+                    EventKind::InhibitorOn,
+                    locked_req(true),
+                    Some(State::Deferred),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn sleep_block_taken_during_grace_stops_the_suspend() {
+        assert_eq!(
+            desired_state(State::Countdown, EventKind::TimerExpired, &locked_req(true)),
+            Some(State::Deferred)
+        );
+        assert_eq!(
+            desired_state(
+                State::Countdown,
+                EventKind::TimerExpired,
+                &locked_req(false)
+            ),
+            Some(State::Suspending)
+        );
+    }
+
+    #[test]
+    fn sleep_block_yields_to_low_battery() {
+        let w = WorldInputs {
+            battery_low: true,
+            ..locked_req(true)
+        };
+        assert!(!sleep_block_governs(&w));
+        assert_eq!(world_state(&w), State::Countdown);
+    }
+
+    #[test]
+    fn sleep_block_leaves_the_lid_chain_alone() {
+        let w = WorldInputs {
+            lid_closed: true,
+            sleep_block: true,
+            ..WorldInputs::default()
+        };
+        assert!(!sleep_block_governs(&w));
+        assert_eq!(world_state(&w), State::Countdown);
     }
 
     #[test]

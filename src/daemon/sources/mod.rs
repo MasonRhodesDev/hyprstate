@@ -60,7 +60,13 @@ pub async fn hypr_socket_reader(tx: mpsc::Sender<Event>) {
     }
 }
 
-pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> Option<bool> {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogindBlocks {
+    pub claim: bool,
+    pub sleep: bool,
+}
+
+pub async fn logind_blocks(manager: &LogindManagerProxy<'_>) -> Option<LogindBlocks> {
     let rows = match manager.list_inhibitors().await {
         Ok(r) => r,
         Err(e) => {
@@ -68,7 +74,18 @@ pub async fn logind_real_inhibitor_active(manager: &LogindManagerProxy<'_>) -> O
             return None;
         }
     };
-    Some(logind_has_real_idle_block(&rows))
+    Some(LogindBlocks {
+        claim: logind_has_real_idle_block(&rows),
+        sleep: logind_has_sleep_block(&rows),
+    })
+}
+
+pub(crate) fn logind_has_sleep_block(rows: &[(String, String, String, String, u32, u32)]) -> bool {
+    rows.iter().any(|(what, who, _why, mode, _uid, _pid)| {
+        mode == "block"
+            && what.split(':').any(|c| c == "sleep")
+            && !paths::INHIBIT_BASELINE_WHO.contains(&who.as_str())
+    })
 }
 
 pub(crate) fn logind_has_real_idle_block(
@@ -257,7 +274,7 @@ pub async fn powerd_name_watcher(tx: mpsc::Sender<Event>, conn: Connection) {
 
 #[cfg(test)]
 mod tests {
-    use super::logind_has_real_idle_block;
+    use super::{logind_has_real_idle_block, logind_has_sleep_block};
     use crate::sysio::hyprctl::any_client_inhibiting_idle_in;
 
     fn row(what: &str, who: &str, mode: &str) -> (String, String, String, String, u32, u32) {
@@ -290,6 +307,36 @@ mod tests {
     fn ignores_hyprstate_baseline() {
         let rows = [row("handle-lid-switch", "hyprstate", "block")];
         assert!(!logind_has_real_idle_block(&rows));
+    }
+
+    #[test]
+    fn hold_suspend_sleep_block_counts_as_sleep_block() {
+        let rows = [
+            row("sleep", "hold-suspend", "block"),
+            row("sleep", "hypridle", "delay"),
+        ];
+        assert!(logind_has_sleep_block(&rows));
+    }
+
+    #[test]
+    fn idle_only_block_is_not_a_sleep_block() {
+        let rows = [row("idle", "logind-idle-control", "block")];
+        assert!(!logind_has_sleep_block(&rows));
+        assert!(logind_has_sleep_block(&[row(
+            "sleep:idle",
+            "T3 Code",
+            "block"
+        )]));
+    }
+
+    #[test]
+    fn sleep_delay_and_baseline_blocks_are_not_sleep_blocks() {
+        let rows = [
+            row("sleep", "Discord", "delay"),
+            row("sleep", "hypridle", "block"),
+            row("handle-lid-switch", "hyprstate", "block"),
+        ];
+        assert!(!logind_has_sleep_block(&rows));
     }
 
     #[test]

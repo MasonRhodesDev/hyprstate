@@ -8,9 +8,10 @@ use tracing::{debug, info, warn};
 use super::ctx::{Context, WaybarView};
 use super::event::Event;
 use super::sources::ReconcileTrigger;
+use super::sources::logind_blocks;
 use crate::dbus::powerd_client::PowerdProxy;
 use crate::paths;
-use crate::pure::fsm::edp_may_disable;
+use crate::pure::fsm::{WorldInputs, edp_may_disable, sleep_block_governs};
 use crate::pure::power::PowerProfile;
 use crate::pure::profiles::{
     EdpPolicy, GpuPref, apply_profile_args, dpms_on_args, edp_disable_args,
@@ -767,19 +768,190 @@ impl Effectors {
             .is_ok_and(|r| r.is_ok())
     }
 
-    pub async fn do_suspend(&self) -> bool {
-        info!("calling logind Suspend()");
-        if self.shadow {
-            info!("[shadow] would call Suspend(false)");
-            return true;
+    pub async fn do_suspend(&self, world: WorldInputs) -> SuspendOutcome {
+        suspend_unless_sleep_blocked(&self.manager, world, self.shadow).await
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspendOutcome {
+    Suspended,
+    SleepBlocked,
+    Failed,
+}
+
+pub(crate) async fn suspend_unless_sleep_blocked(
+    manager: &LogindManagerProxy<'_>,
+    mut world: WorldInputs,
+    shadow: bool,
+) -> SuspendOutcome {
+    if let Some(blocks) = logind_blocks(manager).await {
+        world.sleep_block = blocks.sleep;
+    }
+    if sleep_block_governs(&world) {
+        info!("logind sleep block held; not calling Suspend()");
+        return SuspendOutcome::SleepBlocked;
+    }
+    info!("calling logind Suspend()");
+    if shadow {
+        info!("[shadow] would call Suspend(false)");
+        return SuspendOutcome::Suspended;
+    }
+    match manager.suspend(false).await {
+        Ok(()) => SuspendOutcome::Suspended,
+        Err(e) => {
+            warn!("Suspend() failed: {e}");
+            SuspendOutcome::Failed
         }
-        match self.manager.suspend(false).await {
-            Ok(()) => true,
-            Err(e) => {
-                warn!("Suspend() failed: {e}");
-                false
-            }
+    }
+}
+
+#[cfg(test)]
+mod fake_logind {
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
+
+    use logind_session::LogindManagerProxy;
+    use zbus::connection::Builder;
+    use zbus::proxy::CacheProperties;
+
+    use super::{SuspendOutcome, suspend_unless_sleep_blocked};
+    use crate::pure::fsm::WorldInputs;
+
+    type Row = (String, String, String, String, u32, u32);
+
+    #[derive(Default)]
+    struct Logind {
+        inhibitors: Arc<Mutex<Vec<Row>>>,
+        suspends: Arc<Mutex<u32>>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.login1.Manager")]
+    impl Logind {
+        fn list_inhibitors(&self) -> Vec<Row> {
+            self.inhibitors.lock().unwrap().clone()
         }
+
+        fn suspend(&self, _interactive: bool) {
+            *self.suspends.lock().unwrap() += 1;
+        }
+    }
+
+    struct Harness {
+        inhibitors: Arc<Mutex<Vec<Row>>>,
+        suspends: Arc<Mutex<u32>>,
+        manager: LogindManagerProxy<'static>,
+        _server: zbus::Connection,
+    }
+
+    async fn harness() -> Harness {
+        let logind = Logind::default();
+        let inhibitors = logind.inhibitors.clone();
+        let suspends = logind.suspends.clone();
+        let (p0, p1) = UnixStream::pair().unwrap();
+        let (server, client) = futures_util::try_join!(
+            Builder::unix_stream(p0)
+                .server(zbus::Guid::generate())
+                .p2p()
+                .serve_at(logind_session::MANAGER_PATH, logind)
+                .build(),
+            Builder::unix_stream(p1).p2p().build(),
+        )
+        .unwrap();
+        let manager = LogindManagerProxy::builder(&client)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        Harness {
+            inhibitors,
+            suspends,
+            manager,
+            _server: server,
+        }
+    }
+
+    fn row(what: &str, who: &str, mode: &str, uid: u32) -> Row {
+        (
+            what.into(),
+            who.into(),
+            "why".into(),
+            mode.into(),
+            uid,
+            4242,
+        )
+    }
+
+    fn locked_idle_request() -> WorldInputs {
+        WorldInputs {
+            locked: true,
+            suspend_requested: true,
+            ext_mon_count: 2,
+            ..WorldInputs::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn same_user_sleep_block_skips_the_idle_suspend() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![
+            row("sleep", "hypridle", "delay", 1000),
+            row("sleep", "hold-suspend", "block", 1000),
+        ];
+        let got = suspend_unless_sleep_blocked(&h.manager, locked_idle_request(), false).await;
+        assert_eq!(got, SuspendOutcome::SleepBlocked);
+        assert_eq!(*h.suspends.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn released_sleep_block_lets_the_suspend_through() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
+        let blocked = suspend_unless_sleep_blocked(&h.manager, locked_idle_request(), false).await;
+        h.inhibitors.lock().unwrap().clear();
+        let released = suspend_unless_sleep_blocked(&h.manager, locked_idle_request(), false).await;
+        assert_eq!(blocked, SuspendOutcome::SleepBlocked);
+        assert_eq!(released, SuspendOutcome::Suspended);
+        assert_eq!(*h.suspends.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_live_list_wins_over_a_stale_context() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
+        let stale = WorldInputs {
+            sleep_block: false,
+            ..locked_idle_request()
+        };
+        let got = suspend_unless_sleep_blocked(&h.manager, stale, false).await;
+        assert_eq!(got, SuspendOutcome::SleepBlocked);
+        assert_eq!(*h.suspends.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn baseline_and_idle_only_blocks_do_not_hold_suspend() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![
+            row("sleep", "hypridle", "block", 1000),
+            row("handle-lid-switch", "hyprstate", "block", 1000),
+            row("idle", "logind-idle-control", "block", 1000),
+        ];
+        let got = suspend_unless_sleep_blocked(&h.manager, locked_idle_request(), false).await;
+        assert_eq!(got, SuspendOutcome::Suspended);
+        assert_eq!(*h.suspends.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn lid_suspend_is_not_gated_by_a_sleep_block() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
+        let lid = WorldInputs {
+            lid_closed: true,
+            ..WorldInputs::default()
+        };
+        let got = suspend_unless_sleep_blocked(&h.manager, lid, false).await;
+        assert_eq!(got, SuspendOutcome::Suspended);
+        assert_eq!(*h.suspends.lock().unwrap(), 1);
     }
 }
 

@@ -1,7 +1,7 @@
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, warn};
 
-use super::logind_real_inhibitor_active;
+use super::logind_blocks;
 use crate::daemon::event::{Event, ReconcileSnapshot};
 use crate::paths;
 use crate::sysio::{hyprctl, sysfs};
@@ -119,7 +119,7 @@ async fn gather(
     let monitors = hyprctl::monitors().await;
     let ext = hyprctl::ext_monitor_count_in(monitors.as_deref(), *ext_prev);
     *ext_prev = ext;
-    let logind_inh = logind_real_inhibitor_active(manager).await.unwrap_or(false);
+    let blocks = logind_blocks(manager).await.unwrap_or_default();
     let wayland_inh = hyprctl::wayland_idle_inhibited().await;
     let locked = match session {
         Some(s) => match s.locked_hint().await {
@@ -144,7 +144,8 @@ async fn gather(
         reasons: String::new(),
         lid_closed: lid,
         ext_mon_count: ext,
-        logind_inhibitor: logind_inh,
+        logind_inhibitor: blocks.claim,
+        sleep_block: blocks.sleep,
         wayland_inhibitor: wayland_inh,
         locked,
         on_ac,

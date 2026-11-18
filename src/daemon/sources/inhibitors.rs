@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 use zbus::Connection;
 use zbus::fdo::PropertiesProxy;
 
-use super::logind_real_inhibitor_active;
+use super::{LogindBlocks, logind_blocks};
 use crate::daemon::event::Event;
 use crate::paths;
 use crate::sysio::hyprctl;
@@ -17,7 +17,7 @@ pub async fn logind_inhibitor_watcher(
     tx: mpsc::Sender<Event>,
     conn: Connection,
     manager: LogindManagerProxy<'static>,
-    mut last: bool,
+    mut last: LogindBlocks,
 ) {
     loop {
         let stream = async {
@@ -50,22 +50,24 @@ pub async fn logind_inhibitor_watcher(
             if !touched {
                 continue;
             }
-            let Some(cur) = logind_real_inhibitor_active(&manager).await else {
+            let Some(cur) = logind_blocks(&manager).await else {
                 continue;
             };
-            if cur == last {
-                continue;
+            let mut events = Vec::new();
+            if cur.claim != last.claim {
+                events.push(Event::Inhibitor {
+                    wayland: false,
+                    active: cur.claim,
+                });
+            }
+            if cur.sleep != last.sleep {
+                events.push(Event::SleepBlock(cur.sleep));
             }
             last = cur;
-            if tx
-                .send(Event::Inhibitor {
-                    wayland: false,
-                    active: cur,
-                })
-                .await
-                .is_err()
-            {
-                return;
+            for ev in events {
+                if tx.send(ev).await.is_err() {
+                    return;
+                }
             }
         }
         warn!("logind PropertiesChanged stream ended; resubscribing");

@@ -9,6 +9,7 @@ pub enum Event {
     MonitorsChanged,
     ProfilesChanged,
     Inhibitor { wayland: bool, active: bool },
+    SleepBlock(bool),
     LockChanged(bool),
     AcChanged(bool),
     PowerAcSettled,
@@ -35,6 +36,7 @@ pub struct ReconcileSnapshot {
     pub lid_closed: bool,
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
+    pub sleep_block: bool,
     pub wayland_inhibitor: Option<bool>,
     pub locked: Option<bool>,
     pub on_ac: Option<bool>,
@@ -54,6 +56,8 @@ impl Event {
             Event::MonitorsChanged | Event::ProfilesChanged => EventKind::MonitorsChanged,
             Event::Inhibitor { active: true, .. } => EventKind::InhibitorOn,
             Event::Inhibitor { active: false, .. } => EventKind::InhibitorOff,
+            Event::SleepBlock(true) => EventKind::InhibitorOn,
+            Event::SleepBlock(false) => EventKind::InhibitorOff,
             Event::LockChanged(true) => EventKind::LockEngaged,
             Event::LockChanged(false) => EventKind::LockReleased,
             Event::AcChanged(true) => EventKind::AcPlugged,
@@ -88,6 +92,8 @@ impl Event {
             Event::KbdLevelChanged(_) => return "KbdLevelChanged",
             Event::KbdOverrideChanged(_) => return "KbdOverrideChanged",
             Event::KbdLedHotplug => return "KbdLedHotplug",
+            Event::SleepBlock(true) => return "SleepBlockOn",
+            Event::SleepBlock(false) => return "SleepBlockOff",
             _ => {}
         }
         match self.kind() {

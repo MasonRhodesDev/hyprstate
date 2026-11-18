@@ -18,6 +18,7 @@ pub struct Context {
     pub ext_mon_count: u32,
     pub logind_inhibitor: bool,
     pub wayland_inhibitor: bool,
+    pub sleep_block: bool,
     pub locked: bool,
     pub on_ac: bool,
 
@@ -103,6 +104,7 @@ impl Default for Context {
             ext_mon_count: 0,
             logind_inhibitor: false,
             wayland_inhibitor: false,
+            sleep_block: false,
             locked: false,
             on_ac: true,
             state: State::LidOpen,
@@ -172,6 +174,7 @@ impl Context {
             locked: self.locked,
             battery_low: self.low_battery && !self.on_ac_settled,
             lid_ac_hold: self.lid_ac == LidAcPolicy::Defer && self.on_ac,
+            sleep_block: self.sleep_block,
         }
     }
 }

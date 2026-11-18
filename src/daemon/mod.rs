@@ -280,9 +280,9 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
     } else {
         false
     };
-    ctx.logind_inhibitor = sources::logind_real_inhibitor_active(&manager)
-        .await
-        .unwrap_or(false);
+    let blocks = sources::logind_blocks(&manager).await.unwrap_or_default();
+    ctx.logind_inhibitor = blocks.claim;
+    ctx.sleep_block = blocks.sleep;
     ctx.wayland_inhibitor = hyprctl::wayland_idle_inhibited().await.unwrap_or(false);
     ctx.ext_mon_count = hyprctl::ext_monitor_count(0).await;
 
@@ -323,7 +323,7 @@ pub async fn run(shadow: bool) -> anyhow::Result<()> {
         tx.clone(),
         conn.clone(),
         manager.clone(),
-        ctx.logind_inhibitor,
+        blocks,
     ));
     tokio::spawn(sources::files::file_state_task(tx.clone(), tick_rx));
     tokio::spawn(sources::uevent::uevent_task(

@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::ctx::Context;
-use super::effectors::{Effectors, edp_must_be_on};
+use super::effectors::{Effectors, SuspendOutcome, edp_must_be_on};
 use super::event::{Event, ReconcileSnapshot};
 use super::gpu_drift::{gpu_drift_check, resolve_session_gpu_mode};
 use super::kbd_policy::kbd_policy_check;
@@ -139,21 +139,27 @@ async fn suspending_tail(ctx: &mut Context, fx: &Effectors) -> bool {
             return false;
         }
     }
-    if fx.do_suspend().await {
-        true
-    } else {
-        warn!("suspend refused - staying in COUNTDOWN to retry");
-        false
+    match fx.do_suspend(ctx.world()).await {
+        SuspendOutcome::Suspended => true,
+        SuspendOutcome::SleepBlocked => {
+            ctx.sleep_block = true;
+            false
+        }
+        SuspendOutcome::Failed => {
+            warn!("suspend refused - staying in COUNTDOWN to retry");
+            false
+        }
     }
 }
 
 fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
     info!(
-        "STATE: {} -> {} (event={label}, ext_mon={}, inhibitor={}, locked={}, on_ac={})",
+        "STATE: {} -> {} (event={label}, ext_mon={}, inhibitor={}, sleep_block={}, locked={}, on_ac={})",
         from.as_str(),
         to.as_str(),
         ctx.ext_mon_count,
         ctx.inhibitor(),
+        ctx.sleep_block,
         ctx.locked,
         ctx.on_ac,
     );
@@ -166,6 +172,7 @@ fn log_state_transition(ctx: &Context, from: State, to: State, label: &str) {
         cause = label,
         ext_mon = ctx.ext_mon_count,
         inhibitor = ctx.inhibitor(),
+        sleep_block = ctx.sleep_block,
         locked = ctx.locked,
         on_ac = ctx.on_ac,
         suspend_requested = ctx.suspend_requested,
@@ -336,6 +343,14 @@ async fn handle_reconcile_tick(
         ctx.logind_inhibitor = snap.logind_inhibitor;
         fsm_drift = true;
     }
+    if snap.sleep_block != ctx.sleep_block {
+        drift.push(format!(
+            "sleep_block {}->{}",
+            ctx.sleep_block, snap.sleep_block
+        ));
+        ctx.sleep_block = snap.sleep_block;
+        fsm_drift = true;
+    }
     if let Some(wayland) = snap.wayland_inhibitor
         && wayland != ctx.wayland_inhibitor
     {
@@ -446,10 +461,11 @@ pub async fn run(mut rx: mpsc::Receiver<Event>, mut ctx: Context, fx: Effectors)
     let initial = ctx.state;
     enter_state_span(&mut ctx, initial);
     info!(
-        "initial state: {} (ext_mon={}, inhibitor={}, locked={}, on_ac={})",
+        "initial state: {} (ext_mon={}, inhibitor={}, sleep_block={}, locked={}, on_ac={})",
         ctx.state.as_str(),
         ctx.ext_mon_count,
         ctx.inhibitor(),
+        ctx.sleep_block,
         ctx.locked,
         ctx.on_ac,
     );
@@ -626,6 +642,9 @@ async fn dispatch(ev: Event, ctx: &mut Context, fx: &Effectors, telem: &mut Tele
             } else {
                 ctx.logind_inhibitor = active;
             }
+        }
+        Event::SleepBlock(held) => {
+            ctx.sleep_block = held;
         }
         Event::LockChanged(locked) => {
             ctx.locked = locked;

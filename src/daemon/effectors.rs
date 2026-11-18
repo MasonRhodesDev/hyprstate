@@ -809,6 +809,7 @@ pub(crate) async fn suspend_unless_sleep_blocked(
 #[cfg(test)]
 mod fake_logind {
     use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use logind_session::LogindManagerProxy;
@@ -824,12 +825,16 @@ mod fake_logind {
     struct Logind {
         inhibitors: Arc<Mutex<Vec<Row>>>,
         suspends: Arc<Mutex<u32>>,
+        list_fails: Arc<AtomicBool>,
     }
 
     #[zbus::interface(name = "org.freedesktop.login1.Manager")]
     impl Logind {
-        fn list_inhibitors(&self) -> Vec<Row> {
-            self.inhibitors.lock().unwrap().clone()
+        fn list_inhibitors(&self) -> zbus::fdo::Result<Vec<Row>> {
+            if self.list_fails.load(Ordering::SeqCst) {
+                return Err(zbus::fdo::Error::Failed("unavailable".into()));
+            }
+            Ok(self.inhibitors.lock().unwrap().clone())
         }
 
         fn suspend(&self, _interactive: bool) {
@@ -840,6 +845,7 @@ mod fake_logind {
     struct Harness {
         inhibitors: Arc<Mutex<Vec<Row>>>,
         suspends: Arc<Mutex<u32>>,
+        list_fails: Arc<AtomicBool>,
         manager: LogindManagerProxy<'static>,
         _server: zbus::Connection,
     }
@@ -848,6 +854,7 @@ mod fake_logind {
         let logind = Logind::default();
         let inhibitors = logind.inhibitors.clone();
         let suspends = logind.suspends.clone();
+        let list_fails = logind.list_fails.clone();
         let (p0, p1) = UnixStream::pair().unwrap();
         let (server, client) = futures_util::try_join!(
             Builder::unix_stream(p0)
@@ -866,6 +873,7 @@ mod fake_logind {
         Harness {
             inhibitors,
             suspends,
+            list_fails,
             manager,
             _server: server,
         }
@@ -942,14 +950,43 @@ mod fake_logind {
     }
 
     #[tokio::test]
-    async fn lid_suspend_is_not_gated_by_a_sleep_block() {
+    async fn a_failed_list_keeps_the_last_known_block() {
         let h = harness().await;
-        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
-        let lid = WorldInputs {
+        h.list_fails.store(true, Ordering::SeqCst);
+        let known = WorldInputs {
+            sleep_block: true,
+            ..locked_idle_request()
+        };
+        let got = suspend_unless_sleep_blocked(&h.manager, known, false).await;
+        assert_eq!(got, SuspendOutcome::SleepBlocked);
+        assert_eq!(*h.suspends.lock().unwrap(), 0);
+    }
+
+    fn lid_closed() -> WorldInputs {
+        WorldInputs {
             lid_closed: true,
             ..WorldInputs::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn lid_suspend_is_gated_by_a_sleep_block() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
+        let got = suspend_unless_sleep_blocked(&h.manager, lid_closed(), false).await;
+        assert_eq!(got, SuspendOutcome::SleepBlocked);
+        assert_eq!(*h.suspends.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn low_battery_overrides_a_sleep_block_on_the_lid() {
+        let h = harness().await;
+        *h.inhibitors.lock().unwrap() = vec![row("sleep", "hold-suspend", "block", 1000)];
+        let low = WorldInputs {
+            battery_low: true,
+            ..lid_closed()
         };
-        let got = suspend_unless_sleep_blocked(&h.manager, lid, false).await;
+        let got = suspend_unless_sleep_blocked(&h.manager, low, false).await;
         assert_eq!(got, SuspendOutcome::Suspended);
         assert_eq!(*h.suspends.lock().unwrap(), 1);
     }

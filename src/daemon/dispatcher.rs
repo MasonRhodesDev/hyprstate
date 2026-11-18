@@ -204,6 +204,10 @@ async fn evaluate_fsms(
             if on_enter(new, Entry::Fresh, ctx, fx).await {
                 ctx.state = new;
                 true
+            } else if world_state(&ctx.world()) == State::Deferred {
+                log_state_transition(ctx, ctx.state, State::Deferred, label);
+                ctx.state = State::Deferred;
+                on_enter(State::Deferred, Entry::Fresh, ctx, fx).await
             } else {
                 fx.start_grace_timer(ctx, true);
                 false
@@ -225,7 +229,7 @@ async fn evaluate_fsms(
             from,
             ctx.state,
             if entered {
-                on_enter_effector_names(new, ctx)
+                on_enter_effector_names(ctx.state, ctx)
             } else {
                 vec!["request_lock", "start_grace_timer"]
             },

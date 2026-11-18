@@ -62,7 +62,7 @@ pub fn claim_governs(w: &WorldInputs) -> bool {
 }
 
 pub fn sleep_block_governs(w: &WorldInputs) -> bool {
-    w.suspend_requested && w.sleep_block && !w.battery_low
+    (w.suspend_requested || w.lid_closed) && w.sleep_block && !w.battery_low
 }
 
 pub fn world_state(w: &WorldInputs) -> State {
@@ -79,7 +79,7 @@ pub fn world_state(w: &WorldInputs) -> State {
     }
     if !w.lid_closed {
         State::LidOpen
-    } else if claim || w.lid_ac_hold {
+    } else if claim || w.lid_ac_hold || sleep_block_governs(w) {
         State::Deferred
     } else {
         State::Countdown
@@ -393,15 +393,57 @@ mod tests {
         assert_eq!(world_state(&w), State::Countdown);
     }
 
-    #[test]
-    fn sleep_block_leaves_the_lid_chain_alone() {
-        let w = WorldInputs {
+    fn lid_closed(sleep_block: bool) -> WorldInputs {
+        WorldInputs {
             lid_closed: true,
-            sleep_block: true,
+            sleep_block,
             ..WorldInputs::default()
+        }
+    }
+
+    #[test]
+    fn sleep_block_holds_a_closed_lid_until_released() {
+        drive(
+            State::LidOpen,
+            &[
+                (EventKind::LidClose, lid_closed(true), Some(State::Deferred)),
+                (
+                    EventKind::InhibitorOff,
+                    lid_closed(false),
+                    Some(State::Countdown),
+                ),
+                (
+                    EventKind::TimerExpired,
+                    lid_closed(false),
+                    Some(State::Suspending),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn sleep_block_yields_to_low_battery_on_the_lid_chain() {
+        let w = WorldInputs {
+            battery_low: true,
+            ..lid_closed(true)
         };
         assert!(!sleep_block_governs(&w));
         assert_eq!(world_state(&w), State::Countdown);
+    }
+
+    #[test]
+    fn sleep_block_leaves_docked_and_open_lids_alone() {
+        let docked = WorldInputs {
+            ext_mon_count: 1,
+            ..lid_closed(true)
+        };
+        assert_eq!(world_state(&docked), State::Docked);
+        let open = WorldInputs {
+            sleep_block: true,
+            ..WorldInputs::default()
+        };
+        assert!(!sleep_block_governs(&open));
+        assert_eq!(world_state(&open), State::LidOpen);
     }
 
     #[test]

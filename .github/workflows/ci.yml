@@ -11,4 +11,4 @@ concurrency:
 
 jobs:
   ci:
-    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rust-ci.yml@v1
+    uses: MasonRhodesDev/packaging-workflows/.github/workflows/rust-ci.yml@3d0c5630674f086918226d0140c51b97887c799f # v1

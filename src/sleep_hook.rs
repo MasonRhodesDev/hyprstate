@@ -26,7 +26,7 @@ impl HookLog {
     }
 
     fn line(&mut self, msg: &str) {
-        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let stamp = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S");
         let line = format!("[{stamp}] {msg}\n");
         match &mut self.file {
             Some(f) => {

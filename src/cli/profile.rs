@@ -217,7 +217,7 @@ pub fn run(action: &str, name: Option<&str>, save: &SaveOpts) -> i32 {
                 return 1;
             }
             let monitors = monitor_snapshot_all();
-            let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let date = jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
             let (text, warnings) =
                 match render_profile_lua(name, &date, &monitors, save.edp, save.gpu, save.priority)
                 {
